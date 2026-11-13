@@ -5,6 +5,8 @@
  * and schedules seamless crossfaded playback through the VHF Radio DSP chain.
  */
 
+import bundledVoicePackManifest from './voicePackManifest.json';
+
 export interface VoicePackSpeakerManifest {
   id: string;
   role: 'TOWER' | 'PILOT';
@@ -368,27 +370,30 @@ export const TOWER_PACK_ID_MAP: Record<string, string> = {
 };
 
 export class OfflineVoicePackPlayer {
-  private manifest: VoicePackManifest | null = null;
+  private manifest: VoicePackManifest | null =
+    (bundledVoicePackManifest as unknown as VoicePackManifest) || null;
   private manifestPromise: Promise<VoicePackManifest | null> | null = null;
   private bufferCache = new Map<string, AudioBuffer>();
   private bufferPromises = new Map<string, Promise<AudioBuffer | null>>();
   private activeNodes: AudioBufferSourceNode[] = [];
 
   public async loadManifest(): Promise<VoicePackManifest | null> {
-    if (this.manifest) return this.manifest;
+    if (this.manifest && Object.keys(this.manifest.speakers).length >= 11) {
+      return this.manifest;
+    }
     if (this.manifestPromise) return this.manifestPromise;
 
-    if (typeof fetch !== 'function') return null;
+    if (typeof fetch !== 'function') return this.manifest;
 
     this.manifestPromise = fetch('/voice-pack/manifest.json')
       .then(async res => {
-        if (!res.ok) return null;
+        if (!res.ok) return this.manifest;
         const data = (await res.json()) as VoicePackManifest;
-        if (!data?.speakers) return null;
+        if (!data?.speakers) return this.manifest;
         this.manifest = data;
         return data;
       })
-      .catch(() => null);
+      .catch(() => this.manifest);
 
     return this.manifestPromise;
   }
