@@ -75,14 +75,17 @@ export const RadarCanvas: React.FC = () => {
   const selectAircraft = useSimulationStore(state => state.selectAircraft);
   const setHeading = useSimulationStore(state => state.setHeading);
   const directTo = useSimulationStore(state => state.directTo);
+  const appendWaypointRoute = useSimulationStore(state => state.appendWaypointRoute);
+  const vectorToIntercept = useSimulationStore(state => state.vectorToIntercept);
   const repositionTag = useSimulationStore(state => state.repositionTag);
 
   // Radar Viewport Transformation State
   const [rangeNM, setRangeNM] = useState<number>(35);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Active radar tool
+  // Active radar tool & route chain mode
   const [activeTool, setActiveTool] = useState<RadarTool>('SELECT');
+  const [chainRouteMode, setChainRouteMode] = useState<boolean>(false);
 
   // Interactive mouse control state
   const [isPanning, setIsPanning] = useState<boolean>(false);
@@ -92,6 +95,10 @@ export const RadarCanvas: React.FC = () => {
   // Interactive Heading Vector Drag state
   const [isDraggingHeading, setIsDraggingHeading] = useState<boolean>(false);
   const [previewHeading, setPreviewHeading] = useState<number | null>(null);
+
+  // Hover waypoint / ILS gate preview in DIRECT_TO mode
+  const [hoveredWaypointName, setHoveredWaypointName] = useState<string | null>(null);
+  const [hoveredIlsGate, setHoveredIlsGate] = useState<boolean>(false);
 
   // Measuring ruler state
   const [measuringRuler, setMeasuringRuler] = useState<{
@@ -612,28 +619,69 @@ export const RadarCanvas: React.FC = () => {
 
         ctx.restore();
 
-        // 7b-4. Projected / Assigned Future Route Ahead - "مسیر مشخص شده" with Smooth Gradient
+        // 7b-4. Projected / Assigned Multi-Leg Route & Curved Vector Trajectory
         ctx.save();
         const currentAltColor = getAltitudeColor(ac.altitude);
         const targetAltColor = getAltitudeColor(ac.targetAltitude);
 
-        // Compute waypoints along cleared route
-        const routeSteps: Array<{ x: number; y: number; label: string }> = [];
+        // Highlight active holding racetrack if aircraft is holding
+        if (ac.status === 'Holding' && ac.holdingWaypoint) {
+          const stack = holdingStacks.find(s => s.name === ac.holdingWaypoint);
+          if (stack) {
+            const fixPos = worldToScreen(stack.x, stack.y);
+            const hRad = (stack.inboundCourse * Math.PI) / 180;
+            const turnSign = stack.turnDirection === 'Right' ? 1 : -1;
+            const perpRad = hRad + (turnSign * Math.PI) / 2;
+            const outPos = worldToScreen(stack.x - 3.5 * Math.sin(hRad), stack.y - 3.5 * Math.cos(hRad));
+            const abPos = worldToScreen(stack.x + 1.6 * Math.sin(perpRad), stack.y + 1.6 * Math.cos(perpRad));
+            const outAbPos = worldToScreen(
+              stack.x - 3.5 * Math.sin(hRad) + 1.6 * Math.sin(perpRad),
+              stack.y - 3.5 * Math.cos(hRad) + 1.6 * Math.cos(perpRad)
+            );
+            ctx.strokeStyle = '#00e5ff';
+            ctx.lineWidth = 2.0;
+            ctx.setLineDash([5, 4]);
+            ctx.beginPath();
+            ctx.moveTo(fixPos.sx, fixPos.sy);
+            ctx.lineTo(outPos.sx, outPos.sy);
+            ctx.lineTo(outAbPos.sx, outAbPos.sy);
+            ctx.lineTo(abPos.sx, abPos.sy);
+            ctx.closePath();
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
 
-        if (ac.assignedWaypoint) {
-          const wp = airport.waypoints.find(w => w.name === ac.assignedWaypoint);
+        // Compute ordered waypoints along cleared route: assignedWaypoint + routeQueue
+        const routeSteps: Array<{ x: number; y: number; label: string; isDestination?: boolean }> = [];
+        const queuedNames = [
+          ...(ac.assignedWaypoint ? [ac.assignedWaypoint] : []),
+          ...(ac.routeQueue || []),
+        ];
+
+        for (let qIdx = 0; qIdx < queuedNames.length; qIdx++) {
+          const wpName = queuedNames[qIdx];
+          const wp = airport.waypoints.find(w => w.name === wpName);
           if (wp) {
-            routeSteps.push({ x: wp.position.x, y: wp.position.y, label: `FIX: ${wp.name}` });
+            routeSteps.push({
+              x: wp.position.x,
+              y: wp.position.y,
+              label: qIdx === 0 ? `FIX ${wp.name}` : `LEG ${qIdx + 1}: ${wp.name}`,
+            });
           }
         }
 
         const rwy = airport.runways.find(r => r.id === ac.assignedRunway);
-        if (rwy && (ac.status === 'Inbound' || ac.status === 'FinalApproach' || ac.ilsArmed || ac.ilsLocalizerCaptured)) {
-          // If arrival, trace through final approach corridor to runway threshold
+        if (
+          rwy &&
+          (routeSteps.length > 0 || ac.ilsArmed || ac.ilsLocalizerCaptured || ac.status === 'FinalApproach') &&
+          ac.status !== 'Departing'
+        ) {
           routeSteps.push({
             x: rwy.threshold.x,
             y: rwy.threshold.y,
-            label: `DEST: ${ac.destination} [RWY ${rwy.id}]`,
+            label: `DEST ${ac.destination} [RWY ${rwy.id}]`,
+            isDestination: true,
           });
         }
 
@@ -641,12 +689,13 @@ export const RadarCanvas: React.FC = () => {
           ctx.lineWidth = 2.0;
           ctx.setLineDash([6, 4]);
 
+          let prevWorld = { x: displayX, y: displayY };
           let currPos = pos;
           for (let sIdx = 0; sIdx < routeSteps.length; sIdx++) {
             const step = routeSteps[sIdx];
             const nextPos = worldToScreen(step.x, step.y);
+            const legDistNM = calculateDistance(prevWorld.x, prevWorld.y, step.x, step.y);
 
-            // Smooth linear gradient from current altitude color to target altitude color
             const routeGrad = ctx.createLinearGradient(currPos.sx, currPos.sy, nextPos.sx, nextPos.sy);
             routeGrad.addColorStop(0, currentAltColor);
             routeGrad.addColorStop(1, targetAltColor);
@@ -657,21 +706,35 @@ export const RadarCanvas: React.FC = () => {
             ctx.lineTo(nextPos.sx, nextPos.sy);
             ctx.stroke();
 
-            // Waypoint / Destination fix diamond
-            ctx.fillStyle = targetAltColor;
+            // Mid-leg NM distance badge for long legs
+            if (legDistNM >= 3.0) {
+              const midX = (currPos.sx + nextPos.sx) / 2;
+              const midY = (currPos.sy + nextPos.sy) / 2;
+              ctx.fillStyle = 'rgba(3, 18, 12, 0.85)';
+              ctx.font = '9px "IBM Plex Mono", monospace';
+              const distTxt = `${legDistNM.toFixed(1)}NM`;
+              const dw = ctx.measureText(distTxt).width + 6;
+              ctx.fillRect(midX - dw / 2, midY - 7, dw, 13);
+              ctx.fillStyle = '#9ce8be';
+              ctx.textAlign = 'center';
+              ctx.fillText(distTxt, midX, midY + 3);
+              ctx.textAlign = 'start';
+            }
+
+            // Waypoint / Destination fix marker
+            ctx.fillStyle = step.isDestination ? '#00e5ff' : targetAltColor;
             ctx.strokeStyle = '#05140b';
-            ctx.lineWidth = 1;
+            ctx.lineWidth = 1.2;
             ctx.beginPath();
-            ctx.arc(nextPos.sx, nextPos.sy, 4, 0, Math.PI * 2);
+            ctx.arc(nextPos.sx, nextPos.sy, step.isDestination ? 4.5 : 4, 0, Math.PI * 2);
             ctx.fill();
             ctx.stroke();
 
-            // Destination / Fix badge
             const stepLabel = step.label;
             ctx.font = 'bold 9px "IBM Plex Mono", monospace';
             const sw = ctx.measureText(stepLabel).width + 10;
             ctx.fillStyle = 'rgba(3, 20, 14, 0.92)';
-            ctx.strokeStyle = targetAltColor;
+            ctx.strokeStyle = step.isDestination ? '#00e5ff' : targetAltColor;
             ctx.lineWidth = 1.2;
             ctx.fillRect(nextPos.sx + 7, nextPos.sy - 8, sw, 16);
             ctx.strokeRect(nextPos.sx + 7, nextPos.sy - 8, sw, 16);
@@ -680,17 +743,40 @@ export const RadarCanvas: React.FC = () => {
             ctx.fillText(stepLabel, nextPos.sx + 12, nextPos.sy + 4);
 
             currPos = nextPos;
+            prevWorld = { x: step.x, y: step.y };
           }
           ctx.setLineDash([]);
         } else {
-          // Heading vector projection for 15 NM with smooth gradient
-          const projDistNM = 15.0;
-          const rad = (ac.targetHeading * Math.PI) / 180;
-          const projWx = displayX + projDistNM * Math.sin(rad);
-          const projWy = displayY + projDistNM * Math.cos(rad);
-          const projPos = worldToScreen(projWx, projWy);
+          // Curved Turn-to-Heading Arc + 15 NM projected path with 5 NM ticks
+          const pts: Array<{ x: number; y: number }> = [{ x: displayX, y: displayY }];
+          let simX = displayX;
+          let simY = displayY;
+          let simHdg = ac.heading;
+          const speedNmPerSec = Math.max(120, ac.groundSpeed || ac.indicatedAirspeed) / 3600;
+          const turnRate = 3.0; // deg/s
 
-          const headingGrad = ctx.createLinearGradient(pos.sx, pos.sy, projPos.sx, projPos.sy);
+          // Trace turn arc over 1s steps until aligned with targetHeading
+          for (let t = 0; t < 65; t++) {
+            const diff = ((ac.targetHeading - simHdg + 540) % 360) - 180;
+            if (Math.abs(diff) <= turnRate) {
+              simHdg = ac.targetHeading;
+              break;
+            }
+            simHdg = normalizeHeading(simHdg + Math.sign(diff) * turnRate);
+            const r = (simHdg * Math.PI) / 180;
+            simX += speedNmPerSec * Math.sin(r);
+            simY += speedNmPerSec * Math.cos(r);
+            if (t % 2 === 0) pts.push({ x: simX, y: simY });
+          }
+
+          const endRad = (ac.targetHeading * Math.PI) / 180;
+          const projEndWx = simX + 14.0 * Math.sin(endRad);
+          const projEndWy = simY + 14.0 * Math.cos(endRad);
+          pts.push({ x: projEndWx, y: projEndWy });
+
+          const startScreen = worldToScreen(pts[0].x, pts[0].y);
+          const endScreen = worldToScreen(projEndWx, projEndWy);
+          const headingGrad = ctx.createLinearGradient(startScreen.sx, startScreen.sy, endScreen.sx, endScreen.sy);
           headingGrad.addColorStop(0, currentAltColor);
           headingGrad.addColorStop(1, targetAltColor);
 
@@ -698,10 +784,99 @@ export const RadarCanvas: React.FC = () => {
           ctx.lineWidth = 2.0;
           ctx.setLineDash([7, 4]);
           ctx.beginPath();
-          ctx.moveTo(pos.sx, pos.sy);
-          ctx.lineTo(projPos.sx, projPos.sy);
+          ctx.moveTo(startScreen.sx, startScreen.sy);
+          for (let p = 1; p < pts.length; p++) {
+            const sp = worldToScreen(pts[p].x, pts[p].y);
+            ctx.lineTo(sp.sx, sp.sy);
+          }
           ctx.stroke();
           ctx.setLineDash([]);
+
+          // 5 NM and 10 NM markers along final vector
+          for (const d of [5, 10]) {
+            const mx = simX + d * Math.sin(endRad);
+            const my = simY + d * Math.cos(endRad);
+            const mp = worldToScreen(mx, my);
+            ctx.fillStyle = targetAltColor;
+            ctx.beginPath();
+            ctx.arc(mp.sx, mp.sy, 2.2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        // Direct-To Interactive Hover Route Preview
+        if (activeTool === 'DIRECT_TO' && (hoveredWaypointName || hoveredIlsGate)) {
+          const chainOriginWp =
+            chainRouteMode && routeSteps.length > 0 && !routeSteps[routeSteps.length - 1].isDestination
+              ? routeSteps[routeSteps.length - 1]
+              : { x: displayX, y: displayY };
+
+          let targetPoint: { x: number; y: number; name: string } | null = null;
+          if (hoveredWaypointName) {
+            const wp = airport.waypoints.find(w => w.name === hoveredWaypointName);
+            if (wp) targetPoint = { x: wp.position.x, y: wp.position.y, name: wp.name };
+          } else if (hoveredIlsGate && rwy) {
+            const radRwy = (rwy.heading * Math.PI) / 180;
+            targetPoint = {
+              x: rwy.threshold.x - 11.0 * Math.sin(radRwy),
+              y: rwy.threshold.y - 11.0 * Math.cos(radRwy),
+              name: `ILS ${rwy.id} GATE`,
+            };
+          }
+
+          if (targetPoint) {
+            const pFrom = worldToScreen(chainOriginWp.x, chainOriginWp.y);
+            const pTo = worldToScreen(targetPoint.x, targetPoint.y);
+            const distNM = calculateDistance(chainOriginWp.x, chainOriginWp.y, targetPoint.x, targetPoint.y);
+            const brg = Math.round(calculateBearing(chainOriginWp.x, chainOriginWp.y, targetPoint.x, targetPoint.y))
+              .toString()
+              .padStart(3, '0');
+            const eteMin = (distNM / Math.max(120, ac.groundSpeed || 200)) * 60;
+
+            ctx.strokeStyle = chainRouteMode ? '#ffd166' : '#00ff66';
+            ctx.lineWidth = 2.0;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(pFrom.sx, pFrom.sy);
+            ctx.lineTo(pTo.sx, pTo.sy);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.strokeStyle = chainRouteMode ? '#ffd166' : '#00ff66';
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.arc(pTo.sx, pTo.sy, 11, 0, Math.PI * 2);
+            ctx.stroke();
+
+            const previewLabel = `${chainRouteMode ? '+LEG ' : 'DIR '}${targetPoint.name} · ${brg}° · ${distNM.toFixed(1)}NM (${eteMin.toFixed(1)}m)`;
+            ctx.font = 'bold 9px "IBM Plex Mono", monospace';
+            const pw = ctx.measureText(previewLabel).width + 10;
+            ctx.fillStyle = 'rgba(4, 24, 15, 0.95)';
+            ctx.strokeStyle = chainRouteMode ? '#ffd166' : '#00ff66';
+            ctx.fillRect(pTo.sx - pw / 2, pTo.sy - 26, pw, 16);
+            ctx.strokeRect(pTo.sx - pw / 2, pTo.sy - 26, pw, 16);
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.fillText(previewLabel, pTo.sx, pTo.sy - 15);
+            ctx.textAlign = 'start';
+          }
+        }
+
+        // Active Arrival Runway ILS Intercept Gate Marker in DIRECT_TO mode
+        if (activeTool === 'DIRECT_TO' && rwy && ac.status !== 'Departing') {
+          const radRwy = (rwy.heading * Math.PI) / 180;
+          const gx = rwy.threshold.x - 11.0 * Math.sin(radRwy);
+          const gy = rwy.threshold.y - 11.0 * Math.cos(radRwy);
+          const gp = worldToScreen(gx, gy);
+
+          ctx.strokeStyle = hoveredIlsGate ? '#00ff66' : '#00e5ff';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(gp.sx, gp.sy, 6, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = '#00e5ff';
+          ctx.font = 'bold 9px "IBM Plex Mono", monospace';
+          ctx.fillText(`ILS GATE ${rwy.id}`, gp.sx + 9, gp.sy + 3);
         }
 
         ctx.restore();
@@ -832,15 +1007,59 @@ export const RadarCanvas: React.FC = () => {
         ctx.setLineDash([]);
       }
 
-      // 7e. Interactive Heading Vector Handle (Part 4.1)
+      // 7e. Interactive Heading Vector Handle with Curved Turn Arc & Live STCA Separation Lookahead
       if (isSelected && (activeTool === 'HEADING_VECTOR' || isDraggingHeading)) {
-        const handleRadiusPx = 42;
+        const handleRadiusPx = 44;
         const currentHdg = previewHeading !== null ? previewHeading : ac.targetHeading;
         const currentHdgRad = (currentHdg * Math.PI) / 180;
+        const turnDelta = Math.round(((currentHdg - ac.heading + 540) % 360) - 180);
+
+        // Simulate curved trajectory & 90s STCA separation check along proposed heading
+        const turnPts: Array<{ x: number; y: number }> = [{ x: displayX, y: displayY }];
+        let vx = displayX;
+        let vy = displayY;
+        let vHdg = ac.heading;
+        const spdNmSec = Math.max(120, ac.groundSpeed || ac.indicatedAirspeed) / 3600;
+        let minSepNM = Infinity;
+        let conflictPeerCallsign: string | null = null;
+
+        for (let t = 1; t <= 90; t++) {
+          const d = ((currentHdg - vHdg + 540) % 360) - 180;
+          if (Math.abs(d) <= 3.0) {
+            vHdg = currentHdg;
+          } else {
+            vHdg = normalizeHeading(vHdg + Math.sign(d) * 3.0);
+          }
+          const r = (vHdg * Math.PI) / 180;
+          vx += spdNmSec * Math.sin(r);
+          vy += spdNmSec * Math.cos(r);
+          if (t % 3 === 0) turnPts.push({ x: vx, y: vy });
+
+          if (isDraggingHeading) {
+            for (const other of aircraft) {
+              if (other.id === ac.id || other.status === 'Landed') continue;
+              if (Math.abs(other.altitude - ac.targetAltitude) > 1000 && Math.abs(other.altitude - ac.altitude) > 1000) {
+                continue;
+              }
+              const oSpdNmSec = (other.groundSpeed || other.indicatedAirspeed) / 3600;
+              const oRad = (other.heading * Math.PI) / 180;
+              const ox = other.x + oSpdNmSec * t * Math.sin(oRad);
+              const oy = other.y + oSpdNmSec * t * Math.cos(oRad);
+              const sep = Math.hypot(vx - ox, vy - oy);
+              if (sep < minSepNM) {
+                minSepNM = sep;
+                if (sep < 3.5) conflictPeerCallsign = other.callsign;
+              }
+            }
+          }
+        }
+
+        const hasVectorConflict = minSepNM < 3.5;
+        const vectorColor = hasVectorConflict ? '#ff4d4d' : '#00e5ff';
 
         // Outer control circle
-        ctx.strokeStyle = 'rgba(0, 229, 255, 0.45)';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = hasVectorConflict ? 'rgba(255, 77, 77, 0.5)' : 'rgba(0, 229, 255, 0.45)';
+        ctx.lineWidth = 1.2;
         ctx.setLineDash([2, 4]);
         ctx.beginPath();
         ctx.arc(pos.sx, pos.sy, handleRadiusPx, 0, Math.PI * 2);
@@ -851,7 +1070,7 @@ export const RadarCanvas: React.FC = () => {
         const handleX = pos.sx + handleRadiusPx * Math.sin(currentHdgRad);
         const handleY = pos.sy - handleRadiusPx * Math.cos(currentHdgRad);
 
-        ctx.fillStyle = '#00e5ff';
+        ctx.fillStyle = vectorColor;
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -859,31 +1078,39 @@ export const RadarCanvas: React.FC = () => {
         ctx.fill();
         ctx.stroke();
 
-        // Proposed Turn Arc & Future Trajectory
-        const turnRad = (ac.heading * Math.PI) / 180;
-        const projLengthNM = 12.0;
-        const projEndWx = displayX + projLengthNM * Math.sin(currentHdgRad);
-        const projEndWy = displayY + projLengthNM * Math.cos(currentHdgRad);
+        // Proposed Curved Turn Arc & 12 NM Straight Vector
+        const projEndWx = vx + 10.0 * Math.sin(currentHdgRad);
+        const projEndWy = vy + 10.0 * Math.cos(currentHdgRad);
         const projEnd = worldToScreen(projEndWx, projEndWy);
 
-        ctx.strokeStyle = '#00e5ff';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = vectorColor;
+        ctx.lineWidth = 1.8;
         ctx.setLineDash([6, 4]);
         ctx.beginPath();
         ctx.moveTo(pos.sx, pos.sy);
+        for (let p = 1; p < turnPts.length; p++) {
+          const sp = worldToScreen(turnPts[p].x, turnPts[p].y);
+          ctx.lineTo(sp.sx, sp.sy);
+        }
         ctx.lineTo(projEnd.sx, projEnd.sy);
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Proposed heading badge
-        ctx.fillStyle = 'rgba(0, 30, 20, 0.9)';
-        ctx.strokeStyle = '#00e5ff';
-        ctx.lineWidth = 1;
-        ctx.fillRect(handleX + 8, handleY - 12, 60, 20);
-        ctx.strokeRect(handleX + 8, handleY - 12, 60, 20);
-        ctx.fillStyle = '#00e5ff';
+        // Proposed heading + delta + STCA conflict badge
+        const deltaStr = `${turnDelta >= 0 ? 'R' : 'L'}${Math.abs(turnDelta)}°`;
+        const hdgBadgeText = hasVectorConflict
+          ? `HDG ${Math.round(currentHdg).toString().padStart(3, '0')}° · STCA ${minSepNM.toFixed(1)}NM (${conflictPeerCallsign})`
+          : `HDG ${Math.round(currentHdg).toString().padStart(3, '0')}° (${deltaStr})`;
         ctx.font = 'bold 10px "IBM Plex Mono", monospace';
-        ctx.fillText(`HDG ${Math.round(currentHdg).toString().padStart(3, '0')}°`, handleX + 12, handleY + 2);
+        const bw = ctx.measureText(hdgBadgeText).width + 12;
+
+        ctx.fillStyle = hasVectorConflict ? 'rgba(42, 10, 12, 0.94)' : 'rgba(0, 26, 18, 0.92)';
+        ctx.strokeStyle = vectorColor;
+        ctx.lineWidth = 1.2;
+        ctx.fillRect(handleX + 8, handleY - 12, bw, 20);
+        ctx.strokeRect(handleX + 8, handleY - 12, bw, 20);
+        ctx.fillStyle = vectorColor;
+        ctx.fillText(hdgBadgeText, handleX + 14, handleY + 2);
       }
 
       // 7f. Structured 3/4-Line ICAO Data Block (Part 5 & Route Details)
@@ -1028,6 +1255,9 @@ export const RadarCanvas: React.FC = () => {
     worldToScreen,
     trackMap,
     activeTransmission,
+    hoveredWaypointName,
+    hoveredIlsGate,
+    chainRouteMode,
   ]);
 
   // Mouse Interaction Handlers
@@ -1050,32 +1280,60 @@ export const RadarCanvas: React.FC = () => {
     }
 
     if (e.button === 0) {
-      // 1. Check if clicking on the heading control handle around the selected aircraft
+      // 1. Check Direct-To Waypoint or ILS Gate click FIRST when DIRECT_TO tool is active
+      if (selectedAircraftId && activeTool === 'DIRECT_TO') {
+        const selAc = aircraft.find(a => a.id === selectedAircraftId);
+        if (selAc) {
+          for (const wp of airport.waypoints) {
+            const wpPos = worldToScreen(wp.position.x, wp.position.y);
+            if (Math.hypot(sx - wpPos.sx, sy - wpPos.sy) <= 18) {
+              if (e.shiftKey || chainRouteMode) {
+                appendWaypointRoute(selAc.id, wp.name);
+              } else {
+                directTo(selAc.id, wp.name);
+              }
+              return;
+            }
+          }
+
+          // Check Active Arrival Runway ILS Intercept Gate (~11 NM back)
+          const arrRwy = airport.runways.find(r => r.id === (selAc.assignedRunway || activeLandingRunwayId));
+          if (arrRwy && selAc.status !== 'Departing') {
+            const rRad = (arrRwy.heading * Math.PI) / 180;
+            const gatePos = worldToScreen(
+              arrRwy.threshold.x - 11.0 * Math.sin(rRad),
+              arrRwy.threshold.y - 11.0 * Math.cos(rRad)
+            );
+            if (Math.hypot(sx - gatePos.sx, sy - gatePos.sy) <= 18) {
+              vectorToIntercept(selAc.id, arrRwy.id);
+              return;
+            }
+          }
+        }
+      }
+
+      // 2. Check if initiating Heading Vector Drag around selected aircraft (or anywhere in HEADING_VECTOR mode)
       if (selectedAircraftId) {
         const selAc = aircraft.find(a => a.id === selectedAircraftId);
         if (selAc) {
           const blipPos = worldToScreen(selAc.x, selAc.y);
           const distToBlip = Math.hypot(sx - blipPos.sx, sy - blipPos.sy);
 
-          // If clicking near the heading handle ring (~30px - 55px radius) or tool is HEADING_VECTOR
-          if ((activeTool === 'HEADING_VECTOR' && distToBlip <= 60) || (distToBlip >= 28 && distToBlip <= 55)) {
+          // Check if user clicked directly on another aircraft blip to switch selection
+          const clickedOtherAc = aircraft.some(
+            other =>
+              other.id !== selAc.id &&
+              Math.hypot(sx - worldToScreen(other.x, other.y).sx, sy - worldToScreen(other.x, other.y).sy) <= 15
+          );
+
+          if (
+            (!clickedOtherAc && activeTool === 'HEADING_VECTOR') ||
+            (distToBlip >= 24 && distToBlip <= 60) ||
+            (e.altKey && !clickedOtherAc)
+          ) {
             setIsDraggingHeading(true);
             const hdg = calculateBearing(blipPos.sx, blipPos.sy, sx, sy);
             setPreviewHeading(normalizeHeading(Math.round(hdg)));
-            return;
-          }
-        }
-      }
-
-      // 2. Check if clicking a waypoint in DIRECT_TO mode
-      if (selectedAircraftId && activeTool === 'DIRECT_TO') {
-        for (const wp of airport.waypoints) {
-          const wpPos = worldToScreen(wp.position.x, wp.position.y);
-          if (Math.hypot(sx - wpPos.sx, sy - wpPos.sy) <= 16) {
-            const selAc = aircraft.find(a => a.id === selectedAircraftId);
-            if (selAc) {
-              directTo(selAc.id, wp.name);
-            }
             return;
           }
         }
@@ -1088,7 +1346,7 @@ export const RadarCanvas: React.FC = () => {
         const tagX = blipPos.sx + tagOff.x;
         const tagY = blipPos.sy + tagOff.y;
 
-        if (sx >= tagX && sx <= tagX + 96 && sy >= tagY - 10 && sy <= tagY + 28) {
+        if (sx >= tagX && sx <= tagX + 105 && sy >= tagY - 10 && sy <= tagY + 34) {
           selectAircraft(ac.id);
           setDraggingTagId(ac.id);
           return;
@@ -1120,6 +1378,36 @@ export const RadarCanvas: React.FC = () => {
     const { wx, wy } = screenToWorld(sx, sy);
 
     setCursorWorldPos({ x: wx, y: wy });
+
+    // Update hover previews in DIRECT_TO mode
+    if (activeTool === 'DIRECT_TO' && selectedAircraft) {
+      let foundWp: string | null = null;
+      for (const wp of airport.waypoints) {
+        const wpPos = worldToScreen(wp.position.x, wp.position.y);
+        if (Math.hypot(sx - wpPos.sx, sy - wpPos.sy) <= 18) {
+          foundWp = wp.name;
+          break;
+        }
+      }
+      setHoveredWaypointName(foundWp);
+
+      let foundGate = false;
+      const arrRwy = airport.runways.find(
+        r => r.id === (selectedAircraft.assignedRunway || activeLandingRunwayId)
+      );
+      if (!foundWp && arrRwy && selectedAircraft.status !== 'Departing') {
+        const rRad = (arrRwy.heading * Math.PI) / 180;
+        const gatePos = worldToScreen(
+          arrRwy.threshold.x - 11.0 * Math.sin(rRad),
+          arrRwy.threshold.y - 11.0 * Math.cos(rRad)
+        );
+        foundGate = Math.hypot(sx - gatePos.sx, sy - gatePos.sy) <= 18;
+      }
+      setHoveredIlsGate(foundGate);
+    } else if (hoveredWaypointName || hoveredIlsGate) {
+      setHoveredWaypointName(null);
+      setHoveredIlsGate(false);
+    }
 
     // Update measuring ruler
     if (measuringRuler) {
@@ -1244,10 +1532,25 @@ export const RadarCanvas: React.FC = () => {
               ? 'bg-[#1b442d] text-[#00ff66] border border-[#00ff66]/50'
               : 'hover:bg-[#12281b] text-[#5da87d]'
           }`}
-          title="Direct-To Fix [D]"
+          title="Direct-To Fix [D] (Shift+Click to chain route)"
         >
           <Navigation className="w-3.5 h-3.5" />
         </button>
+
+        {/* Chain multi-leg route toggle when in DIRECT_TO mode */}
+        {activeTool === 'DIRECT_TO' && (
+          <button
+            onClick={() => setChainRouteMode(prev => !prev)}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors ${
+              chainRouteMode
+                ? 'bg-[#362c0b] text-[#ffd166] border-[#ffd166]'
+                : 'bg-[#0a1d13] text-[#7ccfb0] border-[#1c4830] hover:bg-[#123020]'
+            }`}
+            title="Append waypoints into multi-leg route"
+          >
+            +LEG
+          </button>
+        )}
 
         {/* Measure tool */}
         <button
@@ -1336,7 +1639,12 @@ export const RadarCanvas: React.FC = () => {
             <span>ALT: <b style={{ color: getAltitudeColor(selectedAircraft.altitude) }}>{Math.round(selectedAircraft.altitude).toLocaleString()}ft</b></span>
             <span>CLRD: <b style={{ color: getAltitudeColor(selectedAircraft.targetAltitude) }}>{selectedAircraft.targetAltitude.toLocaleString()}ft</b></span>
             {selectedAircraft.assignedWaypoint && (
-              <span>DIRECT: <b className="text-[#ffd166]">{selectedAircraft.assignedWaypoint}</b></span>
+              <span>
+                {selectedAircraft.status === 'Holding' ? 'HOLD: ' : 'ROUTE: '}
+                <b className="text-[#ffd166]">
+                  {[selectedAircraft.assignedWaypoint, ...(selectedAircraft.routeQueue || [])].join(' ➔ ')}
+                </b>
+              </span>
             )}
           </div>
         </div>
@@ -1365,7 +1673,9 @@ export const RadarCanvas: React.FC = () => {
         <div className="hidden md:flex items-center gap-2 text-[#3f7055]">
           <span>[L-Click] Select / Tag Drag</span>
           <span>·</span>
-          <span>[H-Drag] Heading Vector</span>
+          <span>[H / Alt-Drag] Vector</span>
+          <span>·</span>
+          <span>[D / Shift-Click] Route</span>
           <span>·</span>
           <span>[R-Drag] Measure</span>
         </div>

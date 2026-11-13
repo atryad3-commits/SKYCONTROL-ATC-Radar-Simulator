@@ -20,6 +20,16 @@ import {
   evaluateMissionProgress,
   getMissionById,
 } from '../src/engine/missions';
+import {
+  calculateBearing,
+  calculateDistance,
+  stepAircraftPhysics,
+} from '../src/engine/physics';
+import {
+  formatPhraseForSpeech,
+  formatRunwayForSpeech,
+  radioAudio,
+} from '../src/audio/radioAudio';
 import { ActiveMissionState, SimulationStats } from '../src/types';
 
 describe('Multi-Airport Registry & Varied Runway Configurations', () => {
@@ -200,3 +210,112 @@ describe('Training Academy Missions & Certification Logic', () => {
     expect(passed.status).toBe('passed');
   });
 });
+
+describe('Randomized 360° Perimeter Entry & ICAO Radiotelephony Speech Engine', () => {
+  it('spawns inbound flights across varied 360-degree quadrants with spatial separation', () => {
+    const egll = getAirportProfile('EGLL').airport;
+    const spawned = [] as ReturnType<typeof generateInboundFlight>[];
+
+    for (let i = 0; i < 12; i++) {
+      const ac = generateInboundFlight(i + 1, {
+        airport: egll,
+        existingAircraft: spawned,
+      });
+      // Verify separation from existing traffic
+      for (const existing of spawned) {
+        expect(calculateDistance(ac.x, ac.y, existing.x, existing.y)).toBeGreaterThan(6);
+      }
+      // Verify inside visible radar perimeter range (<= 36.5 NM)
+      const range = Math.hypot(ac.x, ac.y);
+      expect(range).toBeGreaterThanOrEqual(26.5);
+      expect(range).toBeLessThanOrEqual(36.5);
+      spawned.push(ac);
+    }
+
+    // Must cover at least 3 distinct quadrants (not locked to one fixed spawn point)
+    const quadrants = new Set(
+      spawned.map(ac => Math.floor(calculateBearing(0, 0, ac.x, ac.y) / 90))
+    );
+    expect(quadrants.size).toBeGreaterThanOrEqual(3);
+
+    // At least majority fly varied radar vectors (assignedWaypoint === null)
+    const freeVectorCount = spawned.filter(ac => ac.assignedWaypoint === null).length;
+    expect(freeVectorCount).toBeGreaterThanOrEqual(6);
+  });
+
+  it('normalizes ICAO callsigns, headings, runways, flight levels, and squawks into natural speech', () => {
+    expect(radioAudio.formatCallsignForSpeech('IRA749', true)).toBe('Iranair seven four niner heavy');
+    expect(formatRunwayForSpeech('29R')).toBe('two niner right');
+    expect(formatRunwayForSpeech('09L')).toBe('zero niner left');
+
+    const spokenClearance = formatPhraseForSpeech(
+      'BAW459, turn right heading 095, descend and maintain FL100, cleared ILS approach runway 27R'
+    );
+    expect(spokenClearance).toContain('Speedbird four five niner');
+    expect(spokenClearance).toContain('heading zero niner five');
+    expect(spokenClearance).toContain('flight level one zero zero');
+    expect(spokenClearance).toContain('I L S');
+    expect(spokenClearance).toContain('runway two seven right');
+
+    const spokenEmergency = formatPhraseForSpeech(
+      'IRA712, squawking 7700, surface wind 260 at 14, QNH 1013'
+    );
+    expect(spokenEmergency).toContain('Iranair seven one two');
+    expect(spokenEmergency).toContain('squawking seven seven zero zero');
+    expect(spokenEmergency).toContain('Q N H one zero one three');
+  });
+
+  it('sequences multi-leg routeQueue waypoints automatically and arms ILS when autoInterceptILS is enabled', () => {
+    const profile = getAirportProfile('EGLL');
+    const [wp1, wp2] = profile.airport.waypoints;
+    expect(wp1).toBeDefined();
+    expect(wp2).toBeDefined();
+
+    // Place aircraft within 0.6 NM of wp1 with wp2 queued and autoInterceptILS enabled
+    let ac = generateInboundFlight(10, { airport: profile.airport });
+    ac = {
+      ...ac,
+      x: wp1.position.x - 0.5,
+      y: wp1.position.y,
+      heading: 90,
+      targetHeading: 90,
+      assignedWaypoint: wp1.name,
+      routeQueue: [wp2.name],
+      autoInterceptILS: true,
+      ilsArmed: false,
+    };
+
+    // Step 1: passing wp1 transitions to wp2
+    const afterWp1 = stepAircraftPhysics(
+      ac,
+      1.0,
+      profile.defaultWeather,
+      profile.airport.waypoints,
+      1,
+      profile.airport.elevationFeet
+    );
+    expect(afterWp1.assignedWaypoint).toBe(wp2.name);
+    expect(afterWp1.routeQueue).toEqual([]);
+    expect(afterWp1.ilsArmed).toBe(false);
+
+    // Step 2: passing final waypoint wp2 arms ILS automatically
+    const nearWp2 = {
+      ...afterWp1,
+      x: wp2.position.x - 0.4,
+      y: wp2.position.y,
+    };
+    const afterWp2 = stepAircraftPhysics(
+      nearWp2,
+      1.0,
+      profile.defaultWeather,
+      profile.airport.waypoints,
+      2,
+      profile.airport.elevationFeet
+    );
+    expect(afterWp2.assignedWaypoint).toBeNull();
+    expect(afterWp2.ilsArmed).toBe(true);
+    expect(afterWp2.status).toBe('LocalizerIntercept');
+  });
+});
+
+

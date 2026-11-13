@@ -236,20 +236,36 @@ export function stepAircraftPhysics(
   let targetAirspeed = ac.targetAirspeed;
   let currentStatus = ac.status;
   let assignedWaypoint = ac.assignedWaypoint;
+  let routeQueue = ac.routeQueue ? [...ac.routeQueue] : [];
+  let ilsArmed = ac.ilsArmed;
+  let autoInterceptILS = ac.autoInterceptILS;
   let holdingLeg = ac.holdingLeg;
   let holdingTimer = ac.holdingTimer;
 
-  // 1. Waypoint Navigation (Direct-To)
+  // 1. Waypoint & Multi-Leg Route Sequencing (Direct-To -> routeQueue -> Optional Auto-ILS)
   if (assignedWaypoint) {
     const wp = waypoints.find(w => w.name === assignedWaypoint);
     if (wp) {
       const distToWp = calculateDistance(ac.x, ac.y, wp.position.x, wp.position.y);
-      if (distToWp < 1.0) {
+      if (distToWp < 1.1) {
         // Waypoint reached
         if (wp.isHoldingFix && currentStatus === 'Holding') {
           // Keep holding logic active
+        } else if (routeQueue.length > 0) {
+          // Automatically sequence to next waypoint in route queue
+          const nextWpName = routeQueue.shift() || null;
+          assignedWaypoint = nextWpName;
+          const nextWp = nextWpName ? waypoints.find(w => w.name === nextWpName) : undefined;
+          if (nextWp) {
+            targetHeading = calculateBearing(ac.x, ac.y, nextWp.position.x, nextWp.position.y);
+          }
         } else {
           assignedWaypoint = null;
+          if (autoInterceptILS && currentStatus !== 'Departing') {
+            ilsArmed = true;
+            autoInterceptILS = false;
+            currentStatus = 'LocalizerIntercept';
+          }
         }
       } else {
         targetHeading = calculateBearing(ac.x, ac.y, wp.position.x, wp.position.y);
@@ -405,6 +421,9 @@ export function stepAircraftPhysics(
     bankAngle: bankAngleDeg,
     status: currentStatus,
     assignedWaypoint,
+    routeQueue,
+    ilsArmed,
+    autoInterceptILS,
     holdingLeg,
     holdingTimer,
     history: newHistory,

@@ -70,6 +70,8 @@ export interface Aircraft {
   assignedRunway: string;     // e.g. "27R"
   transponder: string;        // Squawk code e.g. "4521" or "7700"
   assignedWaypoint: string | null; // Direct-to waypoint name
+  routeQueue?: string[];           // Subsequent queued waypoints after assignedWaypoint
+  autoInterceptILS?: boolean;      // Arm ILS automatically once final route leg finishes
   holdingWaypoint: string | null;  // Holding pattern fix
   holdingInboundHeading: number;   // Inbound course for hold
   holdingLegTime: number;          // Standard 60 seconds
