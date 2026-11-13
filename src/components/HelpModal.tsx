@@ -3,7 +3,8 @@
  */
 
 import React from 'react';
-import { X, BookOpen, Compass, Shield, Crosshair, MousePointer } from 'lucide-react';
+import { X, BookOpen, Compass, Shield, Crosshair, MousePointer, Award } from 'lucide-react';
+import { useSimulationStore } from '../store/simulationStore';
 
 interface HelpModalProps {
   isOpen: boolean;
@@ -11,7 +12,15 @@ interface HelpModalProps {
 }
 
 export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
+  const airport = useSimulationStore(state => state.airport);
+  const airportProfile = useSimulationStore(state => state.airportProfile);
+  const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
+  const activeDepartureRunwayId = useSimulationStore(state => state.activeDepartureRunwayId);
+
   if (!isOpen) return null;
+
+  const activeArrRwy = airport.runways.find(r => r.id === activeLandingRunwayId);
+  const arrHeading = activeArrRwy ? activeArrRwy.heading.toString().padStart(3, '0') : '270';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -21,7 +30,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
           <div className="flex items-center gap-2">
             <BookOpen className="w-4 h-4 text-[#00ff66]" />
             <span className="font-bold text-sm text-[#00ff66]">
-              CONTROLLER OPERATIONAL MANUAL (EGLL TMA)
+              CONTROLLER OPERATIONAL MANUAL · {airport.icao} TMA
             </span>
           </div>
           <button
@@ -34,68 +43,79 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
 
         {/* Content */}
         <div className="p-5 overflow-y-auto flex flex-col gap-5 text-[#a2f5bf] leading-relaxed">
-          {/* Section 1: Core Objective */}
+          {/* Section 1: Active Airspace */}
           <div>
             <h3 className="text-sm font-bold text-white mb-1.5 flex items-center gap-1.5">
               <Compass className="w-4 h-4 text-[#00ff66]" />
-              <span>1. Objective & Airspace</span>
+              <span>1. Active Airspace: {airport.name} ({airport.icao})</span>
             </h3>
             <p className="text-[11px] text-[#85cca1]">
-              You are the Terminal Radar Approach Controller for London Heathrow (EGLL). Your primary mission is to safely sequence arrival traffic onto runways 27R and 27L while managing departing flights and preventing separation losses.
+              Elevation: <b className="text-white">{airport.elevationFeet} ft</b> · VHF: <b className="text-white">{airportProfile.vhfFrequency}</b> · Active Landing RWY <b className="text-[#00ff66]">{activeLandingRunwayId}</b> (HDG {arrHeading}°) · Departure RWY <b className="text-[#00e5ff]">{activeDepartureRunwayId}</b>.
+            </p>
+            <p className="text-[11px] text-[#85cca1] mt-1" dir="rtl">
+              {airportProfile.summaryFa}
             </p>
           </div>
 
-          {/* Section 2: Separation Standards & STCA */}
+          {/* Section 2: Separation Standards & Emergency 7700 */}
           <div className="p-3 bg-[#0a1711] border border-[#163826] rounded">
             <h3 className="text-sm font-bold text-[#ffb703] mb-1.5 flex items-center gap-1.5">
               <Shield className="w-4 h-4 text-[#ffb703]" />
-              <span>2. Terminal Separation Standards (STCA)</span>
+              <span>2. Separation Standards (STCA) & Squawk 7700</span>
             </h3>
-            <ul className="text-[11px] text-[#b4e0c4] flex flex-col gap-1 list-disc list-inside">
-              <li><b>Horizontal Separation:</b> Maintain at least <b className="text-white">3.0 Nautical Miles</b> between all airborne aircraft.</li>
-              <li><b>Vertical Separation:</b> Maintain at least <b className="text-white">1,000 Feet</b> vertical separation until established on final approach.</li>
-              <li><b>STCA Warning:</b> The radar automatically projects trajectories and alerts when Closest Point of Approach (CPA) is within 60 seconds of infringement.</li>
+            <ul className="text-[11px] text-[#b4e0c4] flex flex-col gap-1 list-disc list-inside tabular-nums">
+              <li><b>Horizontal Separation:</b> Maintain at least <b className="text-white">3.0 NM</b> between airborne aircraft.</li>
+              <li><b>Vertical Separation:</b> Maintain at least <b className="text-white">1,000 ft</b> until established on ILS final.</li>
+              <li><b>Squawk 7700 (Mayday):</b> Emergency flights appear with a red diamond target. Clear conflicting traffic and vector them straight onto ILS <b className="text-[#00e5ff]">{activeLandingRunwayId}</b>.</li>
             </ul>
           </div>
 
-          {/* Section 3: ILS Intercept Geometry */}
+          {/* Section 3: Academy & Custom Scenarios */}
+          <div>
+            <h3 className="text-sm font-bold text-white mb-1.5 flex items-center gap-1.5">
+              <Award className="w-4 h-4 text-[#ffd166]" />
+              <span>3. Flight Academy & Scenario Studio</span>
+            </h3>
+            <p className="text-[11px] text-[#85cca1]" dir="rtl">
+              در بخش «آکادمی و سناریوها» می‌توانید هم‌زمان به حالت آزاد در ۵ فرودگاه مختلف (EGLL، OIII، KJFK، TRN1، TRN2) دسترسی داشته باشید، ۵ مأموریت آموزشی را برای دریافت گواهینامه رسمی ATC تکمیل کنید و سناریوهای اختصاصی خودتان را بسازید و ذخیره نمایید.
+            </p>
+          </div>
+
+          {/* Section 4: ILS Intercept Geometry */}
           <div>
             <h3 className="text-sm font-bold text-white mb-1.5 flex items-center gap-1.5">
               <Crosshair className="w-4 h-4 text-[#00e5ff]" />
-              <span>3. ILS Approach & Sequencing</span>
+              <span>4. ILS Approach & Vectoring</span>
             </h3>
-            <p className="text-[11px] text-[#85cca1] mb-2">
-              Runway 27R (northern parallel) is the primary landing runway (heading 270°). To clear an aircraft for landing:
-            </p>
-            <ol className="text-[11px] text-[#b4e0c4] flex flex-col gap-1 list-decimal list-inside">
-              <li>Vector aircraft to intercept the extended centerline at approximately <b className="text-[#00e5ff]">30°</b> (headings 240° or 300°).</li>
-              <li>Descend aircraft to intercept altitude (nominally 3,000 ft at 10 NM).</li>
-              <li>Click <b className="text-[#00e5ff]">"CLEARED ILS 27R"</b>. When within localizer beam, the aircraft will automatically capture the localizer and track the 3.0° glideslope down to touchdown.</li>
+            <ol className="text-[11px] text-[#b4e0c4] flex flex-col gap-1 list-decimal list-inside tabular-nums">
+              <li>Vector inbound traffic to intercept the RWY {activeLandingRunwayId} extended centerline (HDG {arrHeading}°) at ~30° angle.</li>
+              <li>Descend to pattern intercept altitude (~{Math.ceil(airport.elevationFeet / 1000) * 1000 + 3000} ft at 10–14 NM).</li>
+              <li>Click <b className="text-[#00e5ff]">"CLEARED ILS {activeLandingRunwayId}"</b> to arm localizer and glideslope capture.</li>
             </ol>
           </div>
 
-          {/* Section 4: Workstation Controls */}
+          {/* Section 5: Workstation Controls */}
           <div>
             <h3 className="text-sm font-bold text-white mb-1.5 flex items-center gap-1.5">
               <MousePointer className="w-4 h-4 text-[#00ff66]" />
-              <span>4. Workstation Controls & Mouse Shortcuts</span>
+              <span>5. Radar Mouse & Keyboard Shortcuts</span>
             </h3>
             <div className="grid grid-cols-2 gap-2 text-[11px]">
               <div className="p-2 bg-[#0c1c14] border border-[#163826] rounded">
-                <span className="font-bold text-[#00ff66]">Left-Click:</span>
-                <p className="text-[#85cca1] mt-0.5">Select aircraft or drag data tags to avoid radar label overlap.</p>
+                <span className="font-bold text-[#00ff66]">Left-Click / Drag:</span>
+                <p className="text-[#85cca1] mt-0.5">Select aircraft, drag data tags, or drag the heading ring handle.</p>
               </div>
               <div className="p-2 bg-[#0c1c14] border border-[#163826] rounded">
-                <span className="font-bold text-[#00ff66]">Mouse Wheel:</span>
-                <p className="text-[#85cca1] mt-0.5">Zoom in / Zoom out radar scope between 12 NM and 65 NM.</p>
+                <span className="font-bold text-[#00ff66]">Mouse Wheel / [+/-]:</span>
+                <p className="text-[#85cca1] mt-0.5">Zoom radar scope between 12 NM and 65 NM.</p>
               </div>
               <div className="p-2 bg-[#0c1c14] border border-[#163826] rounded">
-                <span className="font-bold text-[#00ff66]">Right-Click & Drag:</span>
-                <p className="text-[#85cca1] mt-0.5">Measure tactical distance (NM) and magnetic bearing (°) between any points.</p>
+                <span className="font-bold text-[#00ff66]">Right-Click Drag / [M]:</span>
+                <p className="text-[#85cca1] mt-0.5">Measure tactical distance (NM) and magnetic bearing (°).</p>
               </div>
               <div className="p-2 bg-[#0c1c14] border border-[#163826] rounded">
-                <span className="font-bold text-[#00ff66]">Flight Strips:</span>
-                <p className="text-[#85cca1] mt-0.5">Click any progress strip in the bottom bay to lock command focus on that flight.</p>
+                <span className="font-bold text-[#00ff66]">[H] / [D] / [C]:</span>
+                <p className="text-[#85cca1] mt-0.5">Heading vector mode, Direct-To waypoint mode, and Center scope.</p>
               </div>
             </div>
           </div>
@@ -105,7 +125,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
         <div className="px-4 py-3 bg-[#0d2016] border-t border-[#1b422d] flex justify-end">
           <button
             onClick={onClose}
-            className="px-4 py-1.5 bg-[#00ff66] hover:bg-[#39ff14] text-black font-bold rounded transition-colors text-xs"
+            className="px-4 py-2 bg-[#00ff66] hover:bg-[#39ff14] text-black font-bold rounded transition-colors text-xs whitespace-nowrap"
           >
             Acknowledge & Return to Radar
           </button>

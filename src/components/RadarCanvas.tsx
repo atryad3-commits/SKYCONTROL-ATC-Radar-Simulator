@@ -29,22 +29,14 @@ import {
   Radio
 } from 'lucide-react';
 
-// Official published holding pattern parameters for London Heathrow TMA
+// Active holding pattern geometry computed dynamically from airport waypoints
 interface HoldingStackDef {
   name: string;
   x: number; // NM
   y: number; // NM
   inboundCourse: number; // Magnetic heading
   turnDirection: 'Right' | 'Left';
-  minAlt: number; // Feet
 }
-
-const HEATHROW_HOLDING_STACKS: HoldingStackDef[] = [
-  { name: 'LAM', x: 22.0, y: 12.0, inboundCourse: 268, turnDirection: 'Right', minAlt: 7000 },
-  { name: 'BNN', x: -10.0, y: 18.0, inboundCourse: 163, turnDirection: 'Right', minAlt: 7000 },
-  { name: 'OCK', x: -2.0, y: -14.0, inboundCourse: 89, turnDirection: 'Right', minAlt: 7000 },
-  { name: 'BIG', x: 16.0, y: -9.0, inboundCourse: 296, turnDirection: 'Left', minAlt: 7000 },
-];
 
 export type RadarTool = 'SELECT' | 'HEADING_VECTOR' | 'DIRECT_TO' | 'MEASURE';
 
@@ -55,10 +47,10 @@ export const RadarCanvas: React.FC = () => {
   const aircraft = useSimulationStore(state => state.aircraft);
   const selectedAircraftId = useSimulationStore(state => state.selectedAircraftId);
   const airport = useSimulationStore(state => state.airport);
+  const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
+  const activeDepartureRunwayId = useSimulationStore(state => state.activeDepartureRunwayId);
   const radarLayers = useSimulationStore(state => state.radarLayers);
   const conflicts = useSimulationStore(state => state.conflicts);
-  const isPaused = useSimulationStore(state => state.isPaused);
-  const simSpeed = useSimulationStore(state => state.simSpeed);
   const radarTracks = useSimulationStore(state => state.radarTracks);
   const antennaAzimuth = useSimulationStore(state => state.antennaAzimuth);
   const activeTransmission = useSimulationStore(state => state.activeTransmission);
@@ -67,6 +59,18 @@ export const RadarCanvas: React.FC = () => {
     () => aircraft.find(a => a.id === selectedAircraftId) || null,
     [aircraft, selectedAircraftId]
   );
+
+  const holdingStacks = useMemo<HoldingStackDef[]>(() => {
+    return airport.waypoints
+      .filter(wp => wp.isHoldingFix)
+      .map(wp => ({
+        name: wp.name,
+        x: wp.position.x,
+        y: wp.position.y,
+        inboundCourse: wp.defaultHoldingHeading ?? 270,
+        turnDirection: wp.holdingTurnDirection ?? 'Right',
+      }));
+  }, [airport]);
 
   const selectAircraft = useSimulationStore(state => state.selectAircraft);
   const setHeading = useSimulationStore(state => state.setHeading);
@@ -323,29 +327,41 @@ export const RadarCanvas: React.FC = () => {
       }
     }
 
-    // 4. Dual Parallel Runways & Extended Centerlines (09L/27R and 09R/27L)
+    // 4. Airport Runways & Extended Centerlines
+    const drawnPhysicalRunways = new Set<string>();
     for (const rwy of airport.runways) {
       const thPos = worldToScreen(rwy.threshold.x, rwy.threshold.y);
       const endPos = worldToScreen(rwy.endPosition.x, rwy.endPosition.y);
+      const isArr = rwy.id === activeLandingRunwayId;
+      const isDep = rwy.id === activeDepartureRunwayId;
 
-      // Runway surface concrete bar
-      ctx.strokeStyle = '#00ff66';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(thPos.sx, thPos.sy);
-      ctx.lineTo(endPos.sx, endPos.sy);
-      ctx.stroke();
+      // Runway surface concrete bar (draw once per physical pair unless highlighted)
+      const pairKey = [
+        `${rwy.threshold.x.toFixed(1)},${rwy.threshold.y.toFixed(1)}`,
+        `${rwy.endPosition.x.toFixed(1)},${rwy.endPosition.y.toFixed(1)}`,
+      ]
+        .sort()
+        .join('|');
+      if (!drawnPhysicalRunways.has(pairKey) || isArr || isDep) {
+        drawnPhysicalRunways.add(pairKey);
+        ctx.strokeStyle = isArr ? '#00ff66' : isDep ? '#00e5ff' : '#1b5e38';
+        ctx.lineWidth = isArr || isDep ? 4 : 2.5;
+        ctx.beginPath();
+        ctx.moveTo(thPos.sx, thPos.sy);
+        ctx.lineTo(endPos.sx, endPos.sy);
+        ctx.stroke();
+      }
 
-      // Extended ILS Centerline Localizer Feather (15 NM)
+      // Extended ILS Centerline Localizer Feather (15 NM) for active or primary runways
       if (radarLayers.extendedCenterlines) {
         const rad = (rwy.heading * Math.PI) / 180;
-        const featherDistNM = 15;
+        const featherDistNM = isArr ? 16 : 11;
         const approachX = rwy.threshold.x - featherDistNM * Math.sin(rad);
         const approachY = rwy.threshold.y - featherDistNM * Math.cos(rad);
         const appPos = worldToScreen(approachX, approachY);
 
-        ctx.strokeStyle = '#007744';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = isArr ? '#009955' : 'rgba(0, 119, 68, 0.45)';
+        ctx.lineWidth = isArr ? 1.3 : 0.8;
         ctx.setLineDash([5, 5]);
         ctx.beginPath();
         ctx.moveTo(thPos.sx, thPos.sy);
@@ -353,52 +369,64 @@ export const RadarCanvas: React.FC = () => {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Localizer feather angle tics at 5, 10, 15 NM
-        for (const dist of [5, 10, 15]) {
-          const ticX = rwy.threshold.x - dist * Math.sin(rad);
-          const ticY = rwy.threshold.y - dist * Math.cos(rad);
-          const ticPos = worldToScreen(ticX, ticY);
-          const perpRad = rad + Math.PI / 2;
+        if (isArr) {
+          // Localizer feather angle tics at 5, 10, 15 NM on active landing runway
+          for (const dist of [5, 10, 15]) {
+            const ticX = rwy.threshold.x - dist * Math.sin(rad);
+            const ticY = rwy.threshold.y - dist * Math.cos(rad);
+            const ticPos = worldToScreen(ticX, ticY);
+            const perpRad = rad + Math.PI / 2;
 
-          ctx.strokeStyle = '#009955';
-          ctx.beginPath();
-          ctx.moveTo(
-            ticPos.sx - 6 * Math.sin(perpRad),
-            ticPos.sy + 6 * Math.cos(perpRad)
-          );
-          ctx.lineTo(
-            ticPos.sx + 6 * Math.sin(perpRad),
-            ticPos.sy - 6 * Math.cos(perpRad)
-          );
-          ctx.stroke();
+            ctx.strokeStyle = '#00bb66';
+            ctx.beginPath();
+            ctx.moveTo(
+              ticPos.sx - 6 * Math.sin(perpRad),
+              ticPos.sy + 6 * Math.cos(perpRad)
+            );
+            ctx.lineTo(
+              ticPos.sx + 6 * Math.sin(perpRad),
+              ticPos.sy - 6 * Math.cos(perpRad)
+            );
+            ctx.stroke();
+          }
         }
 
         // Runway Designator Label
-        ctx.fillStyle = '#00ff88';
-        ctx.font = 'bold 10px "IBM Plex Mono", monospace';
-        ctx.fillText(rwy.id, thPos.sx + 8, thPos.sy - 8);
+        ctx.fillStyle = isArr ? '#00ff88' : isDep ? '#00e5ff' : '#3a8458';
+        ctx.font = isArr || isDep ? 'bold 10px "IBM Plex Mono", monospace' : '9px "IBM Plex Mono", monospace';
+        ctx.fillText(rwy.id, thPos.sx + 6, thPos.sy - 6);
       }
     }
 
-    // 5. Holding Patterns (LAM, BNN, OCK, BIG official racetracks)
-    for (const stack of HEATHROW_HOLDING_STACKS) {
+    // 5. Dynamic Holding Patterns for active airport
+    for (const stack of holdingStacks) {
       const fixPos = worldToScreen(stack.x, stack.y);
       const rad = (stack.inboundCourse * Math.PI) / 180;
       const turnSign = stack.turnDirection === 'Right' ? 1 : -1;
-      const legNM = 4.0;
-      const turnRadiusNM = 1.2;
+      const perpRad = rad + (turnSign * Math.PI) / 2;
+      const legNM = 3.5;
+      const offsetNM = 1.6;
 
-      ctx.strokeStyle = 'rgba(0, 160, 200, 0.40)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 4]);
-
-      // Draw racetrack
-      ctx.beginPath();
-      ctx.moveTo(fixPos.sx, fixPos.sy);
       const outX = stack.x - legNM * Math.sin(rad);
       const outY = stack.y - legNM * Math.cos(rad);
+      const abX = stack.x + offsetNM * Math.sin(perpRad);
+      const abY = stack.y + offsetNM * Math.cos(perpRad);
+      const outAbX = outX + offsetNM * Math.sin(perpRad);
+      const outAbY = outY + offsetNM * Math.cos(perpRad);
+
       const outPos = worldToScreen(outX, outY);
+      const abPos = worldToScreen(abX, abY);
+      const outAbPos = worldToScreen(outAbX, outAbY);
+
+      ctx.strokeStyle = 'rgba(0, 160, 200, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(fixPos.sx, fixPos.sy);
       ctx.lineTo(outPos.sx, outPos.sy);
+      ctx.lineTo(outAbPos.sx, outAbPos.sy);
+      ctx.lineTo(abPos.sx, abPos.sy);
+      ctx.closePath();
       ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -456,8 +484,9 @@ export const RadarCanvas: React.FC = () => {
       const flashRatio = isFreshHit ? Math.max(0, 1 - angleBehindSweep / bloomAngleWindow) : 0;
 
       // Color coding per specification (Part 6)
+      const isEmergency = Boolean(ac.isEmergency) || ac.transponder === '7700';
       let primaryColor = '#00ff66';
-      if (isCritical) {
+      if (isEmergency || isCritical) {
         primaryColor = '#ff3344';
       } else if (isWarning) {
         primaryColor = '#ffb703';
@@ -777,6 +806,21 @@ export const RadarCanvas: React.FC = () => {
         ctx.restore();
       }
 
+      // Emergency 7700 diamond ring marker
+      if (isEmergency) {
+        ctx.save();
+        ctx.strokeStyle = '#ff3344';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(pos.sx, pos.sy - 13);
+        ctx.lineTo(pos.sx + 13, pos.sy);
+        ctx.lineTo(pos.sx, pos.sy + 13);
+        ctx.lineTo(pos.sx - 13, pos.sy);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // Selected aircraft highlighting ring
       if (isSelected) {
         ctx.strokeStyle = '#00e5ff';
@@ -891,25 +935,29 @@ export const RadarCanvas: React.FC = () => {
         ctx.restore();
       }
 
-      // Line 1: CALLSIGN / AIRCRAFT TYPE
-      ctx.fillStyle = isSelected ? '#ffffff' : primaryColor;
+      // Line 1: CALLSIGN / AIRCRAFT TYPE (+7700 Emergency tag)
+      ctx.fillStyle = isEmergency ? '#ff4d4d' : isSelected ? '#ffffff' : primaryColor;
       ctx.font = 'bold 11px "IBM Plex Mono", monospace';
-      ctx.fillText(`${ac.callsign} ${ac.aircraftType}`, tagX + 4, tagY + 2);
+      ctx.fillText(
+        isEmergency ? `${ac.callsign} 7700` : `${ac.callsign} ${ac.aircraftType}`,
+        tagX + 4,
+        tagY + 2
+      );
 
       // Line 2: ALTITUDE / CLEARED ALTITUDE (colored by altitude band for selected aircraft)
       const curAlt100 = Math.round(ac.altitude / 100).toString().padStart(3, '0');
       const tgtAlt100 = Math.round(ac.targetAltitude / 100).toString().padStart(3, '0');
       const vertSymbol = ac.verticalSpeed > 200 ? '↑' : ac.verticalSpeed < -200 ? '↓' : '=';
       ctx.font = '10px "IBM Plex Mono", monospace';
-      ctx.fillStyle = isSelected ? getAltitudeColor(ac.altitude) : isCritical ? '#ff3344' : isWarning ? '#ffb703' : '#a2f5bf';
+      ctx.fillStyle = isSelected ? getAltitudeColor(ac.altitude) : isEmergency || isCritical ? '#ff3344' : isWarning ? '#ffb703' : '#a2f5bf';
       ctx.fillText(`${curAlt100} c${tgtAlt100} ${vertSymbol}`, tagX + 4, tagY + 14);
 
       // Line 3: GROUND SPEED / HEADING / FLIGHT PHASE
       const gs = Math.round(ac.groundSpeed || ac.indicatedAirspeed);
       const hdg = Math.round(ac.heading).toString().padStart(3, '0');
-      const phaseTag = ac.ilsGlideslopeCaptured ? 'GS' : ac.ilsLocalizerCaptured ? 'LOC' : ac.status.slice(0, 3).toUpperCase();
+      const phaseTag = isEmergency ? 'EMER' : ac.ilsGlideslopeCaptured ? 'GS' : ac.ilsLocalizerCaptured ? 'LOC' : ac.status.slice(0, 3).toUpperCase();
       ctx.font = '9px "IBM Plex Mono", monospace';
-      ctx.fillStyle = ac.ilsGlideslopeCaptured ? '#00e5ff' : '#73b890';
+      ctx.fillStyle = isEmergency ? '#ff6b6b' : ac.ilsGlideslopeCaptured ? '#00e5ff' : '#73b890';
       ctx.fillText(`${gs}kt ${hdg}° ${phaseTag}`, tagX + 4, tagY + 25);
 
       // Line 4: ORIGIN -> DESTINATION ("از کجا آمده و به سمت کجا میرود")
@@ -965,6 +1013,9 @@ export const RadarCanvas: React.FC = () => {
     aircraft,
     selectedAircraftId,
     airport,
+    activeLandingRunwayId,
+    activeDepartureRunwayId,
+    holdingStacks,
     radarLayers,
     conflicts,
     antennaAzimuth,
@@ -1154,9 +1205,9 @@ export const RadarCanvas: React.FC = () => {
       {/* CRT Scanline & Phosphor Vignette Overlay */}
       <div className="absolute inset-0 radar-crt-overlay pointer-events-none" />
 
-      {/* Professional Floating Radar Toolbar (Part 7) */}
-      <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-[#08150f]/95 backdrop-blur-md px-2.5 py-1.5 border border-[#163826] rounded-md text-xs font-mono text-[#a2f5bf] shadow-xl pointer-events-auto">
-        <span className="font-bold text-[#00ff66] pr-1">EGLL RADAR</span>
+      {/* Professional Floating Radar Toolbar */}
+      <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-[#08150f]/95 backdrop-blur-md px-2.5 py-1.5 border border-[#163826] rounded-md text-xs font-mono text-[#a2f5bf] shadow-xl pointer-events-auto whitespace-nowrap">
+        <span className="font-bold text-[#00ff66] pr-1">{airport.icao} RADAR</span>
         <span className="text-[#204a32]">|</span>
 
         {/* Pointer / Select tool */}
@@ -1258,30 +1309,31 @@ export const RadarCanvas: React.FC = () => {
         </button>
       </div>
 
-      {/* Selected Aircraft Tactical Route HUD Banner ("از کجا آمده و به سمت کجا میرود") */}
+      {/* Selected Aircraft Tactical Route HUD Banner */}
       {selectedAircraft && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-[#06140d]/92 backdrop-blur border border-[#163826] hover:border-[#00ff66]/50 rounded-md px-3.5 py-1.5 shadow-[0_4px_24px_rgba(0,0,0,0.65)] font-mono text-xs flex items-center gap-3 text-white pointer-events-auto transition-all select-none">
+        <div className="hidden xl:flex absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-[#06140d]/92 backdrop-blur border border-[#163826] hover:border-[#00ff66]/50 rounded-md px-3.5 py-1.5 shadow-[0_4px_24px_rgba(0,0,0,0.65)] font-mono text-xs items-center gap-3 text-white pointer-events-auto transition-all select-none whitespace-nowrap">
           <div className="flex items-center gap-1.5 font-bold text-[#00ff66]">
             <Plane className="w-3.5 h-3.5 text-[#00e5ff]" />
             <span>{selectedAircraft.callsign}</span>
-            <span className="text-[10px] text-[#4e8b69] font-normal">({selectedAircraft.aircraftType})</span>
+            <span className="text-[10px] text-[#4e8b69] font-normal">· {selectedAircraft.aircraftType}</span>
           </div>
 
           <div className="h-3 w-px bg-[#1e4832]" />
 
           <div className="flex items-center gap-1.5 text-[11px]">
             <span className="text-[#a2f5bf] font-semibold">{selectedAircraft.origin}</span>
-            <span className="text-[#00e5ff] text-[10px]">──✈──▶</span>
+            <span className="text-[#00e5ff] text-[10px]">──▶</span>
             <span className="text-[#00ff66] font-semibold">{selectedAircraft.destination}</span>
-            <span className="text-[10px] px-1.5 py-0.5 bg-[#0d281a] border border-[#1d4d33] rounded text-[#74d89b]">
+            <span className="text-[#4e8b69]">·</span>
+            <span className="text-[10px] text-[#74d89b] font-semibold">
               RWY {selectedAircraft.assignedRunway}
             </span>
           </div>
 
           <div className="h-3 w-px bg-[#1e4832]" />
 
-          <div className="flex items-center gap-2.5 text-[10px] text-[#a2f5bf]">
-            <span>ALT: <b style={{ color: getAltitudeColor(selectedAircraft.altitude) }}>{selectedAircraft.altitude.toLocaleString()}ft</b></span>
+          <div className="flex items-center gap-2.5 text-[10px] text-[#a2f5bf] tabular-nums">
+            <span>ALT: <b style={{ color: getAltitudeColor(selectedAircraft.altitude) }}>{Math.round(selectedAircraft.altitude).toLocaleString()}ft</b></span>
             <span>CLRD: <b style={{ color: getAltitudeColor(selectedAircraft.targetAltitude) }}>{selectedAircraft.targetAltitude.toLocaleString()}ft</b></span>
             {selectedAircraft.assignedWaypoint && (
               <span>DIRECT: <b className="text-[#ffd166]">{selectedAircraft.assignedWaypoint}</b></span>
@@ -1290,22 +1342,21 @@ export const RadarCanvas: React.FC = () => {
         </div>
       )}
 
-      {/* Active Radio Transmission Top Alert ("صحبت کردن هر پرواز روی راهدار") */}
+      {/* Active Radio Transmission Live Indicator */}
       {activeTransmission && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-20 bg-[#031d12]/95 border border-[#00ff66] shadow-[0_0_18px_rgba(0,255,102,0.45)] rounded-full px-3.5 py-1 font-mono text-[11px] flex items-center gap-2 text-white animate-pulse pointer-events-none select-none">
-          <span className="inline-block w-2 h-2 rounded-full bg-[#00ff66] shadow-[0_0_8px_#00ff66]" />
-          <Radio className="w-3 h-3 text-[#00ff66]" />
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-20 bg-[#031d12]/95 border border-[#00ff66] shadow-[0_0_16px_rgba(0,255,102,0.35)] rounded px-3 py-1 font-mono text-[11px] flex items-center gap-2 text-white pointer-events-none select-none whitespace-nowrap">
+          <Radio className="w-3.5 h-3.5 text-[#00ff66]" />
           <span className="font-bold text-[#00ff66]">
-            {activeTransmission.speaker === 'PILOT' ? 'PILOT TRANSMITTING:' : 'ATC TRANSMITTING TO:'}
+            {activeTransmission.speaker === 'PILOT' ? 'PILOT TX:' : 'ATC TX:'}
           </span>
-          <span className="text-white font-bold bg-[#0d281a] px-1.5 py-0.5 rounded border border-[#1c4d34]">
+          <span className="text-white font-bold">
             {activeTransmission.callsign}
           </span>
         </div>
       )}
 
       {/* Operational Information & Position Overlay */}
-      <div className="absolute bottom-3 left-3 flex items-center gap-3 text-[11px] font-mono text-[#4e8b69] pointer-events-none">
+      <div className="absolute bottom-3 left-3 flex items-center gap-3 text-[11px] font-mono text-[#4e8b69] pointer-events-none tabular-nums">
         {cursorWorldPos && (
           <div className="bg-[#08150f]/85 px-2 py-1 border border-[#163826] rounded">
             REL: {cursorWorldPos.x >= 0 ? '+' : ''}{cursorWorldPos.x.toFixed(1)} NM, {cursorWorldPos.y >= 0 ? '+' : ''}{cursorWorldPos.y.toFixed(1)} NM
@@ -1320,11 +1371,10 @@ export const RadarCanvas: React.FC = () => {
         </div>
       </div>
 
-      {/* Altitude Spectrum Legend ("با توجه به ارتفاع رنگ مسیر متفاوت") */}
+      {/* Altitude Spectrum Legend */}
       <div className="absolute bottom-3 right-3 z-10 bg-[#05140d]/90 backdrop-blur border border-[#163826] rounded px-3 py-1.5 font-mono text-[9px] pointer-events-none select-none shadow-lg">
-        <div className="text-[10px] font-bold text-[#4e8b69] mb-1 flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#00ff66]" />
-          <span>ALTITUDE COLOR PROFILE</span>
+        <div className="text-[10px] font-bold text-[#4e8b69] mb-1">
+          ALTITUDE COLOR PROFILE
         </div>
         <div className="grid grid-cols-5 gap-2 text-center">
           <div className="flex flex-col items-center">

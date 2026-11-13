@@ -23,7 +23,6 @@ export interface RunwayClearanceValidation {
 
 export class RunwayOccupancyManager {
   private runways: Map<string, RunwayOccupancyRecord> = new Map();
-  // Map between reciprocal runway designators (e.g. 27R <-> 09L, 27L <-> 09R)
   private reciprocalMap: Map<string, string> = new Map([
     ['27R', '09L'],
     ['09L', '27R'],
@@ -31,8 +30,16 @@ export class RunwayOccupancyManager {
     ['09R', '27L'],
   ]);
 
-  constructor(initialRunways: RunwayGeometry[] = []) {
-    for (const rwy of initialRunways) {
+  constructor(initialRunways: RunwayGeometry[] = [], reciprocalPairs?: Array<[string, string]>) {
+    this.configureAirport(initialRunways, reciprocalPairs);
+  }
+
+  public configureAirport(
+    runways: RunwayGeometry[],
+    reciprocalPairs?: Array<[string, string]>
+  ): void {
+    this.runways.clear();
+    for (const rwy of runways) {
       this.runways.set(rwy.id, {
         runwayId: rwy.id,
         state: rwy.occupancyState || 'Available',
@@ -41,6 +48,13 @@ export class RunwayOccupancyManager {
         reason: null,
         occupiedAtSimTimeSec: 0,
       });
+    }
+
+    if (reciprocalPairs && reciprocalPairs.length > 0) {
+      this.reciprocalMap.clear();
+      for (const [a, b] of reciprocalPairs) {
+        this.setReciprocal(a, b);
+      }
     }
   }
 
@@ -102,7 +116,6 @@ export class RunwayOccupancyManager {
       return { allowed: false, reason: `Runway ${runwayId} is temporarily closed` };
     }
 
-    // If occupied by someone else:
     if (rec.state === 'Occupied' && rec.occupantAircraftId !== aircraftId) {
       return {
         allowed: false,
@@ -111,7 +124,6 @@ export class RunwayOccupancyManager {
       };
     }
 
-    // If reserved for an arrival on short final:
     if (rec.state === 'Reserved' && rec.occupantAircraftId !== aircraftId) {
       return {
         allowed: false,
@@ -160,7 +172,6 @@ export class RunwayOccupancyManager {
     const rec = this.runways.get(runwayId);
     if (!rec) return false;
 
-    // If occupied by this aircraft, update state to Occupied and update reason
     if (rec.occupantAircraftId === aircraftId) {
       rec.state = 'Occupied';
       rec.reason = reason;
@@ -176,7 +187,6 @@ export class RunwayOccupancyManager {
       return true;
     }
 
-    // If occupied by another aircraft and not available, cannot occupy
     if (rec.state === 'Occupied' && rec.occupantAircraftId !== aircraftId) {
       return false;
     }
@@ -187,7 +197,6 @@ export class RunwayOccupancyManager {
     rec.reason = reason;
     rec.occupiedAtSimTimeSec = simTimeSec;
 
-    // Sync reciprocal runway
     const recipId = this.reciprocalMap.get(runwayId);
     if (recipId) {
       const recipRec = this.runways.get(recipId);
@@ -242,7 +251,6 @@ export class RunwayOccupancyManager {
     if (!rec) return false;
 
     if (aircraftId && rec.occupantAircraftId && rec.occupantAircraftId !== aircraftId) {
-      // Trying to release someone else's occupancy
       return false;
     }
 

@@ -78,6 +78,7 @@ export const FlightStrips: React.FC = () => {
         ) : (
           filteredList.map(ac => {
             const isSelected = ac.id === selectedAircraftId;
+            const isEmergency = Boolean(ac.isEmergency) || ac.transponder === '7700';
             const hasConflict = conflicts.some(
               c => (c.aircraft1Id === ac.id || c.aircraft2Id === ac.id) && c.severity === 'Critical'
             );
@@ -92,11 +93,11 @@ export const FlightStrips: React.FC = () => {
               <div
                 key={ac.id}
                 onClick={() => selectAircraft(ac.id)}
-                className={`w-64 h-22 shrink-0 p-2 rounded cursor-pointer border transition-all flex flex-col justify-between ${
+                className={`w-64 h-22 shrink-0 p-2 rounded cursor-pointer border transition-colors flex flex-col justify-between tabular-nums ${
                   isSelected
-                    ? 'bg-[#0f2d1e] border-[#00ff66] shadow-[0_0_10px_rgba(0,255,102,0.25)]'
-                    : hasConflict
-                    ? 'bg-[#2b1212] border-[#ff3344] animate-pulse'
+                    ? 'bg-[#0f2d1e] border-[#00ff66]'
+                    : isEmergency || hasConflict
+                    ? 'bg-[#2b1212] border-[#ff3344]'
                     : hasWarning
                     ? 'bg-[#2b210f] border-[#ffb703]'
                     : isArrival
@@ -108,7 +109,7 @@ export const FlightStrips: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
                     {isArrival ? (
-                      <PlaneLanding className="w-3.5 h-3.5 text-[#00ff66]" />
+                      <PlaneLanding className={`w-3.5 h-3.5 ${isEmergency ? 'text-[#ff4d4d]' : 'text-[#00ff66]'}`} />
                     ) : (
                       <PlaneTakeoff className="w-3.5 h-3.5 text-[#00e5ff]" />
                     )}
@@ -119,11 +120,11 @@ export const FlightStrips: React.FC = () => {
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {hasConflict && (
-                      <ShieldAlert className="w-3.5 h-3.5 text-[#ff3344] animate-bounce" />
+                    {(hasConflict || isEmergency) && (
+                      <ShieldAlert className="w-3.5 h-3.5 text-[#ff3344]" />
                     )}
-                    <span className="text-[10px] bg-[#14261c] px-1.5 py-0.5 rounded text-[#00e5ff] font-bold">
-                      {ac.transponder}
+                    <span className={`text-[10px] font-bold ${isEmergency ? 'text-[#ff4d4d]' : 'text-[#00e5ff]'}`}>
+                      {isEmergency ? 'SQ 7700' : `SQ ${ac.transponder}`}
                     </span>
                   </div>
                 </div>
@@ -145,24 +146,23 @@ export const FlightStrips: React.FC = () => {
                 {/* Strip Row 3: Heading, Speed, Assigned Runway & Status */}
                 <div className="flex items-center justify-between text-[10px] pt-1 border-t border-[#173324]">
                   <div className="flex items-center gap-2 text-[#85cca1]">
-                    <span>HDG: <b className="text-white">{Math.round(ac.targetHeading).toString().padStart(3, '0')}°</b></span>
-                    <span>SPD: <b className="text-white">{Math.round(ac.indicatedAirspeed)}kt</b></span>
+                    <span>HDG <b className="text-white">{Math.round(ac.targetHeading).toString().padStart(3, '0')}°</b></span>
+                    <span>SPD <b className="text-white">{Math.round(ac.indicatedAirspeed)}kt</b></span>
                   </div>
 
-                  <div className="flex items-center gap-1">
-                    <span className="px-1 py-0.2 bg-[#122e1e] text-[#00ff66] rounded font-semibold">
-                      {ac.assignedRunway}
-                    </span>
-                    <span className={`px-1 py-0.2 rounded font-semibold ${
-                      ac.status === 'Established' || ac.status === 'FinalApproach'
-                        ? 'bg-[#00e5ff]/20 text-[#00e5ff]'
-                        : ac.status === 'GoAround'
-                        ? 'bg-[#ff3344]/20 text-[#ff3344]'
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[#00ff66] font-semibold">RWY {ac.assignedRunway}</span>
+                    <span className="text-[#3b6d4e]">·</span>
+                    <span className={`font-semibold ${
+                      isEmergency || ac.status === 'GoAround'
+                        ? 'text-[#ff4d4d]'
+                        : ac.status === 'Established' || ac.status === 'FinalApproach'
+                        ? 'text-[#00e5ff]'
                         : ac.flightPhase === 'TAKEOFF_ROLL' || ac.flightPhase === 'ROTATION'
-                        ? 'bg-[#ffb703]/20 text-[#ffb703]'
-                        : 'bg-[#183624] text-[#a2f5bf]'
+                        ? 'text-[#ffb703]'
+                        : 'text-[#a2f5bf]'
                     }`}>
-                      {ac.flightPhase || (ac.status === 'FinalApproach' ? 'FINAL' : ac.status)}
+                      {isEmergency ? 'MAYDAY' : ac.flightPhase || (ac.status === 'FinalApproach' ? 'FINAL' : ac.status)}
                     </span>
                   </div>
                 </div>

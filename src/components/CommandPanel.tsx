@@ -5,28 +5,27 @@
  * pilot readback feedback, and flight telemetry tracking.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
-import { HEATHROW_RUNWAY_GEOMETRIES } from '../airports/heathrow';
 import { calculateLocalizerDeviation, calculateGlideslopeDeviation } from '../engine/ils';
-import { 
-  Compass, 
-  ArrowUp, 
-  ArrowDown, 
-  Gauge, 
-  Navigation, 
-  Crosshair, 
-  RotateCw,
+import {
+  Compass,
+  ArrowUp,
+  Gauge,
+  Navigation,
+  Crosshair,
   AlertOctagon,
+  AlertTriangle,
   X,
   Plane,
-  ChevronRight
 } from 'lucide-react';
 
 export const CommandPanel: React.FC = () => {
   const selectedAircraftId = useSimulationStore(state => state.selectedAircraftId);
   const aircraftList = useSimulationStore(state => state.aircraft);
   const airport = useSimulationStore(state => state.airport);
+  const activeRunwayGeometries = useSimulationStore(state => state.activeRunwayGeometries);
+  const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
   const selectAircraft = useSimulationStore(state => state.selectAircraft);
 
   // Command store actions
@@ -50,7 +49,24 @@ export const CommandPanel: React.FC = () => {
 
   const aircraft = aircraftList.find(a => a.id === selectedAircraftId);
 
-  // If no aircraft selected, don't render clutter on the screen (as requested by Part 1.D)
+  const altitudePresets = useMemo(() => {
+    const elev = airport.elevationFeet || 0;
+    if (elev < 500) {
+      return [2000, 3000, 4000, 6000];
+    }
+    const base = Math.ceil(elev / 1000) * 1000;
+    return [base + 2000, base + 3000, base + 4000, base + 6000];
+  }, [airport.elevationFeet]);
+
+  const approachRunways = useMemo(() => {
+    const activeFirst = [...airport.runways].sort((a, b) => {
+      if (a.id === activeLandingRunwayId) return -1;
+      if (b.id === activeLandingRunwayId) return 1;
+      return 0;
+    });
+    return activeFirst.slice(0, 4);
+  }, [airport.runways, activeLandingRunwayId]);
+
   if (!aircraft) {
     return null;
   }
@@ -59,10 +75,10 @@ export const CommandPanel: React.FC = () => {
   const isLinedUp = aircraft.status === 'Departing' && aircraft.indicatedAirspeed === 0 && aircraft.flightPhase === 'LINEUP';
 
   // Compute live localizer/glideslope deviation info if ILS armed or captured
-  const rwyGeom = HEATHROW_RUNWAY_GEOMETRIES.find(r => r.id === aircraft.assignedRunway) || HEATHROW_RUNWAY_GEOMETRIES[0];
+  const rwyGeom = activeRunwayGeometries.find(r => r.id === aircraft.assignedRunway) || activeRunwayGeometries[0];
   const isApproaching = aircraft.ilsArmed || aircraft.ilsLocalizerCaptured || aircraft.ilsGlideslopeCaptured || aircraft.status === 'FinalApproach';
-  const locDev = isApproaching ? calculateLocalizerDeviation(aircraft.x, aircraft.y, rwyGeom) : null;
-  const gsDev = isApproaching ? calculateGlideslopeDeviation(aircraft.x, aircraft.y, aircraft.altitude, rwyGeom) : null;
+  const locDev = isApproaching && rwyGeom ? calculateLocalizerDeviation(aircraft.x, aircraft.y, rwyGeom) : null;
+  const gsDev = isApproaching && rwyGeom ? calculateGlideslopeDeviation(aircraft.x, aircraft.y, aircraft.altitude, rwyGeom) : null;
 
   // Direct Command Dispatch Handlers (No confirmation modal needed)
   const handleAssignHeading = (targetHdg: number) => {
@@ -96,15 +112,16 @@ export const CommandPanel: React.FC = () => {
       <div className="p-3 bg-[#0c1c14] border-b border-[#163826] flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-base font-bold text-[#00ff66] tracking-wide">
+            <span className={`text-base font-bold tracking-wide ${aircraft.isEmergency ? 'text-[#ff4d4d]' : 'text-[#00ff66]'}`}>
               {aircraft.callsign}
             </span>
-            <span className="px-1.5 py-0.2 bg-[#163826] text-[#a2f5bf] rounded text-[10px] font-semibold">
+            <span className="text-[#4e8b69]">·</span>
+            <span className="text-[10px] text-[#a2f5bf] font-semibold">
               {aircraft.aircraftType} · {aircraft.category}
             </span>
           </div>
           <div className="text-[11px] text-[#4e8b69] mt-0.5">
-            {aircraft.airline} ({aircraft.origin} → {aircraft.destination})
+            {aircraft.airline} · {aircraft.origin} → {aircraft.destination}
           </div>
         </div>
 
@@ -117,14 +134,27 @@ export const CommandPanel: React.FC = () => {
         </button>
       </div>
 
+      {/* Emergency Squawk 7700 Priority Callout */}
+      {aircraft.isEmergency && (
+        <div className="px-3 py-2 bg-[#361114] border-b border-[#ff3344]/60 flex items-center gap-2 text-[#ff6b6b]">
+          <AlertTriangle className="w-4 h-4 shrink-0 text-[#ff3344]" />
+          <div className="text-[11px] leading-snug">
+            <span className="font-bold text-white">MAYDAY SQUAWK 7700</span>
+            <span className="text-[#ffb3b8] block text-[10px]">
+              {aircraft.emergencyType ? aircraft.emergencyType.replace('_', ' ') : 'EMERGENCY'} · PRIORITY RWY {activeLandingRunwayId}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* 2. Status Strip */}
-      <div className="px-3 py-1.5 bg-[#091510] border-b border-[#163826] flex items-center justify-between text-[11px]">
+      <div className="px-3 py-1.5 bg-[#091510] border-b border-[#163826] flex items-center justify-between text-[11px] tabular-nums">
         <div className="flex items-center gap-1.5">
           <span className="text-[#4e8b69]">PHASE:</span>
           <span className={`font-semibold ${
             aircraft.status === 'FinalApproach' || aircraft.status === 'Established'
               ? 'text-[#00e5ff]'
-              : aircraft.status === 'GoAround'
+              : aircraft.status === 'GoAround' || aircraft.isEmergency
               ? 'text-[#ff3344]'
               : 'text-[#a2f5bf]'
           }`}>
@@ -138,7 +168,7 @@ export const CommandPanel: React.FC = () => {
       </div>
 
       {/* 3. Real-Time Telemetry Bar */}
-      <div className="grid grid-cols-3 p-2 bg-[#06100b] border-b border-[#163826] text-center gap-1">
+      <div className="grid grid-cols-3 p-2 bg-[#06100b] border-b border-[#163826] text-center gap-1 tabular-nums">
         <div className="bg-[#091e14] p-1.5 rounded border border-[#163826]">
           <div className="text-[9px] text-[#4e8b69]">HEADING</div>
           <div className="text-sm font-bold text-white">
@@ -260,12 +290,12 @@ export const CommandPanel: React.FC = () => {
             <span>ALTITUDE ASSIGNMENT</span>
           </div>
 
-          <div className="grid grid-cols-4 gap-1.5 mb-2">
-            {[2000, 3000, 4000, 6000].map(alt => (
+          <div className="grid grid-cols-4 gap-1.5 mb-2 tabular-nums">
+            {altitudePresets.map(alt => (
               <button
                 key={alt}
                 onClick={() => handleAssignAltitude(alt)}
-                className={`py-1 px-1 rounded border transition-colors ${
+                className={`py-1 px-1 rounded border transition-colors whitespace-nowrap ${
                   aircraft.targetAltitude === alt
                     ? 'bg-[#1e4d35] border-[#00ff66] text-[#00ff66] font-bold'
                     : 'bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] border-[#1d4d33]'
@@ -347,31 +377,37 @@ export const CommandPanel: React.FC = () => {
           </div>
         </div>
 
-        {/* Section E: ILS & Approach Clearance */}
+        {/* Section E: Dynamic ILS & Approach Clearance */}
         <div className="bg-[#091710] p-2.5 rounded border border-[#163826]">
-          <div className="flex items-center gap-1.5 text-[#00e5ff] font-bold text-[11px] mb-2">
-            <Crosshair className="w-3.5 h-3.5" />
-            <span>APPROACH / RUNWAY</span>
+          <div className="flex items-center justify-between text-[#00e5ff] font-bold text-[11px] mb-2">
+            <div className="flex items-center gap-1.5">
+              <Crosshair className="w-3.5 h-3.5" />
+              <span>APPROACH / RUNWAY</span>
+            </div>
+            <span className="text-[10px] font-normal text-[#4e8b69]">ELEV {airport.elevationFeet}ft</span>
           </div>
 
           <div className="grid grid-cols-2 gap-2 mb-2">
-            <button
-              onClick={() => handleClearILS('27R')}
-              className="py-1.5 bg-[#0d2a20] hover:bg-[#144232] text-[#00e5ff] rounded border border-[#19523e] font-semibold transition-colors"
-            >
-              CLEARED ILS 27R
-            </button>
-            <button
-              onClick={() => handleClearILS('27L')}
-              className="py-1.5 bg-[#0d2a20] hover:bg-[#144232] text-[#00e5ff] rounded border border-[#19523e] font-semibold transition-colors"
-            >
-              CLEARED ILS 27L
-            </button>
+            {approachRunways.map(rwy => (
+              <button
+                key={rwy.id}
+                onClick={() => handleClearILS(rwy.id)}
+                className={`py-1.5 rounded border font-semibold transition-colors whitespace-nowrap ${
+                  aircraft.ilsArmed && aircraft.assignedRunway === rwy.id
+                    ? 'bg-[#113d2e] border-[#00e5ff] text-white'
+                    : rwy.id === activeLandingRunwayId
+                    ? 'bg-[#0d2a20] hover:bg-[#144232] text-[#00e5ff] border-[#1f634a]'
+                    : 'bg-[#091c15] hover:bg-[#123326] text-[#7ccfb0] border-[#163826]'
+                }`}
+              >
+                CLEARED ILS {rwy.id}
+              </button>
+            ))}
           </div>
 
           <button
             onClick={handleGoAround}
-            className="w-full py-1.5 bg-[#381111] hover:bg-[#521818] text-[#ff4d4d] rounded border border-[#ff3344] font-bold flex items-center justify-center gap-1.5 transition-colors"
+            className="w-full py-1.5 bg-[#381111] hover:bg-[#521818] text-[#ff4d4d] rounded border border-[#ff3344] font-bold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
           >
             <AlertOctagon className="w-3.5 h-3.5" />
             <span>MANDATORY GO-AROUND</span>

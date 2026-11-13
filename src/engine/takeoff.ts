@@ -120,11 +120,12 @@ export function issueTakeoffClearance(
  */
 export function rejectTakeoff(
   ac: Aircraft,
-  reason: string = 'Engine anomaly'
+  _reason: string = 'Engine anomaly',
+  groundElevationFt: number = 83
 ): { success: boolean; aircraft: Aircraft; reason?: string } {
   const perf = getAircraftPerformance(ac.aircraftType);
 
-  if (ac.altitude > 95) {
+  if (ac.altitude > groundElevationFt + 15) {
     return { success: false, aircraft: ac, reason: 'Aircraft is already airborne; RTO impossible' };
   }
 

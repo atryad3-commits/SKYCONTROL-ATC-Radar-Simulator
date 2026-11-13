@@ -1,32 +1,56 @@
 /**
  * SKYCONTROL - Master Simulation Store (Zustand)
- * Manages aircraft state, ATC commands, simulation clock, conflict detection,
- * radio transcript, and UI layout controls.
+ * Airport-agnostic simulation engine supporting multi-airport switching,
+ * Training Academy missions, custom scenario execution, and Squawk 7700 emergencies.
  */
 
 import { create } from 'zustand';
-import { 
-  Aircraft, 
-  Airport, 
-  ConflictPair, 
-  RadioMessage, 
-  SimulationStats, 
+import {
+  ActiveMissionState,
+  Aircraft,
+  Airport,
+  AirportProfile,
+  ConflictPair,
+  CustomScenarioConfig,
+  MissionId,
+  RadioMessage,
+  SimulationStats,
   WeatherCondition,
-  Waypoint
 } from '../types';
-import { HEATHROW_AIRPORT, HEATHROW_RUNWAY_GEOMETRIES } from '../airports/heathrow';
-import { stepAircraftPhysics, normalizeHeading, calculateBearing } from '../engine/physics';
+import {
+  getAirportProfile,
+  resolveConfiguredAirport,
+} from '../airports/airportsRegistry';
+import { stepAircraftPhysics, normalizeHeading } from '../engine/physics';
 import { updateILSApproach } from '../engine/ils';
 import { detectConflicts, ConflictEventTracker } from '../engine/conflict';
-import { generateInboundFlight, generateDepartureFlight } from '../engine/trafficGenerator';
+import {
+  generateInboundFlight,
+  generateDepartureFlight,
+} from '../engine/trafficGenerator';
 import { radioAudio } from '../audio/radioAudio';
 import { RunwayOccupancyManager } from '../engine/runwayOccupancy';
-import { stepTakeoffSequence, issueTakeoffClearance, lineUpAircraft, rejectTakeoff } from '../engine/takeoff';
+import {
+  stepTakeoffSequence,
+  issueTakeoffClearance,
+  lineUpAircraft,
+  rejectTakeoff,
+} from '../engine/takeoff';
 import { SimulationEvent } from '../types/events';
-import { RadarTrackingEngine, RadarTrack, RadarObservation } from '../engine/radarTracker';
+import { RadarTrackingEngine, RadarTrack } from '../engine/radarTracker';
+import { RunwayGeometry } from '../engine/runwayGeometry';
+import {
+  buildMissionObjectives,
+  evaluateMissionProgress,
+  getMissionById,
+} from '../engine/missions';
 
 const globalConflictTracker = new ConflictEventTracker();
-const globalOccupancyManager = new RunwayOccupancyManager(HEATHROW_RUNWAY_GEOMETRIES);
+const initialResolved = resolveConfiguredAirport('EGLL');
+const globalOccupancyManager = new RunwayOccupancyManager(
+  initialResolved.runwayGeometries,
+  initialResolved.profile.reciprocalPairs
+);
 const globalRadarTracker = new RadarTrackingEngine({
   rotationRpm: 15,
   maxRangeNM: 55,
@@ -45,10 +69,28 @@ export interface RadarLayers {
 }
 
 export interface SimulationStore {
-  // State
+  // Airport & Scenario Context
+  airportProfile: AirportProfile;
+  airport: Airport;
+  activeRunwayGeometries: RunwayGeometry[];
+  activeLandingRunwayId: string;
+  activeDepartureRunwayId: string;
+  activeScenarioName: string;
+
+  // Dynamic Traffic & Emergency Settings
+  spawnIntervalSec: number;
+  maxTraffic: number;
+  heavyRatio: number;
+  allowEmergencies: boolean;
+  emergencyDelaySec: number;
+  emergencyTriggered: boolean;
+
+  // Mission Tracking
+  activeMission: ActiveMissionState;
+
+  // Core Radar & Aircraft State
   aircraft: Aircraft[];
   selectedAircraftId: string | null;
-  airport: Airport;
   weather: WeatherCondition;
   isPaused: boolean;
   simSpeed: number; // 1, 2, 5
@@ -60,13 +102,13 @@ export interface SimulationStore {
   radarLayers: RadarLayers;
   simulationEvents: SimulationEvent[];
   activeTransmission: { callsign: string; speaker: 'ATC' | 'PILOT' } | null;
-  
+
   // Real Radar Scanning & Tracking Engine State
   radarTracks: RadarTrack[];
   antennaAzimuth: number;
   radarScanCount: number;
   getRadarTrack: (aircraftId: string) => RadarTrack | undefined;
-  
+
   // Tactical measurement tool
   measureStart: { x: number; y: number } | null;
   measureCurrent: { x: number; y: number } | null;
@@ -86,8 +128,8 @@ export interface SimulationStore {
   clearTakeoff: (id: string) => void;
   abortTakeoff: (id: string) => void;
   repositionTag: (id: string, offsetX: number, offsetY: number) => void;
-  
-  // Simulation Management
+
+  // Simulation, Airport, Mission & Scenario Management
   tickSimulation: (dt: number) => void;
   togglePause: () => void;
   setSimSpeed: (speed: number) => void;
@@ -96,102 +138,97 @@ export interface SimulationStore {
   toggleLayer: (layer: keyof RadarLayers) => void;
   spawnInbound: () => void;
   spawnDeparture: () => void;
+  triggerEmergency: (type?: 'ENGINE_FAILURE' | 'MEDICAL' | 'FUEL_CRITICAL') => void;
+  switchAirport: (
+    icao: string,
+    landingRunwayId?: string,
+    departureRunwayId?: string,
+    weatherOverride?: WeatherCondition
+  ) => void;
+  startMission: (missionId: MissionId) => void;
+  exitMission: () => void;
+  startCustomScenario: (config: CustomScenarioConfig) => void;
   resetSimulation: (scenario?: string) => void;
-  setMeasurePoints: (start: { x: number; y: number } | null, current: { x: number; y: number } | null) => void;
+  setMeasurePoints: (
+    start: { x: number; y: number } | null,
+    current: { x: number; y: number } | null
+  ) => void;
 }
 
-// Initial default flight set (London Heathrow active inbound & departures)
-function createInitialFleet(): Aircraft[] {
-  const f1 = generateInboundFlight(1);
-  f1.callsign = 'BAW452';
-  f1.airline = 'British Airways';
-  f1.telephony = 'Speedbird';
-  f1.x = 22.0;
-  f1.y = 12.0;
-  f1.heading = 240;
-  f1.targetHeading = 240;
-  f1.altitude = 7000;
-  f1.targetAltitude = 4000;
-  f1.indicatedAirspeed = 220;
-  f1.targetAirspeed = 210;
-  f1.assignedWaypoint = 'LAM';
-  f1.history = [
-    { x: 33.0, y: 18.5, altitude: 12000, timestamp: -90 },
-    { x: 30.0, y: 16.8, altitude: 10800, timestamp: -70 },
-    { x: 27.5, y: 15.2, altitude: 9500, timestamp: -50 },
-    { x: 25.0, y: 13.8, altitude: 8200, timestamp: -30 },
-    { x: 23.5, y: 12.8, altitude: 7500, timestamp: -15 },
-    { x: 22.0, y: 12.0, altitude: 7000, timestamp: 0 },
-  ];
+/**
+ * Generates an initial balanced fleet tailored to ANY airport & runway heading
+ */
+function createFleetForAirport(
+  airport: Airport,
+  runwayGeometries: RunwayGeometry[],
+  landingRunwayId: string,
+  departureRunwayId: string,
+  inboundCount: number = 3,
+  departureCount: number = 1,
+  heavyRatio?: number,
+  includeInitialEmergency: boolean = false
+): Aircraft[] {
+  const arrRwy = airport.runways.find(r => r.id === landingRunwayId) || airport.runways[0];
+  const depRwy =
+    airport.runways.find(r => r.id === departureRunwayId) ||
+    airport.runways[1] ||
+    airport.runways[0];
+  const arrGeom = runwayGeometries.find(r => r.id === arrRwy.id) || runwayGeometries[0];
+  const fleet: Aircraft[] = [];
 
-  const f2 = generateInboundFlight(2);
-  f2.callsign = 'VIR18';
-  f2.airline = 'Virgin Atlantic';
-  f2.telephony = 'Virgin';
-  f2.origin = 'KBOS';
-  f2.x = 18.0;
-  f2.y = -14.0;
-  f2.heading = 300;
-  f2.targetHeading = 300;
-  f2.altitude = 8000;
-  f2.targetAltitude = 5000;
-  f2.indicatedAirspeed = 230;
-  f2.targetAirspeed = 210;
-  f2.assignedWaypoint = 'OCK';
-  f2.history = [
-    { x: 28.0, y: -20.0, altitude: 13000, timestamp: -80 },
-    { x: 25.0, y: -18.2, altitude: 11200, timestamp: -60 },
-    { x: 22.5, y: -16.6, altitude: 9800, timestamp: -40 },
-    { x: 20.0, y: -15.2, altitude: 8900, timestamp: -20 },
-    { x: 18.0, y: -14.0, altitude: 8000, timestamp: 0 },
-  ];
+  // Create one traffic established 14 NM back along approach corridor for immediate situational clarity
+  if (inboundCount >= 1) {
+    const approachRad = (arrGeom.magneticHeading * Math.PI) / 180;
+    const fNear = generateInboundFlight(1, {
+      airport,
+      arrivalRunway: arrRwy,
+      heavyRatio,
+      isEmergency: includeInitialEmergency,
+      emergencyType: includeInitialEmergency ? 'ENGINE_FAILURE' : undefined,
+    });
+    const distOut = 14.5;
+    const posX = arrRwy.threshold.x - distOut * Math.sin(approachRad);
+    const posY = arrRwy.threshold.y - distOut * Math.cos(approachRad);
+    const nearAlt = Math.ceil(airport.elevationFeet / 1000) * 1000 + 3500;
 
-  const f3 = generateInboundFlight(3);
-  f3.callsign = 'DLH914';
-  f3.airline = 'Lufthansa';
-  f3.telephony = 'Lufthansa';
-  f3.origin = 'EDDF';
-  f3.x = 14.5;
-  f3.y = 0.38; // On 27R approach corridor
-  f3.heading = 270;
-  f3.targetHeading = 270;
-  f3.altitude = 3500;
-  f3.targetAltitude = 3000;
-  f3.indicatedAirspeed = 180;
-  f3.targetAirspeed = 160;
-  f3.assignedWaypoint = 'D15R';
-  f3.ilsArmed = true;
-  f3.history = [
-    { x: 26.0, y: 0.38, altitude: 7000, timestamp: -90 },
-    { x: 22.5, y: 0.38, altitude: 5800, timestamp: -70 },
-    { x: 19.5, y: 0.38, altitude: 4800, timestamp: -45 },
-    { x: 17.0, y: 0.38, altitude: 4100, timestamp: -25 },
-    { x: 14.5, y: 0.38, altitude: 3500, timestamp: 0 },
-  ];
+    fNear.x = posX;
+    fNear.y = posY;
+    fNear.heading = arrGeom.magneticHeading;
+    fNear.targetHeading = arrGeom.magneticHeading;
+    fNear.altitude = nearAlt;
+    fNear.targetAltitude = Math.ceil(airport.elevationFeet / 1000) * 1000 + 3000;
+    fNear.indicatedAirspeed = 185;
+    fNear.targetAirspeed = 170;
+    fNear.assignedWaypoint = null;
+    fNear.ilsArmed = !includeInitialEmergency;
+    fNear.history = [6, 5, 4, 3, 2, 1, 0].map(s => ({
+      x: posX - s * 2.0 * Math.sin(approachRad),
+      y: posY - s * 2.0 * Math.cos(approachRad),
+      altitude: Math.min(18000, nearAlt + s * 450),
+      timestamp: -s * 15,
+    }));
+    fleet.push(fNear);
+  }
 
-  const f4 = generateDepartureFlight();
-  f4.callsign = 'BAW117';
-  f4.airline = 'British Airways';
-  f4.telephony = 'Speedbird';
-  f4.origin = 'EGLL';
-  f4.destination = 'KJFK';
-  f4.x = -2.5;
-  f4.y = -0.38;
-  f4.altitude = 2200;
-  f4.targetAltitude = 6000;
-  f4.indicatedAirspeed = 190;
-  f4.heading = 270;
-  f4.targetHeading = 270;
-  f4.verticalSpeed = 2200;
-  f4.status = 'Outbound';
-  f4.history = [
-    { x: 0.95, y: -0.38, altitude: 83, timestamp: -45 },
-    { x: 0.0, y: -0.38, altitude: 400, timestamp: -30 },
-    { x: -1.2, y: -0.38, altitude: 1100, timestamp: -15 },
-    { x: -2.5, y: -0.38, altitude: 2200, timestamp: 0 },
-  ];
+  for (let i = 1; i < inboundCount; i++) {
+    const f = generateInboundFlight(i + 1, {
+      airport,
+      arrivalRunway: arrRwy,
+      heavyRatio,
+    });
+    fleet.push(f);
+  }
 
-  return [f1, f2, f3, f4];
+  for (let d = 0; d < departureCount; d++) {
+    const dep = generateDepartureFlight({
+      airport,
+      departureRunway: depRwy,
+      heavyRatio,
+    });
+    fleet.push(dep);
+  }
+
+  return fleet;
 }
 
 function getFormattedUTCTime(): string {
@@ -200,24 +237,25 @@ function getFormattedUTCTime(): string {
 }
 
 function logCommsExchange(
+  get: () => SimulationStore,
   set: (fn: (state: SimulationStore) => Partial<SimulationStore>) => void,
   callsign: string,
   atcText: string,
   pilotText: string,
   spokenText: string
 ) {
+  const { airportProfile } = get();
   const atcMsg: RadioMessage = {
     id: `atc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     timestamp: getFormattedUTCTime(),
     sender: 'ATC',
-    callsign: 'EGLL_DIR',
+    callsign: airportProfile.directorCallsign,
     text: atcText,
-    frequency: '119.725 MHz',
+    frequency: airportProfile.vhfFrequency,
   };
 
   set(state => ({ radioMessages: [atcMsg, ...state.radioMessages.slice(0, 49)] }));
 
-  // Dual-voice audio exchange: Controller speaks -> pause -> Pilot responds with distinct voice
   radioAudio.speakRadioExchange(
     atcText,
     callsign,
@@ -227,36 +265,58 @@ function logCommsExchange(
         id: `pilot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         timestamp: getFormattedUTCTime(),
         sender: 'PILOT',
-        callsign: callsign,
+        callsign,
         text: pilotText,
-        frequency: '119.725 MHz',
+        frequency: airportProfile.vhfFrequency,
       };
       set(state => ({ radioMessages: [pilotMsg, ...state.radioMessages.slice(0, 49)] }));
     }
   );
 }
 
-const initialFleet = createInitialFleet();
+const initialFleet = createFleetForAirport(
+  initialResolved.airport,
+  initialResolved.runwayGeometries,
+  initialResolved.landingRunwayId,
+  initialResolved.departureRunwayId,
+  3,
+  1
+);
 globalRadarTracker.seedInitialTracks(initialFleet, 0);
 
+const IDLE_MISSION_STATE: ActiveMissionState = {
+  mission: null,
+  status: 'idle',
+  objectives: [],
+  emergencyHandled: false,
+  goAroundObserved: false,
+};
+
 export const useSimulationStore = create<SimulationStore>((set, get) => ({
+  airportProfile: initialResolved.profile,
+  airport: initialResolved.airport,
+  activeRunwayGeometries: initialResolved.runwayGeometries,
+  activeLandingRunwayId: initialResolved.landingRunwayId,
+  activeDepartureRunwayId: initialResolved.departureRunwayId,
+  activeScenarioName: 'Free Operations · EGLL',
+
+  spawnIntervalSec: 45,
+  maxTraffic: 10,
+  heavyRatio: 0.35,
+  allowEmergencies: false,
+  emergencyDelaySec: 45,
+  emergencyTriggered: false,
+
+  activeMission: IDLE_MISSION_STATE,
+
   aircraft: initialFleet,
-  selectedAircraftId: 'BAW452',
-  airport: HEATHROW_AIRPORT,
-  weather: {
-    windDirection: 260,
-    windSpeed: 12,
-    gusts: 18,
-    qnh: 1013,
-    visibilityNM: 10,
-    ceilingFeet: 5000,
-    precipitation: 'None',
-  },
+  selectedAircraftId: initialFleet[0]?.id || null,
+  weather: initialResolved.profile.defaultWeather,
   isPaused: false,
   simSpeed: 1,
   stats: {
     landings: 0,
-    departures: 1,
+    departures: 0,
     goArounds: 0,
     separationViolations: 0,
     score: 100,
@@ -268,17 +328,9 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       id: 'init_1',
       timestamp: getFormattedUTCTime(),
       sender: 'PILOT',
-      callsign: 'BAW452',
-      text: 'Heathrow Director, Speedbird 452 descending through FL70, information Charlie.',
-      frequency: '119.725 MHz',
-    },
-    {
-      id: 'init_2',
-      timestamp: getFormattedUTCTime(),
-      sender: 'ATC',
-      callsign: 'BAW452',
-      text: 'Speedbird 452, radar contact. Turn left heading 240, descend to 4,000 feet.',
-      frequency: '119.725 MHz',
+      callsign: initialFleet[0]?.callsign || 'BAW452',
+      text: `${initialResolved.airport.name} Director, ${initialFleet[0]?.telephony || 'Speedbird'} descending into TMA, radar contact.`,
+      frequency: initialResolved.profile.vhfFrequency,
     },
   ],
   audioMuted: false,
@@ -300,7 +352,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   measureStart: null,
   measureCurrent: null,
 
-  selectAircraft: (id) => {
+  selectAircraft: id => {
     set({ selectedAircraftId: id });
   },
 
@@ -310,21 +362,24 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     if (!ac) return;
 
     set(state => ({
-      aircraft: state.aircraft.map(a => 
-        a.id === id ? { 
-          ...a, 
-          targetHeading: target, 
-          assignedWaypoint: null,
-          ilsArmed: false,
-          ilsLocalizerCaptured: false,
-          ilsGlideslopeCaptured: false,
-          status: a.status === 'Established' ? 'Inbound' : a.status
-        } : a
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              targetHeading: target,
+              assignedWaypoint: null,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              status: a.status === 'Established' ? 'Inbound' : a.status,
+            }
+          : a
       ),
     }));
 
     const headingStr = target.toString().padStart(3, '0');
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, turn heading ${headingStr}`,
@@ -338,20 +393,23 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     if (!ac) return;
     const newTarget = normalizeHeading(ac.targetHeading - degrees);
     set(state => ({
-      aircraft: state.aircraft.map(a => 
-        a.id === id ? { 
-          ...a, 
-          targetHeading: newTarget, 
-          assignedWaypoint: null,
-          ilsArmed: false,
-          ilsLocalizerCaptured: false,
-          ilsGlideslopeCaptured: false,
-          status: a.status === 'Established' ? 'Inbound' : a.status
-        } : a
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              targetHeading: newTarget,
+              assignedWaypoint: null,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              status: a.status === 'Established' ? 'Inbound' : a.status,
+            }
+          : a
       ),
     }));
     const headingStr = newTarget.toString().padStart(3, '0');
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, turn left heading ${headingStr}`,
@@ -365,20 +423,23 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     if (!ac) return;
     const newTarget = normalizeHeading(ac.targetHeading + degrees);
     set(state => ({
-      aircraft: state.aircraft.map(a => 
-        a.id === id ? { 
-          ...a, 
-          targetHeading: newTarget, 
-          assignedWaypoint: null,
-          ilsArmed: false,
-          ilsLocalizerCaptured: false,
-          ilsGlideslopeCaptured: false,
-          status: a.status === 'Established' ? 'Inbound' : a.status
-        } : a
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              targetHeading: newTarget,
+              assignedWaypoint: null,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              status: a.status === 'Established' ? 'Inbound' : a.status,
+            }
+          : a
       ),
     }));
     const headingStr = newTarget.toString().padStart(3, '0');
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, turn right heading ${headingStr}`,
@@ -388,27 +449,31 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   },
 
   setAltitude: (id, altitude, expedite = false) => {
-    const ac = get().aircraft.find(a => a.id === id);
+    const { aircraft, airport } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
-    const target = Math.max(83, Math.min(18000, Math.round(altitude)));
+    const target = Math.max(airport.elevationFeet, Math.min(20000, Math.round(altitude)));
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
-        a.id === id ? {
-          ...a,
-          targetAltitude: target,
-          expediteAltitude: expedite,
-          ilsGlideslopeCaptured: false,
-        } : a
+        a.id === id
+          ? {
+              ...a,
+              targetAltitude: target,
+              expediteAltitude: expedite,
+              ilsGlideslopeCaptured: false,
+            }
+          : a
       ),
     }));
 
     const isClimb = target > ac.altitude;
     const actionWord = isClimb ? 'Climb and maintain' : 'Descend and maintain';
-    const altText = target >= 6000 ? `Flight Level ${Math.round(target / 100)}` : `${target} feet`;
+    const altText = target >= 8000 ? `Flight Level ${Math.round(target / 100)}` : `${target} feet`;
     const expeditePhrase = expedite ? ' expedite' : '';
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, ${actionWord.toLowerCase()} ${altText}${expeditePhrase}`,
@@ -429,9 +494,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
-      `${ac.callsign}, reduce speed to ${target} knots`,
+      `${ac.callsign}, adjust speed to ${target} knots`,
       `Speed ${target} knots, ${ac.telephony} ${ac.callsign.slice(3)}`,
       `Speed ${target} knots`
     );
@@ -444,16 +510,19 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
-        a.id === id ? {
-          ...a,
-          assignedWaypoint: waypointName,
-          status: 'Inbound',
-          ilsArmed: false,
-        } : a
+        a.id === id
+          ? {
+              ...a,
+              assignedWaypoint: waypointName,
+              status: 'Inbound',
+              ilsArmed: false,
+            }
+          : a
       ),
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, proceed direct to ${waypointName}`,
@@ -468,16 +537,19 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
-        a.id === id ? {
-          ...a,
-          ilsArmed: true,
-          assignedRunway: runwayId,
-          status: 'LocalizerIntercept',
-        } : a
+        a.id === id
+          ? {
+              ...a,
+              ilsArmed: true,
+              assignedRunway: runwayId,
+              status: 'LocalizerIntercept',
+            }
+          : a
       ),
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, cleared ILS approach runway ${runwayId}`,
@@ -486,37 +558,52 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     );
   },
 
-  goAround: (id) => {
-    const ac = get().aircraft.find(a => a.id === id);
+  goAround: id => {
+    const { aircraft, airport, activeMission, stats } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
+
+    const missedAlt = Math.ceil(airport.elevationFeet / 1000) * 1000 + 3000;
+    const nextStats: SimulationStats = {
+      ...stats,
+      goArounds: stats.goArounds + 1,
+      score: activeMission.status === 'active' && activeMission.mission?.requireGoAroundHandled
+        ? stats.score
+        : Math.max(0, stats.score - 2),
+    };
+
+    const nextMissionState =
+      activeMission.status === 'active'
+        ? evaluateMissionProgress(activeMission, nextStats, false, true)
+        : activeMission;
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
-        a.id === id ? {
-          ...a,
-          status: 'GoAround',
-          ilsArmed: false,
-          ilsLocalizerCaptured: false,
-          ilsGlideslopeCaptured: false,
-          targetAltitude: 3000,
-          targetAirspeed: 210,
-          targetHeading: a.heading,
-          expediteAltitude: true,
-        } : a
+        a.id === id
+          ? {
+              ...a,
+              status: 'GoAround',
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              targetAltitude: missedAlt,
+              targetAirspeed: 210,
+              targetHeading: a.heading,
+              expediteAltitude: true,
+            }
+          : a
       ),
-      stats: {
-        ...state.stats,
-        goArounds: state.stats.goArounds + 1,
-        score: Math.max(0, state.stats.score - 5),
-      },
+      stats: nextStats,
+      activeMission: nextMissionState,
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
-      `${ac.callsign}, go around, climb to 3,000 feet runway heading`,
-      `Going around, climbing to 3,000 feet, ${ac.telephony} ${ac.callsign.slice(3)}`,
-      `Going around, climbing to 3,000 feet`
+      `${ac.callsign}, go around, climb to ${missedAlt} feet runway heading`,
+      `Going around, climbing to ${missedAlt} feet, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `Going around, climbing to ${missedAlt} feet`
     );
   },
 
@@ -527,19 +614,22 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
-        a.id === id ? {
-          ...a,
-          status: 'Holding',
-          holdingWaypoint: waypointName,
-          holdingInboundHeading: wp.defaultHoldingHeading || 270,
-          holdingLeg: 'Inbound',
-          holdingTimer: 0,
-          assignedWaypoint: waypointName,
-        } : a
+        a.id === id
+          ? {
+              ...a,
+              status: 'Holding',
+              holdingWaypoint: waypointName,
+              holdingInboundHeading: wp.defaultHoldingHeading || 270,
+              holdingLeg: 'Inbound',
+              holdingTimer: 0,
+              assignedWaypoint: waypointName,
+            }
+          : a
       ),
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, hold at ${waypointName} as published`,
@@ -549,13 +639,17 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   },
 
   lineUpAndWait: (id, runwayId) => {
-    const ac = get().aircraft.find(a => a.id === id);
+    const { aircraft, activeRunwayGeometries, stats } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
-    const rwyGeom = HEATHROW_RUNWAY_GEOMETRIES.find(r => r.id === runwayId) || HEATHROW_RUNWAY_GEOMETRIES[1];
-    const res = lineUpAircraft(ac, rwyGeom, globalOccupancyManager, get().stats.elapsedSeconds);
+    const rwyGeom =
+      activeRunwayGeometries.find(r => r.id === runwayId) ||
+      activeRunwayGeometries[0];
+    const res = lineUpAircraft(ac, rwyGeom, globalOccupancyManager, stats.elapsedSeconds);
 
     if (!res.success) {
       logCommsExchange(
+        get,
         set,
         ac.callsign,
         `${ac.callsign}, line up and wait runway ${runwayId}`,
@@ -566,10 +660,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }
 
     set(state => ({
-      aircraft: state.aircraft.map(a => a.id === id ? res.aircraft : a),
+      aircraft: state.aircraft.map(a => (a.id === id ? res.aircraft : a)),
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, runway ${runwayId}, line up and wait`,
@@ -578,14 +673,23 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     );
   },
 
-  clearTakeoff: (id) => {
-    const ac = get().aircraft.find(a => a.id === id);
+  clearTakeoff: id => {
+    const { aircraft, activeRunwayGeometries, stats, weather, activeMission } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
-    const rwyGeom = HEATHROW_RUNWAY_GEOMETRIES.find(r => r.id === ac.assignedRunway) || HEATHROW_RUNWAY_GEOMETRIES[1];
-    const res = issueTakeoffClearance(ac, rwyGeom, globalOccupancyManager, get().stats.elapsedSeconds);
+    const rwyGeom =
+      activeRunwayGeometries.find(r => r.id === ac.assignedRunway) ||
+      activeRunwayGeometries[0];
+    const res = issueTakeoffClearance(
+      ac,
+      rwyGeom,
+      globalOccupancyManager,
+      stats.elapsedSeconds
+    );
 
     if (!res.success) {
       logCommsExchange(
+        get,
         set,
         ac.callsign,
         `${ac.callsign}, runway ${ac.assignedRunway} cleared for takeoff`,
@@ -595,17 +699,25 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       return;
     }
 
+    const nextStats: SimulationStats = {
+      ...stats,
+      departures: stats.departures + 1,
+      score: Math.min(100, stats.score + 5),
+    };
+    const nextMissionState =
+      activeMission.status === 'active'
+        ? evaluateMissionProgress(activeMission, nextStats, false, false)
+        : activeMission;
+
     set(state => ({
-      aircraft: state.aircraft.map(a => a.id === id ? res.aircraft : a),
-      stats: {
-        ...state.stats,
-        departures: state.stats.departures + 1,
-        score: state.stats.score + 10,
-      },
+      aircraft: state.aircraft.map(a => (a.id === id ? res.aircraft : a)),
+      stats: nextStats,
+      activeMission: nextMissionState,
     }));
 
-    const wind = `${get().weather.windDirection} at ${get().weather.windSpeed}`;
+    const wind = `${weather.windDirection} at ${weather.windSpeed}`;
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, wind ${wind}, runway ${ac.assignedRunway} cleared for takeoff`,
@@ -614,12 +726,14 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     );
   },
 
-  abortTakeoff: (id) => {
-    const ac = get().aircraft.find(a => a.id === id);
+  abortTakeoff: id => {
+    const { aircraft, airport } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
-    const res = rejectTakeoff(ac, 'Aborted on ATC instruction');
+    const res = rejectTakeoff(ac, 'Aborted on ATC instruction', airport.elevationFeet);
     if (!res.success) {
       logCommsExchange(
+        get,
         set,
         ac.callsign,
         `${ac.callsign}, abort takeoff immediately!`,
@@ -630,10 +744,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }
 
     set(state => ({
-      aircraft: state.aircraft.map(a => a.id === id ? res.aircraft : a),
+      aircraft: state.aircraft.map(a => (a.id === id ? res.aircraft : a)),
     }));
 
     logCommsExchange(
+      get,
       set,
       ac.callsign,
       `${ac.callsign}, stop immediately, abort takeoff!`,
@@ -654,21 +769,21 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     set(state => ({ isPaused: !state.isPaused }));
   },
 
-  setSimSpeed: (speed) => {
+  setSimSpeed: speed => {
     set({ simSpeed: speed });
   },
 
-  setAudioMuted: (muted) => {
+  setAudioMuted: muted => {
     radioAudio.setMuted(muted);
     set({ audioMuted: muted });
   },
 
-  setAudioVolume: (vol) => {
+  setAudioVolume: vol => {
     radioAudio.setVolume(vol);
     set({ audioVolume: vol });
   },
 
-  toggleLayer: (layer) => {
+  toggleLayer: layer => {
     set(state => ({
       radarLayers: {
         ...state.radarLayers,
@@ -682,34 +797,345 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   },
 
   spawnInbound: () => {
-    const newAc = generateInboundFlight();
+    const { airport, activeLandingRunwayId, heavyRatio } = get();
+    const arrRwy = airport.runways.find(r => r.id === activeLandingRunwayId) || airport.runways[0];
+    const newAc = generateInboundFlight(undefined, {
+      airport,
+      arrivalRunway: arrRwy,
+      heavyRatio,
+    });
     set(state => ({
       aircraft: [...state.aircraft, newAc],
     }));
   },
 
   spawnDeparture: () => {
-    const newAc = generateDepartureFlight();
+    const { airport, activeDepartureRunwayId, heavyRatio } = get();
+    const depRwy =
+      airport.runways.find(r => r.id === activeDepartureRunwayId) ||
+      airport.runways[1] ||
+      airport.runways[0];
+    const newAc = generateDepartureFlight({
+      airport,
+      departureRunway: depRwy,
+      heavyRatio,
+    });
     set(state => ({
       aircraft: [...state.aircraft, newAc],
     }));
   },
 
-  resetSimulation: (scenario = 'normal') => {
+  triggerEmergency: (type = 'ENGINE_FAILURE') => {
+    const { airport, activeLandingRunwayId, airportProfile } = get();
+    const arrRwy = airport.runways.find(r => r.id === activeLandingRunwayId) || airport.runways[0];
+    const emerAc = generateInboundFlight(undefined, {
+      airport,
+      arrivalRunway: arrRwy,
+      isEmergency: true,
+      emergencyType: type,
+    });
+
+    const emergencyMsg: RadioMessage = {
+      id: `emer_${Date.now()}`,
+      timestamp: getFormattedUTCTime(),
+      sender: 'PILOT',
+      callsign: emerAc.callsign,
+      text: `MAYDAY MAYDAY MAYDAY! ${emerAc.callsign} squawking 7700 (${type.replace('_', ' ')}), requesting immediate priority vectors for runway ${arrRwy.id}!`,
+      frequency: airportProfile.vhfFrequency,
+    };
+
+    radioAudio.playConflictAlert();
+    radioAudio.speakPilotReadback(
+      emerAc.callsign,
+      `Mayday Mayday, squawking 7700, requesting immediate priority landing runway ${arrRwy.id}`
+    );
+
+    set(state => ({
+      aircraft: [emerAc, ...state.aircraft],
+      selectedAircraftId: emerAc.id,
+      emergencyTriggered: true,
+      radioMessages: [emergencyMsg, ...state.radioMessages.slice(0, 49)],
+    }));
+  },
+
+  switchAirport: (icao, landingRunwayId, departureRunwayId, weatherOverride) => {
+    const resolved = resolveConfiguredAirport(icao, landingRunwayId, departureRunwayId);
+    globalConflictTracker.clear();
+    globalOccupancyManager.configureAirport(
+      resolved.runwayGeometries,
+      resolved.profile.reciprocalPairs
+    );
+    globalRadarTracker.reset();
+
+    const freshFleet = createFleetForAirport(
+      resolved.airport,
+      resolved.runwayGeometries,
+      resolved.landingRunwayId,
+      resolved.departureRunwayId,
+      3,
+      1
+    );
+    globalRadarTracker.seedInitialTracks(freshFleet, 0);
+
+    set({
+      airportProfile: resolved.profile,
+      airport: resolved.airport,
+      activeRunwayGeometries: resolved.runwayGeometries,
+      activeLandingRunwayId: resolved.landingRunwayId,
+      activeDepartureRunwayId: resolved.departureRunwayId,
+      activeScenarioName: `Free Operations · ${resolved.airport.icao}`,
+      activeMission: IDLE_MISSION_STATE,
+      spawnIntervalSec: 45,
+      maxTraffic: 10,
+      heavyRatio: 0.35,
+      allowEmergencies: false,
+      emergencyTriggered: false,
+      aircraft: freshFleet,
+      selectedAircraftId: freshFleet[0]?.id || null,
+      weather: weatherOverride || resolved.profile.defaultWeather,
+      isPaused: false,
+      simSpeed: 1,
+      stats: {
+        landings: 0,
+        departures: 0,
+        goArounds: 0,
+        separationViolations: 0,
+        score: 100,
+        elapsedSeconds: 0,
+      },
+      conflicts: [],
+      simulationEvents: [],
+      radarTracks: globalRadarTracker.getTracks(),
+      antennaAzimuth: 0,
+      radarScanCount: 0,
+      radioMessages: [
+        {
+          id: `init_${Date.now()}`,
+          timestamp: getFormattedUTCTime(),
+          sender: 'PILOT',
+          callsign: freshFleet[0]?.callsign || 'TMA',
+          text: `${resolved.airport.name} Radar active. RWY ${resolved.landingRunwayId} arrivals / RWY ${resolved.departureRunwayId} departures.`,
+          frequency: resolved.profile.vhfFrequency,
+        },
+      ],
+    });
+  },
+
+  startMission: missionId => {
+    const mission = getMissionById(missionId);
+    if (!mission) return;
+
+    const resolved = resolveConfiguredAirport(
+      mission.airportIcao,
+      mission.landingRunwayId,
+      mission.departureRunwayId
+    );
+    globalConflictTracker.clear();
+    globalOccupancyManager.configureAirport(
+      resolved.runwayGeometries,
+      resolved.profile.reciprocalPairs
+    );
+    globalRadarTracker.reset();
+
+    const freshFleet = createFleetForAirport(
+      resolved.airport,
+      resolved.runwayGeometries,
+      resolved.landingRunwayId,
+      resolved.departureRunwayId,
+      mission.initialInbounds,
+      mission.initialDepartures,
+      0.35,
+      Boolean(mission.requireEmergencyHandled)
+    );
+    globalRadarTracker.seedInitialTracks(freshFleet, 0);
+
+    const initialStats: SimulationStats = {
+      landings: 0,
+      departures: 0,
+      goArounds: 0,
+      separationViolations: 0,
+      score: 100,
+      elapsedSeconds: 0,
+    };
+
+    const initialMessages: RadioMessage[] = [
+      {
+        id: `msn_${Date.now()}`,
+        timestamp: getFormattedUTCTime(),
+        sender: 'ATC',
+        callsign: resolved.profile.directorCallsign,
+        text: `MISSION ${mission.number}: ${mission.title} (${mission.airportIcao} · RWY ${mission.landingRunwayId}/${mission.departureRunwayId})`,
+        frequency: resolved.profile.vhfFrequency,
+      },
+    ];
+
+    if (mission.requireEmergencyHandled && freshFleet[0]) {
+      initialMessages.unshift({
+        id: `msn_emer_${Date.now()}`,
+        timestamp: getFormattedUTCTime(),
+        sender: 'PILOT',
+        callsign: freshFleet[0].callsign,
+        text: `MAYDAY MAYDAY! ${freshFleet[0].callsign} squawking 7700, engine failure! Request priority landing RWY ${resolved.landingRunwayId}.`,
+        frequency: resolved.profile.vhfFrequency,
+      });
+    }
+
+    set({
+      airportProfile: resolved.profile,
+      airport: resolved.airport,
+      activeRunwayGeometries: resolved.runwayGeometries,
+      activeLandingRunwayId: resolved.landingRunwayId,
+      activeDepartureRunwayId: resolved.departureRunwayId,
+      activeScenarioName: `Mission ${mission.number} · ${mission.airportIcao}`,
+      activeMission: {
+        mission,
+        status: 'active',
+        objectives: buildMissionObjectives(mission, initialStats, false, false),
+        emergencyHandled: false,
+        goAroundObserved: false,
+      },
+      spawnIntervalSec: mission.spawnIntervalSec,
+      maxTraffic: mission.maxTraffic,
+      heavyRatio: 0.35,
+      allowEmergencies: Boolean(mission.requireEmergencyHandled),
+      emergencyDelaySec: 30,
+      emergencyTriggered: Boolean(mission.requireEmergencyHandled),
+      aircraft: freshFleet,
+      selectedAircraftId: freshFleet[0]?.id || null,
+      weather: mission.weather,
+      isPaused: false,
+      simSpeed: 1,
+      stats: initialStats,
+      conflicts: [],
+      simulationEvents: [],
+      radarTracks: globalRadarTracker.getTracks(),
+      antennaAzimuth: 0,
+      radarScanCount: 0,
+      radioMessages: initialMessages,
+    });
+  },
+
+  exitMission: () => {
+    set({ activeMission: IDLE_MISSION_STATE });
+  },
+
+  startCustomScenario: config => {
+    const resolved = resolveConfiguredAirport(
+      config.airportIcao,
+      config.landingRunwayId,
+      config.departureRunwayId
+    );
+    globalConflictTracker.clear();
+    globalOccupancyManager.configureAirport(
+      resolved.runwayGeometries,
+      resolved.profile.reciprocalPairs
+    );
+    globalRadarTracker.reset();
+
+    const freshFleet = createFleetForAirport(
+      resolved.airport,
+      resolved.runwayGeometries,
+      resolved.landingRunwayId,
+      resolved.departureRunwayId,
+      config.initialInbounds,
+      config.initialDepartures,
+      config.heavyRatio
+    );
+    globalRadarTracker.seedInitialTracks(freshFleet, 0);
+
+    const customWeather: WeatherCondition = {
+      windDirection: config.windDirection,
+      windSpeed: config.windSpeed,
+      gusts: config.gusts,
+      qnh: config.qnh,
+      visibilityNM: config.visibilityNM,
+      ceilingFeet: config.ceilingFeet,
+      precipitation: config.precipitation,
+    };
+
+    set({
+      airportProfile: resolved.profile,
+      airport: resolved.airport,
+      activeRunwayGeometries: resolved.runwayGeometries,
+      activeLandingRunwayId: resolved.landingRunwayId,
+      activeDepartureRunwayId: resolved.departureRunwayId,
+      activeScenarioName: config.name,
+      activeMission: IDLE_MISSION_STATE,
+      spawnIntervalSec: config.spawnIntervalSec,
+      maxTraffic: Math.max(6, config.initialInbounds + config.initialDepartures + 4),
+      heavyRatio: config.heavyRatio,
+      allowEmergencies: config.allowEmergencies,
+      emergencyDelaySec: config.emergencyDelaySec,
+      emergencyTriggered: false,
+      aircraft: freshFleet,
+      selectedAircraftId: freshFleet[0]?.id || null,
+      weather: customWeather,
+      isPaused: false,
+      simSpeed: 1,
+      stats: {
+        landings: 0,
+        departures: 0,
+        goArounds: 0,
+        separationViolations: 0,
+        score: 100,
+        elapsedSeconds: 0,
+      },
+      conflicts: [],
+      simulationEvents: [],
+      radarTracks: globalRadarTracker.getTracks(),
+      antennaAzimuth: 0,
+      radarScanCount: 0,
+      radioMessages: [
+        {
+          id: `cust_${Date.now()}`,
+          timestamp: getFormattedUTCTime(),
+          sender: 'ATC',
+          callsign: resolved.profile.directorCallsign,
+          text: `Scenario "${config.name}" active at ${resolved.airport.icao} (Wind ${customWeather.windDirection}°/${customWeather.windSpeed}kt).`,
+          frequency: resolved.profile.vhfFrequency,
+        },
+      ],
+    });
+  },
+
+  resetSimulation: () => {
+    const {
+      airport,
+      activeRunwayGeometries,
+      activeLandingRunwayId,
+      activeDepartureRunwayId,
+      activeMission,
+      heavyRatio,
+    } = get();
+
+    if (activeMission.mission) {
+      get().startMission(activeMission.mission.id);
+      return;
+    }
+
     globalConflictTracker.clear();
     globalOccupancyManager.clearAll();
-    const freshFleet = createInitialFleet();
+    const freshFleet = createFleetForAirport(
+      airport,
+      activeRunwayGeometries,
+      activeLandingRunwayId,
+      activeDepartureRunwayId,
+      3,
+      1,
+      heavyRatio
+    );
     globalRadarTracker.reset();
     globalRadarTracker.seedInitialTracks(freshFleet, 0);
 
     set({
       aircraft: freshFleet,
-      selectedAircraftId: 'BAW452',
+      selectedAircraftId: freshFleet[0]?.id || null,
       isPaused: false,
       simSpeed: 1,
+      emergencyTriggered: false,
       stats: {
         landings: 0,
-        departures: 1,
+        departures: 0,
         goArounds: 0,
         separationViolations: 0,
         score: 100,
@@ -731,24 +1157,42 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     if (state.isPaused) return;
 
     const actualDt = dt * state.simSpeed;
-    const { aircraft, airport, weather, stats } = state;
+    const {
+      aircraft,
+      airport,
+      weather,
+      stats,
+      activeRunwayGeometries,
+      activeMission,
+      allowEmergencies,
+      emergencyDelaySec,
+      emergencyTriggered,
+    } = state;
     const currentSimTime = stats.elapsedSeconds + actualDt;
+
+    // Trigger timed emergency injection if enabled in custom scenario
+    if (allowEmergencies && !emergencyTriggered && currentSimTime >= emergencyDelaySec) {
+      get().triggerEmergency('ENGINE_FAILURE');
+    }
 
     let scoreDelta = 0;
     let newLandings = stats.landings;
+    let emergencyLandedThisTick = false;
+    let goAroundThisTick = false;
 
-    // 1. Step departures, physics & ILS for each aircraft
     const updatedAircraft: Aircraft[] = [];
 
     for (const ac of aircraft) {
-      const assignedRwyGeom = HEATHROW_RUNWAY_GEOMETRIES.find(r => r.id === ac.assignedRunway) || HEATHROW_RUNWAY_GEOMETRIES[0];
+      const assignedRwyGeom =
+        activeRunwayGeometries.find(r => r.id === ac.assignedRunway) ||
+        activeRunwayGeometries[0];
       let currentAc = ac;
 
-      // Check if aircraft is in ground departure phase
-      const isGroundDeparture = currentAc.status === 'Departing' && (currentAc.altitude - assignedRwyGeom.elevationFeet) <= 1500;
+      const isGroundDeparture =
+        currentAc.status === 'Departing' &&
+        currentAc.altitude - assignedRwyGeom.elevationFeet <= 1500;
 
       if (isGroundDeparture && currentAc.indicatedAirspeed > 0) {
-        // Step staged takeoff dynamics
         const toResult = stepTakeoffSequence(
           currentAc,
           assignedRwyGeom,
@@ -758,7 +1202,6 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         );
         currentAc = toResult.aircraft;
       } else {
-        // Step general airborne physics & navigation
         currentAc = stepAircraftPhysics(
           currentAc,
           actualDt,
@@ -768,8 +1211,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           airport.elevationFeet
         );
 
-        // Step advanced ILS approach & landing sequence
-        if (currentAc.ilsArmed || currentAc.ilsLocalizerCaptured || currentAc.status === 'Landed') {
+        if (
+          currentAc.ilsArmed ||
+          currentAc.ilsLocalizerCaptured ||
+          currentAc.status === 'Landed'
+        ) {
           const ilsResult = updateILSApproach(
             currentAc,
             assignedRwyGeom,
@@ -779,22 +1225,39 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           );
           currentAc = ilsResult.aircraft;
 
-          // Check if newly touched down
           if (ilsResult.landed && ac.status !== 'Landed') {
             newLandings += 1;
-            scoreDelta += 25; // Award 25 points for successful validated landing
-            radioAudio.speakPilotReadback(ac.callsign, `Touchdown runway ${assignedRwyGeom.id}, rolling out`);
+            scoreDelta += ac.isEmergency ? 35 : 15;
+            if (ac.isEmergency) {
+              emergencyLandedThisTick = true;
+            }
+            radioAudio.speakPilotReadback(
+              ac.callsign,
+              `Touchdown runway ${assignedRwyGeom.id}, rolling out`
+            );
           } else if (ilsResult.eventType === 'RUNWAY_VACATED') {
-            radioAudio.speakPilotReadback(ac.callsign, `Runway vacated, ground on 121.9`);
-          } else if (ilsResult.eventType === 'UNSTABLE_GO_AROUND' || ilsResult.eventType === 'LANDING_REJECTED') {
-            radioAudio.speakPilotReadback(ac.callsign, ilsResult.eventMessage || 'Going around');
+            radioAudio.speakPilotReadback(
+              ac.callsign,
+              `Runway vacated, ground on 121.9`
+            );
+          } else if (
+            ilsResult.eventType === 'UNSTABLE_GO_AROUND' ||
+            ilsResult.eventType === 'LANDING_REJECTED'
+          ) {
+            goAroundThisTick = true;
+            radioAudio.speakPilotReadback(
+              ac.callsign,
+              ilsResult.eventMessage || 'Going around'
+            );
           }
         }
       }
 
-      // Filter out aircraft that have completed landing roll and vacated or departed beyond 55 NM
-      const distFromCenter = Math.sqrt(currentAc.x * currentAc.x + currentAc.y * currentAc.y);
-      const isLandedStopped = currentAc.status === 'Landed' && currentAc.indicatedAirspeed <= 0.1;
+      const distFromCenter = Math.sqrt(
+        currentAc.x * currentAc.x + currentAc.y * currentAc.y
+      );
+      const isLandedStopped =
+        currentAc.status === 'Landed' && currentAc.indicatedAirspeed <= 0.1;
       const isFarOut = distFromCenter > 55.0;
 
       if (!isLandedStopped && !isFarOut) {
@@ -802,14 +1265,13 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       }
     }
 
-    // 2. Real Radar Scanning & Track Prediction Step
     globalRadarTracker.update(actualDt, currentSimTime, updatedAircraft);
 
-    // 3. Conflict Detection (STCA)
     const activeConflicts = detectConflicts(updatedAircraft);
-    
-    // Lifecycle and single-penalty accounting
-    const { penaltiesToDeduct } = globalConflictTracker.updateEvents(activeConflicts, currentSimTime);
+    const { penaltiesToDeduct } = globalConflictTracker.updateEvents(
+      activeConflicts,
+      currentSimTime
+    );
 
     let newViolations = stats.separationViolations;
     for (const p of penaltiesToDeduct) {
@@ -820,24 +1282,39 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       }
     }
 
-    // Update state
+    const nextStats: SimulationStats = {
+      ...stats,
+      landings: newLandings,
+      separationViolations: newViolations,
+      score: Math.min(100, Math.max(0, stats.score + scoreDelta)),
+      elapsedSeconds: currentSimTime,
+    };
+
+    const nextMission =
+      activeMission.status === 'active'
+        ? evaluateMissionProgress(
+            activeMission,
+            nextStats,
+            emergencyLandedThisTick,
+            goAroundThisTick
+          )
+        : activeMission;
+
     set({
       aircraft: updatedAircraft,
       conflicts: activeConflicts,
       radarTracks: globalRadarTracker.getTracks(),
       antennaAzimuth: globalRadarTracker.getAntennaAzimuth(),
-      stats: {
-        ...stats,
-        landings: newLandings,
-        separationViolations: newViolations,
-        score: Math.max(0, stats.score + scoreDelta),
-        elapsedSeconds: currentSimTime,
-      },
+      stats: nextStats,
+      activeMission: nextMission,
     });
   },
 }));
 
-// Synchronize radio transmission active state with Zustand store
 radioAudio.onTransmissionChange(tx => {
   useSimulationStore.setState({ activeTransmission: tx });
 });
+
+export function getAirportProfilePublic(icao: string) {
+  return getAirportProfile(icao);
+}

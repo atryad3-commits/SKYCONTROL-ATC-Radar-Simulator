@@ -1,0 +1,218 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Controller profile, Academy certification progress, and cumulative flight handling statistics.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth user UID matching document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "callsign": {
+          "type": "string",
+          "description": "Controller display name or callsign.",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "certified": {
+          "type": "boolean",
+          "description": "Whether controller has passed all 5 Academy certification missions."
+        },
+        "certificateId": {
+          "type": "string",
+          "description": "Official issued ATC certificate serial identifier.",
+          "minLength": 6,
+          "maxLength": 64
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when certificate was awarded.",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "completedMissions": {
+          "type": "array",
+          "description": "Bounded list of completed mission IDs (max 5)."
+        },
+        "totalLandings": {
+          "type": "integer",
+          "description": "Cumulative validated landings controlled."
+        },
+        "totalDepartures": {
+          "type": "integer",
+          "description": "Cumulative departures cleared."
+        },
+        "bestScore": {
+          "type": "number",
+          "description": "Highest achieved efficiency score (0-100)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last-updated timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "callsign",
+        "certified",
+        "completedMissions",
+        "totalLandings",
+        "totalDepartures",
+        "bestScore",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomScenario": {
+      "title": "CustomScenario",
+      "description": "User-authored ATC radar simulation scenario with airport, runways, weather, traffic mix, and emergency triggers.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique scenario ID matching document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Scenario title.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "description": "Operational briefing and scenario notes.",
+          "maxLength": 300
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["Beginner", "Intermediate", "Advanced", "Master"],
+          "description": "Scenario difficulty tier."
+        },
+        "airportIcao": {
+          "type": "string",
+          "enum": ["EGLL", "OIII", "KJFK", "TRN1", "TRN2"],
+          "minLength": 4,
+          "maxLength": 4
+        },
+        "landingRunwayId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "departureRunwayId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "windDirection": {
+          "type": "number"
+        },
+        "windSpeed": {
+          "type": "number"
+        },
+        "gusts": {
+          "type": "number"
+        },
+        "qnh": {
+          "type": "number"
+        },
+        "visibilityNM": {
+          "type": "number"
+        },
+        "ceilingFeet": {
+          "type": "number"
+        },
+        "precipitation": {
+          "type": "string",
+          "enum": ["None", "Light Rain", "Rain", "Fog"]
+        },
+        "initialInbounds": {
+          "type": "integer"
+        },
+        "initialDepartures": {
+          "type": "integer"
+        },
+        "spawnIntervalSec": {
+          "type": "integer"
+        },
+        "heavyRatio": {
+          "type": "number"
+        },
+        "allowEmergencies": {
+          "type": "boolean"
+        },
+        "emergencyDelaySec": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "name",
+        "description",
+        "difficulty",
+        "airportIcao",
+        "landingRunwayId",
+        "departureRunwayId",
+        "windDirection",
+        "windSpeed",
+        "gusts",
+        "qnh",
+        "visibilityNM",
+        "ceilingFeet",
+        "precipitation",
+        "initialInbounds",
+        "initialDepartures",
+        "spawnIntervalSec",
+        "heavyRatio",
+        "allowEmergencies",
+        "emergencyDelaySec",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Controller profile, Academy mission completion array, and ATC certificate record owned strictly by userId."
+    },
+    "/scenarios/{scenarioId}": {
+      "schema": {
+        "$ref": "#/entities/CustomScenario"
+      },
+      "description": "User-created custom ATC radar scenarios owned strictly by ownerId."
+    }
+  }
+}
