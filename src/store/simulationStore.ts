@@ -1153,7 +1153,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const hdgStr = Math.round(newAc.heading).toString().padStart(3, '0');
     const infoLetter = pickVariant(['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo']);
     const checkInMsg = newAc.assignedWaypoint
-      ? `${airport.name} Director, ${newAc.callsign}${newAc.category === 'Heavy' ? ' Heavy' : ''}, passing ${altStr} direct ${newAc.assignedWaypoint}, information ${infoLetter}.`
+      ? `${airport.name} Director, ${newAc.callsign}${newAc.category === 'Heavy' ? ' Heavy' : ''}, passing ${altStr} direct ${newAc.assignedWaypoint}, with information ${infoLetter}.`
       : `${airport.name} Director, ${newAc.callsign}${newAc.category === 'Heavy' ? ' Heavy' : ''}, passing ${altStr} heading ${hdgStr}, with information ${infoLetter}.`;
 
     logPilotTransmission(get, set, newAc, checkInMsg, true);

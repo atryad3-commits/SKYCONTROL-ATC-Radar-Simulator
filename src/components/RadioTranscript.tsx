@@ -136,7 +136,7 @@ export const RadioTranscript: React.FC = () => {
               aria-label="Tower ATC Voice"
               className="bg-transparent text-[#00e5ff] font-semibold focus:outline-none cursor-pointer text-[10px] truncate max-w-[175px]"
             >
-              <optgroup label="پروفایل‌های برج (آفلاین)" className="bg-[#07100b] text-[#7cc99c]">
+              <optgroup label="پک صداهای واقعی برج (آفلاین داخلی)" className="bg-[#07100b] text-[#7cc99c]">
                 {TOWER_VOICE_PROFILES.map(profile => (
                   <option key={profile.id} value={profile.id} className="bg-[#07100b] text-[#d1e7dd]">
                     {profile.shortLabel}

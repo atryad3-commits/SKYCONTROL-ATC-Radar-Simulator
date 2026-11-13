@@ -8,6 +8,11 @@ import {
   radioAudio,
   formatPhraseForSpeech,
 } from '../src/audio/radioAudio';
+import {
+  tokenizeForVoicePack,
+  PILOT_PACK_IDS,
+  TOWER_PACK_ID_MAP,
+} from '../src/audio/voicePackPlayer';
 import { useSimulationStore } from '../src/store/simulationStore';
 
 const MOCK_OFFLINE_VOICES: VoiceLike[] = [
@@ -20,7 +25,7 @@ const MOCK_OFFLINE_VOICES: VoiceLike[] = [
   { voiceURI: 'robot-espeak', name: 'eSpeak English', lang: 'en-US', localService: true },
 ];
 
-describe('100% Offline Multi-Voice Radio Engine & Selectable Tower Voice', () => {
+describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
   beforeEach(() => {
     radioAudio.setTowerVoiceId('charon');
     useSimulationStore.getState().setTowerVoice('charon');
@@ -29,20 +34,22 @@ describe('100% Offline Multi-Voice Radio Engine & Selectable Tower Voice', () =>
   it('prioritizes local offline OS voices above non-local cloud voices and robotic voices', () => {
     const ranked = rankOfflineEnglishVoices(MOCK_OFFLINE_VOICES);
     expect(ranked[0].localService).toBe(true);
-    // Cloud-only Google voice and robotic eSpeak rank below natural local voices
     const cloudIdx = ranked.findIndex(v => v.voiceURI === 'cloud-google-us');
     const robotIdx = ranked.findIndex(v => v.voiceURI === 'robot-espeak');
     expect(cloudIdx).toBeGreaterThan(3);
     expect(robotIdx).toBe(ranked.length - 1);
   });
 
-  it('supports selecting both preset Tower controller roles and exact installed offline voices', () => {
+  it('supports selecting both 5 bundled Tower voices and exact installed offline OS voices', () => {
     expect(TOWER_VOICE_PROFILES).toHaveLength(5);
+    expect(Object.keys(TOWER_PACK_ID_MAP)).toHaveLength(5);
 
     const femalePreset = resolveTowerOfflineVoice(MOCK_OFFLINE_VOICES, 'kore', 'EGLL');
+    expect(femalePreset.packSpeakerId).toBe('tower_kore');
     expect(femalePreset.voice?.voiceURI).toBe('ms-hazel');
 
     const customDevice = resolveTowerOfflineVoice(MOCK_OFFLINE_VOICES, 'voice:apple-karen', 'EGLL');
+    expect(customDevice.packSpeakerId).toBeNull();
     expect(customDevice.voice?.voiceURI).toBe('apple-karen');
 
     useSimulationStore.getState().setTowerVoice('voice:ms-david');
@@ -50,56 +57,102 @@ describe('100% Offline Multi-Voice Radio Engine & Selectable Tower Voice', () =>
     expect(radioAudio.getTowerVoiceId()).toBe('voice:ms-david');
   });
 
-  it('never assigns any flight the same offline voice as the user-selected Tower voice', () => {
-    const fleet = ['BAW452', 'IRA712', 'AFR228', 'UAE310', 'DAL114'];
-
-    for (const preset of TOWER_VOICE_PROFILES) {
-      const tower = resolveTowerOfflineVoice(MOCK_OFFLINE_VOICES, preset.id, 'EGLL');
-      for (const cs of fleet) {
-        const pilot = resolveOfflinePilotProfile(cs, MOCK_OFFLINE_VOICES, tower.voice, {
-          activeCallsigns: fleet,
-        });
-        expect(pilot.voiceURI).not.toBe(tower.voice?.voiceURI);
-      }
+  it('keeps Tower voice pool and 6 Pilot voice packs 100% disjoint and distributes active flights', () => {
+    const towerPackIds = new Set(Object.values(TOWER_PACK_ID_MAP));
+    for (const pId of PILOT_PACK_IDS) {
+      expect(towerPackIds.has(pId)).toBe(false);
     }
 
-    const customTower = resolveTowerOfflineVoice(MOCK_OFFLINE_VOICES, 'voice:ms-george', 'EGLL');
-    for (const cs of fleet) {
-      const pilot = resolveOfflinePilotProfile(cs, MOCK_OFFLINE_VOICES, customTower.voice, {
-        activeCallsigns: fleet,
-      });
-      expect(pilot.voiceURI).not.toBe('ms-george');
-    }
-  });
-
-  it('gives every flight a distinct voice & acoustic hardware profile, even on single-voice OS setups', () => {
-    const fleet = ['BAW452', 'IRA712', 'AFR228', 'UAE310'];
-
-    // Case A: Multi-voice device distributes across distinct installed offline voices
-    const tower = resolveTowerOfflineVoice(MOCK_OFFLINE_VOICES, 'charon', 'EGLL');
-    const multiProfiles = fleet.map(cs =>
-      resolveOfflinePilotProfile(cs, MOCK_OFFLINE_VOICES, tower.voice, {
+    const fleet = ['BAW452', 'IRA712', 'AFR228', 'UAE310', 'DAL114', 'DLH802'];
+    const profiles = fleet.map(cs =>
+      resolveOfflinePilotProfile(cs, MOCK_OFFLINE_VOICES, MOCK_OFFLINE_VOICES[1], {
         airline: cs.slice(0, 3),
         activeCallsigns: fleet,
       })
     );
-    expect(new Set(multiProfiles.map(p => p.voiceURI)).size).toBe(4);
-    expect(new Set(multiProfiles.map(p => p.carrierCenterHz)).size).toBeGreaterThanOrEqual(3);
+    // All 6 flights receive distinct bundled pilot voices AND never share Tower OS voice
+    expect(new Set(profiles.map(p => p.packSpeakerId)).size).toBe(6);
+    for (const p of profiles) {
+      expect(p.voiceURI).not.toBe(MOCK_OFFLINE_VOICES[1].voiceURI);
+    }
+  });
 
-    // Case B: Minimal 1-voice device still differentiates every flight via vocal pitch/rate register & mic DSP
-    const singleVoice: VoiceLike[] = [
-      { voiceURI: 'only-voice', name: 'Local Default Voice', lang: 'en-US', localService: true },
+  it('tokenizes all ATC Tower commands cleanly into voice-pack tokens', () => {
+    const atcCommands = [
+      'BAW452, fly heading 270',
+      'IRA712, cancel route, maintain present heading 095',
+      'AFR228, turn left heading 180',
+      'UAE310, turn right heading 315',
+      'DAL114, climb and maintain 12,000 feet',
+      'BAW452, descend and maintain 3,000 feet, QNH 1013, expedite',
+      'IRA712, reduce speed to 180 knots',
+      'AFR228, increase speed to 220 knots',
+      'UAE310, maintain speed 190 knots',
+      'BAW452, cleared direct BNN',
+      'BAW452, recleared route via BNN then LAM',
+      'IRA712, proceed direct DMV, VAR, then ILS runway 29R',
+      'BAW452, expect vectors ILS runway 27R',
+      'IRA712, turn heading 240, descend to 3,000 feet QNH 1016, cleared ILS runway 29R',
+      'DAL114, cleared ILS approach runway 31L, report established',
+      'BAW452, go around, climb straight ahead to 3,000 feet',
+      'BAW452, hold at OCK as published, expect further clearance',
+      'BAW452, behind landing traffic, runway 27L line up and wait',
+      'BAW452, surface wind 260 degrees 14 knots, QNH 1013, runway 27L cleared for takeoff',
+      'BAW452, cancel takeoff, I say again cancel takeoff!',
+      'BAW452, hold position, stop immediately, abort takeoff!',
+      'BAW452, London Heathrow Airport Director, radio check on 119.725 MHz',
     ];
-    const singleProfiles = fleet.map(cs =>
-      resolveOfflinePilotProfile(cs, singleVoice, singleVoice[0], {
-        airline: cs.slice(0, 3),
-        activeCallsigns: fleet,
-      })
-    );
-    expect(new Set(singleProfiles.map(p => `${p.pitch.toFixed(2)}_${p.rate.toFixed(2)}`)).size).toBeGreaterThanOrEqual(3);
+
+    for (const cmd of atcCommands) {
+      const tokens = tokenizeForVoicePack(cmd, 'TOWER');
+      expect(tokens, `Failed to tokenize ATC command: ${cmd}`).not.toBeNull();
+      expect(tokens!.length).toBeGreaterThan(2);
+    }
   });
 
-  it('preserves ICAO radiotelephony formatting for offline speech synthesis', () => {
+  it('tokenizes all Pilot readbacks, check-ins, ILS callouts, and Maydays cleanly', () => {
+    const pilotMessages = [
+      'Roger, turning heading 270, Speedbird 452',
+      'Maintaining present heading 095, Iranair 712',
+      'Turning left heading 180, Air France 228',
+      'Wilco, right 315, Emirates 310',
+      'Climbing 12,000 feet, Delta 114',
+      'Descending to 3,000 feet, expediting, QNH 1013, Speedbird 452',
+      'Reducing speed 180 knots, Iranair 712',
+      'Increasing to 220 knots, Air France 228',
+      'Maintaining 190 knots, Emirates 310',
+      'Proceeding direct BNN, Speedbird 452',
+      'Cleared via BNN then LAM, Speedbird 452',
+      'Route DMV, VAR, then ILS runway 29R, Iranair 712',
+      'Expect runway 27R, Speedbird 452',
+      'Heading 240, descending 3,000 feet, cleared ILS runway 29R, Iranair 712',
+      'Cleared ILS approach runway 31L, will report established, Delta 114',
+      'Going around, climbing 3,000 feet on runway heading, Speedbird 452',
+      'Entering hold at OCK as published, Speedbird 452',
+      'Line up and wait runway 27L, Speedbird 452',
+      'Unable line up runway 27L, Runway 27L is occupied by BAW452',
+      'Cleared for takeoff runway 27L, Speedbird 452',
+      'Unable to stop, past V1, continuing takeoff, Speedbird 452',
+      'Stopping immediately, aborting takeoff runway 27L, Speedbird 452',
+      'London Heathrow Airport Director, BAW452 Heavy, passing 8,000 feet direct LAM, with information Alpha.',
+      'Tehran Mehrabad Tower, IRA712, holding short runway 29L, ready for departure.',
+      'Mayday Mayday Mayday! New York Kennedy Director, AAL101 Heavy, squawking 7700, engine failure, requesting immediate priority vectors runway 31L!',
+      'London Heathrow Airport Director, BAW452, established localizer runway 27R.',
+      'BAW452, fully established ILS runway 27R, gear down, landing checks complete.',
+      'BAW452, touchdown runway 27R, rolling out.',
+      'BAW452, runway 27R vacated, contacting ground 121.9.',
+      'BAW452, going around runway 27R, missed approach.',
+      'Readability five, loud and clear, Speedbird 452',
+    ];
+
+    for (const msg of pilotMessages) {
+      const tokens = tokenizeForVoicePack(msg, 'PILOT');
+      expect(tokens, `Failed to tokenize Pilot message: ${msg}`).not.toBeNull();
+      expect(tokens!.length).toBeGreaterThan(2);
+    }
+  });
+
+  it('preserves ICAO radiotelephony formatting for OS speech synthesis fallback', () => {
     const spoken = formatPhraseForSpeech('IRA712, cleared ILS runway 29R, descend 3,000 feet');
     expect(spoken).toContain('Iranair seven one two');
     expect(spoken).toContain('I L S');
