@@ -1,0 +1,6 @@
+{
+  "name": "SKYCONTROL – ATC Radar Simulator",
+  "description": "Professional browser-based Air Traffic Control radar simulator featuring realistic aircraft physics, London Heathrow EGLL airspace, conflict alerts, and VHF radio chatter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
