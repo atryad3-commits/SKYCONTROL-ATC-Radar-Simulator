@@ -34,12 +34,33 @@ const KNOWN_WAYPOINTS = new Set([
   'D15R', 'D08R', 'D15L', 'D08L', 'APX36', 'APX24', 'ILS15', 'ILS20',
 ]);
 
+const WHOLE_RUNWAYS = new Set([
+  '27L', '27R', '09L', '09R', '29L', '29R', '11L', '11R',
+  '31L', '31R', '04L', '04R', '13L', '13R', '22L', '22R',
+  '15', '33', '24', '06', '36', '18', '20', '02',
+]);
+
+const WHOLE_ALTITUDES = new Set([
+  1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500,
+  5000, 5500, 6000, 6500, 7000, 7500, 8000, 9000, 10000, 12000,
+]);
+
+const WHOLE_FLIGHT_LEVELS = new Set([
+  '080', '090', '100', '110', '120', '130', '140', '150', '160', '180', '200',
+]);
+
+const WHOLE_SPEEDS = new Set([
+  150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260,
+]);
+
 const TOWER_PHRASE_PATTERNS: Array<[RegExp, string]> = [
   [/\bcancel takeoff,\s*i say again cancel takeoff\b/i, 'tc_cancel_to'],
   [/\bhold position,\s*stop immediately,\s*abort takeoff\b/i, 'tc_hold_abort'],
   [/\bcancel route,\s*maintain present heading\b/i, 'tc_cancel_present_hdg'],
   [/\bas published,\s*expect further clearance\b/i, 'tc_as_pub_efc'],
   [/\bgo around,\s*climb straight ahead to\b/i, 'tc_go_around_climb'],
+  [/\bturn immediately left heading\b/i, 'tc_turn_imm_left'],
+  [/\bturn immediately right heading\b/i, 'tc_turn_imm_right'],
   [/\bcleared ils approach runway\b/i, 'tc_clr_ils_app'],
   [/\bexpect vectors ils runway\b/i, 'tc_expect_vec_ils'],
   [/\bcleared ils runway\b/i, 'tc_clr_ils_rwy'],
@@ -58,12 +79,29 @@ const TOWER_PHRASE_PATTERNS: Array<[RegExp, string]> = [
   [/\breport established\b/i, 'tc_rep_est'],
   [/\bmaintain speed\b/i, 'tc_maint_spd'],
   [/\bradio check on\b/i, 'tc_radio_check'],
+  [/\bweather update\b/i, 'tc_weather_update'],
+  [/\ball stations\b/i, 'tc_all_stations'],
+  [/\btraffic alert\b/i, 'tc_traffic_alert'],
+  [/\btraffic ahead\b/i, 'tc_traffic_ahead'],
+  [/\bopposite direction\b/i, 'tc_opposite_dir'],
+  [/\bclimb expedite\b/i, 'tc_climb_exp'],
+  [/\bdescend expedite\b/i, 'tc_desc_exp'],
   [/\bsurface wind\b/i, 'tc_sfc_wind'],
+  [/\bmoderate rain\b/i, 'tc_rain'],
+  [/\bsky clear\b/i, 'tc_sky_clear'],
+  [/\bleft heading\b/i, 'tc_left_hdg'],
+  [/\bright heading\b/i, 'tc_right_hdg'],
   [/\bfly heading\b/i, 'tc_fly_hdg'],
   [/\bturn heading\b/i, 'tc_turn_hdg'],
   [/\bdescend to\b/i, 'tc_desc_to'],
   [/\bhold at\b/i, 'tc_hold_at'],
+  [/\bconverging\b/i, 'tc_converging'],
+  [/\bthunderstorm\b/i, 'tc_storm'],
+  [/\bvisibility\b/i, 'tc_visibility'],
+  [/\bgusting\b/i, 'tc_gusting'],
   [/\bexpedite\b/i, 'tc_expedite'],
+  [/\bwind\b/i, 'tc_wind'],
+  [/\bfog\b/i, 'tc_fog'],
 ];
 
 const PILOT_PHRASE_PATTERNS: Array<[RegExp, string]> = [
@@ -72,6 +110,7 @@ const PILOT_PHRASE_PATTERNS: Array<[RegExp, string]> = [
   [/\brequesting immediate priority vectors runway\b/i, 'pr_req_priority'],
   [/\bgear down,\s*landing checks complete\b/i, 'pr_gear_down'],
   [/\breadability five,\s*loud and clear\b/i, 'pr_readability_5'],
+  [/\blooking out for traffic\b/i, 'pr_looking_out'],
   [/\bmayday mayday mayday\b/i, 'pr_mayday'],
   [/\bfully established ils runway\b/i, 'pr_fully_est'],
   [/\bestablished localizer runway\b/i, 'pr_est_loc'],
@@ -87,6 +126,14 @@ const PILOT_PHRASE_PATTERNS: Array<[RegExp, string]> = [
   [/\bmaintaining present heading\b/i, 'pr_maint_pres_hdg'],
   [/\bminimum fuel emergency\b/i, 'pr_min_fuel'],
   [/\bmedical emergency on board\b/i, 'pr_medical'],
+  [/\btraffic in sight\b/i, 'pr_traffic_sight'],
+  [/\bturning immediately\b/i, 'pr_turning_imm'],
+  [/\brequest direct\b/i, 'pr_req_direct'],
+  [/\brequest climb\b/i, 'pr_req_climb'],
+  [/\brequest descent\b/i, 'pr_req_descend'],
+  [/\brequest lower\b/i, 'pr_req_lower'],
+  [/\brequest higher\b/i, 'pr_req_higher'],
+  [/\bcopied weather\b/i, 'pr_copied_wx'],
   [/\bengine failure\b/i, 'pr_eng_fail'],
   [/\binbound for vectors\b/i, 'pr_inbound_vec'],
   [/\bholding short runway\b/i, 'pr_holding_short'],
@@ -153,6 +200,8 @@ const SINGLE_WORD_MAP: Record<string, string> = {
   knots: 'w_knots',
   kts: 'w_knots',
   kt: 'w_knots',
+  miles: 'w_miles',
+  nm: 'w_miles',
   degrees: 'w_degrees',
   decimal: 'w_decimal',
   hundred: 'w_hundred',
@@ -160,6 +209,11 @@ const SINGLE_WORD_MAP: Record<string, string> = {
   qnh: 'w_qnh',
   ils: 'w_ils',
   v1: 'w_v1',
+  maintain: 'w_maintain',
+  speed: 'w_speed',
+  direct: 'w_direct',
+  climb: 'w_climb',
+  descend: 'w_descend',
   then: 'w_then',
   to: 'w_to',
   at: 'w_at',
@@ -176,7 +230,6 @@ const SINGLE_WORD_MAP: Record<string, string> = {
   echo: 'nato_E',
   foxtrot: 'nato_F',
   golf: 'nato_G',
-  // Airline telephony words when already expanded in pilot readbacks
   speedbird: 'al_BAW',
   iranair: 'al_IRA',
   virgin: 'al_VIR',
@@ -227,8 +280,8 @@ function altitudeNumToTokens(altStr: string): string[] {
 }
 
 /**
- * Converts a raw ATC or Pilot transcript into an ordered list of audio sprite token keys.
- * Returns null if any segment cannot be represented cleanly so browser fallback can speak it.
+ * Converts a raw ATC or Pilot transcript into an ordered list of co-articulated audio sprite token keys.
+ * Prefers whole continuous aviation phrases (runways, altitudes, flight levels, speeds) when available.
  */
 export function tokenizeForVoicePack(
   rawText: string,
@@ -238,8 +291,8 @@ export function tokenizeForVoicePack(
   let text = rawText.trim();
   if (!text) return null;
 
-  // Replace structured constructs with explicit {{tok:...}} placeholders
   const emit = (tokens: string[]) => ` ${tokens.map(t => `__TOK_${t}__`).join(' ')} `;
+  const hasWhole = (tok: string) => !availableClips || Boolean(availableClips[tok]);
 
   // Multi-word airline name first
   text = text.replace(/\bAir France\b/gi, () => emit(['al_AFR']));
@@ -259,29 +312,49 @@ export function tokenizeForVoicePack(
     return emit(out);
   });
 
-  // Role-specific multi-word phrases FIRST (before runway designator consumes the word "runway")
+  // Role-specific multi-word phrases FIRST (so phrases ending with "runway" consume it cleanly)
   const phrasePatterns = role === 'TOWER' ? TOWER_PHRASE_PATTERNS : PILOT_PHRASE_PATTERNS;
   for (const [regex, tok] of phrasePatterns) {
     text = text.replace(regex, () => emit([tok]));
   }
 
-  // Runway designators: "runway 27R", "RWY 29L" (standalone cases not consumed by a phrase ending in "runway")
+  // Standalone Runway designators: prefer co-articulated whole runway clip (e.g. rwy_27R)
   text = text.replace(/\b(?:RWY|Runway)\s+(\d{1,2}[LRC]?)\b/gi, (_, rwy: string) => {
+    const normRwy = rwy.trim().toUpperCase().replace(/^(\d)([LRC]?)$/, '0$1$2');
+    const wholeTok = `rwy_${normRwy}`;
+    if (WHOLE_RUNWAYS.has(normRwy) && hasWhole(wholeTok)) {
+      return emit([wholeTok]);
+    }
     return emit(['w_runway', ...runwayDesignatorToTokens(rwy)]);
   });
 
-  // Flight levels
+  // Flight levels: prefer co-articulated whole FL clip (e.g. fl_120)
   text = text.replace(/\b(?:Flight Level|FL)\s*0*(\d{2,3})\b/gi, (_, fl: string) => {
-    return emit(['w_fl', ...digitsToTokens(fl.padStart(3, '0'))]);
+    const padFl = fl.padStart(3, '0');
+    const wholeTok = `fl_${padFl}`;
+    if (WHOLE_FLIGHT_LEVELS.has(padFl) && hasWhole(wholeTok)) {
+      return emit([wholeTok]);
+    }
+    return emit(['w_fl', ...digitsToTokens(padFl)]);
   });
 
-  // Altitudes ("3,500 feet", "4000 ft")
+  // Altitudes ("3,500 feet", "4,000 ft"): prefer co-articulated whole altitude clip (e.g. alt_3000)
   text = text.replace(/\b(\d{1,2},?\d{3})\s*(?:feet|ft)\b/gi, (_, alt: string) => {
+    const num = parseInt(alt.replace(/,/g, ''), 10);
+    const wholeTok = `alt_${num}`;
+    if (WHOLE_ALTITUDES.has(num) && hasWhole(wholeTok)) {
+      return emit([wholeTok]);
+    }
     return emit([...altitudeNumToTokens(alt), 'w_feet']);
   });
 
-  // Speed ("180 knots", "210kt")
+  // Speed ("180 knots", "210kt"): prefer co-articulated whole speed clip (e.g. spd_180)
   text = text.replace(/\b(\d{2,3})\s*(?:knots|kts|kt)\b/gi, (_, spd: string) => {
+    const num = parseInt(spd, 10);
+    const wholeTok = `spd_${num}`;
+    if (WHOLE_SPEEDS.has(num) && hasWhole(wholeTok)) {
+      return emit([wholeTok]);
+    }
     return emit([...digitsToTokens(spd), 'w_knots']);
   });
 
@@ -291,11 +364,11 @@ export function tokenizeForVoicePack(
     return emit([...digitsToTokens(whole), 'w_decimal', ...digitsToTokens(trimmed)]);
   });
 
-  // Wind ("260/14kt" -> normalized)
+  // Wind ("260/14kt")
   text = text.replace(
     /\bwind\s+(\d{3})\s*(?:degrees\s*)?(?:at|\/)\s*(\d{1,2})(?:\s*(?:knots|kt|kts))?\b/gi,
     (_, dir: string, spd: string) =>
-      emit([...digitsToTokens(dir), 'w_degrees', ...digitsToTokens(spd), 'w_knots'])
+      emit(['tc_wind', ...digitsToTokens(dir), 'w_degrees', ...digitsToTokens(spd), 'w_knots'])
   );
 
   // Parse remaining words & placeholders
@@ -338,7 +411,6 @@ export function tokenizeForVoicePack(
       continue;
     }
 
-    // Unrecognized word -> bail out cleanly so browser fallback handles it
     return null;
   }
 
@@ -369,6 +441,27 @@ export const TOWER_PACK_ID_MAP: Record<string, string> = {
   puck: 'tower_puck',
 };
 
+function computeTokenStepOffsetSec(prevTok: string | null, currTok: string): number {
+  if (!prevTok) return 0;
+  const isDigit = (t: string) => t.startsWith('d_') || t.startsWith('nato_');
+  const isPhrase = (t: string) => t.startsWith('tc_') || t.startsWith('pr_');
+
+  // Digits inside callsigns / headings / QNH blend smoothly without staccato gaps
+  if (isDigit(prevTok) && isDigit(currTok)) {
+    return -0.022;
+  }
+  // Airline name -> digit group flows directly ("Speedbird four-five-two")
+  if (prevTok.startsWith('al_') && isDigit(currTok)) {
+    return -0.015;
+  }
+  // Brief breath beat between callsign digits and main instruction clause
+  if (isDigit(prevTok) && isPhrase(currTok)) {
+    return 0.016;
+  }
+  // Smooth continuous co-articulation across adjacent words & whole units
+  return -0.012;
+}
+
 export class OfflineVoicePackPlayer {
   private manifest: VoicePackManifest | null =
     (bundledVoicePackManifest as unknown as VoicePackManifest) || null;
@@ -378,7 +471,7 @@ export class OfflineVoicePackPlayer {
   private activeNodes: AudioBufferSourceNode[] = [];
 
   public async loadManifest(): Promise<VoicePackManifest | null> {
-    if (this.manifest && Object.keys(this.manifest.speakers).length >= 11) {
+    if (this.manifest && (this.manifest.version ?? 1) >= 2 && Object.keys(this.manifest.speakers).length >= 11) {
       return this.manifest;
     }
     if (this.manifestPromise) return this.manifestPromise;
@@ -390,8 +483,10 @@ export class OfflineVoicePackPlayer {
         if (!res.ok) return this.manifest;
         const data = (await res.json()) as VoicePackManifest;
         if (!data?.speakers) return this.manifest;
-        this.manifest = data;
-        return data;
+        if ((data.version ?? 1) >= (this.manifest?.version ?? 1)) {
+          this.manifest = data;
+        }
+        return this.manifest;
       })
       .catch(() => this.manifest);
 
@@ -443,7 +538,7 @@ export class OfflineVoicePackPlayer {
 
   /**
    * Plays a tokenized aviation transmission from the offline real-human MP3 sprite pack
-   * through an authentic VHF Radio DSP filter chain (350-3000Hz + compressor).
+   * with smooth equal-power overlapping crossfades and VHF Radio DSP filtering.
    */
   public async playTransmission(params: {
     ctx: AudioContext;
@@ -467,27 +562,27 @@ export class OfflineVoicePackPlayer {
 
     const rate = params.playbackRate ?? 1.0;
 
-    // Build VHF Aviation Radio DSP chain
+    // VHF Aviation Radio DSP chain (warm body + crisp speech presence)
     const highpass = params.ctx.createBiquadFilter();
     highpass.type = 'highpass';
-    highpass.frequency.value = 340;
+    highpass.frequency.value = 320;
 
     const presence = params.ctx.createBiquadFilter();
     presence.type = 'peaking';
-    presence.frequency.value = params.bandpassHz ?? (params.role === 'TOWER' ? 1320 : 1520);
-    presence.Q.value = 1.15;
-    presence.gain.value = params.role === 'PILOT' ? 5.0 : 3.2;
+    presence.frequency.value = params.bandpassHz ?? (params.role === 'TOWER' ? 1380 : 1520);
+    presence.Q.value = 1.05;
+    presence.gain.value = params.role === 'PILOT' ? 4.4 : 3.0;
 
     const lowpass = params.ctx.createBiquadFilter();
     lowpass.type = 'lowpass';
-    lowpass.frequency.value = params.role === 'TOWER' ? 3200 : 2850;
+    lowpass.frequency.value = params.role === 'TOWER' ? 3350 : 2950;
 
     const compressor = params.ctx.createDynamicsCompressor();
     compressor.threshold.value = -19;
     compressor.knee.value = 8;
-    compressor.ratio.value = 7;
+    compressor.ratio.value = 6.5;
     compressor.attack.value = 0.004;
-    compressor.release.value = 0.14;
+    compressor.release.value = 0.12;
 
     const masterGain = params.ctx.createGain();
     masterGain.gain.value = Math.min(1.25, params.volume * (params.role === 'TOWER' ? 1.08 : 0.98));
@@ -498,9 +593,9 @@ export class OfflineVoicePackPlayer {
     compressor.connect(masterGain);
     masterGain.connect(params.ctx.destination);
 
-    let scheduledCursor = params.ctx.currentTime + 0.025;
+    let scheduledCursor = params.ctx.currentTime + 0.02;
     const sources: AudioBufferSourceNode[] = [];
-    const wordGapSec = 0.028;
+    let prevTok: string | null = null;
 
     for (const tok of tokens) {
       const span = spk.clips[tok];
@@ -508,25 +603,33 @@ export class OfflineVoicePackPlayer {
       const [clipOffset, clipDur] = span;
       if (clipDur <= 0.01) continue;
 
+      const delta = computeTokenStepOffsetSec(prevTok, tok);
+      if (prevTok !== null) {
+        scheduledCursor = Math.max(params.ctx.currentTime + 0.015, scheduledCursor + delta);
+      }
+
       const scaledDur = clipDur / rate;
+      const fadeInSec = Math.min(0.012, scaledDur * 0.25);
+      const fadeOutSec = Math.min(0.016, scaledDur * 0.3);
+
       const src = params.ctx.createBufferSource();
       src.buffer = audioBuffer;
       src.playbackRate.value = rate;
 
-      // Micro fade envelope prevents splice clicks between tokens
       const clipGain = params.ctx.createGain();
       clipGain.gain.setValueAtTime(0.001, scheduledCursor);
-      clipGain.gain.linearRampToValueAtTime(1.0, scheduledCursor + 0.008);
-      clipGain.gain.setValueAtTime(1.0, Math.max(scheduledCursor + 0.009, scheduledCursor + scaledDur - 0.01));
-      clipGain.gain.linearRampToValueAtTime(0.001, scheduledCursor + scaledDur + 0.004);
+      clipGain.gain.linearRampToValueAtTime(1.0, scheduledCursor + fadeInSec);
+      clipGain.gain.setValueAtTime(1.0, Math.max(scheduledCursor + fadeInSec, scheduledCursor + scaledDur - fadeOutSec));
+      clipGain.gain.linearRampToValueAtTime(0.001, scheduledCursor + scaledDur + 0.003);
 
       src.connect(clipGain);
       clipGain.connect(highpass);
 
-      src.start(scheduledCursor, Math.max(0, clipOffset - 0.004), clipDur + 0.012);
+      src.start(scheduledCursor, Math.max(0, clipOffset - 0.003), clipDur + 0.008);
       sources.push(src);
 
-      scheduledCursor += scaledDur + wordGapSec;
+      scheduledCursor += scaledDur;
+      prevTok = tok;
     }
 
     if (sources.length === 0) return false;
@@ -547,7 +650,7 @@ export class OfflineVoicePackPlayer {
 
       setTimeout(() => {
         if (!finished) done(!params.shouldAbort());
-      }, totalMs + 250);
+      }, totalMs + 220);
     });
   }
 }

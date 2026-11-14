@@ -61,7 +61,7 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
     gender: 'M',
     preferredLocale: 'en-GB',
     basePitch: 0.87,
-    baseRate: 0.99,
+    baseRate: 1.13,
   },
   {
     id: 'fenrir',
@@ -71,7 +71,7 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
     gender: 'M',
     preferredLocale: 'en-US',
     basePitch: 0.95,
-    baseRate: 1.04,
+    baseRate: 1.16,
   },
   {
     id: 'kore',
@@ -81,7 +81,7 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
     gender: 'F',
     preferredLocale: 'en-GB',
     basePitch: 1.09,
-    baseRate: 1.01,
+    baseRate: 1.14,
   },
   {
     id: 'zephyr',
@@ -91,7 +91,7 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
     gender: 'F',
     preferredLocale: 'en-US',
     basePitch: 1.04,
-    baseRate: 0.96,
+    baseRate: 1.12,
   },
   {
     id: 'puck',
@@ -101,7 +101,7 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
     gender: 'M',
     preferredLocale: 'en-AU',
     basePitch: 1.01,
-    baseRate: 1.07,
+    baseRate: 1.18,
   },
 ];
 
@@ -422,11 +422,12 @@ export function resolveOfflinePilotProfile<T extends VoiceLike>(
   const hasRichVoicePool = pool.length >= 4;
 
   let pitch = hasRichVoicePool ? 0.94 + ((hash % 5) - 2) * 0.035 : register.pitch;
-  let rate = hasRichVoicePool ? 0.97 + (((hash >> 3) % 4) - 1) * 0.025 : register.rate;
-  let packPlaybackRate = 0.98 + ((hash >> 2) % 4) * 0.015; // crisp natural 0.98..1.025
+  let rate = hasRichVoicePool ? 1.10 + (((hash >> 3) % 4) - 1) * 0.025 : register.rate * 1.12;
+  // v2 packs are natively synthesized at +14%..+16%; subtle 0.99..1.03 per-crew nuance preserves natural prosody
+  let packPlaybackRate = 0.99 + ((hash >> 2) % 4) * 0.012;
 
   if (options?.isEmergency) {
-    rate = Math.min(1.13, rate + 0.07);
+    rate = Math.min(1.22, rate + 0.06);
     pitch = Math.min(1.16, pitch + 0.04);
     packPlaybackRate = 1.05;
   }
@@ -1155,7 +1156,7 @@ export class RadioAudioEngine {
           speaker: 'ATC',
           voiceLabel: towerResolved.label,
         });
-        this.playRadioSquelch(0.06, 'START', 920);
+        this.playRadioSquelch(0.055, 'START', 920);
         this.startCarrierBed('ATC');
 
         let playedFromPack = false;
@@ -1166,8 +1167,8 @@ export class RadioAudioEngine {
             role: 'TOWER',
             rawText: item.atcText,
             volume: this.volume,
-            playbackRate: item.options?.isEmergency ? 1.05 : 1.0,
-            bandpassHz: 1320,
+            playbackRate: item.options?.isEmergency ? 1.05 : 1.01,
+            bandpassHz: 1360,
             shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
           });
         }
@@ -1178,7 +1179,7 @@ export class RadioAudioEngine {
             voice: towerResolved.voice,
             pitch: towerResolved.pitch,
             rate: item.options?.isEmergency
-              ? Math.min(1.12, towerResolved.rate + 0.05)
+              ? Math.min(1.22, towerResolved.rate + 0.05)
               : towerResolved.rate,
             volumeScale: 0.96,
           });
@@ -1186,12 +1187,14 @@ export class RadioAudioEngine {
 
         this.stopCarrierBed();
         if (!this.isMuted && generation === this.queueGeneration) {
-          this.playRadioSquelch(0.065, 'END', 920);
+          this.playRadioSquelch(0.055, 'END', 920);
         }
         this.setTransmission(null);
 
         if (this.isMuted || generation !== this.queueGeneration) return;
-        await this.waitMs(360);
+        if (item.pilotText.trim().length > 0) {
+          await this.waitMs(210);
+        }
       }
 
       if (item.onPilotStart) {
@@ -1199,55 +1202,57 @@ export class RadioAudioEngine {
       }
       if (this.isMuted || generation !== this.queueGeneration) return;
 
-      this.setTransmission({
-        callsign: item.callsign,
-        speaker: 'PILOT',
-        voiceLabel: pilotProfile.personaLabel,
-      });
-      this.playRadioSquelch(0.07, 'START', pilotProfile.pttClickHz);
-      this.startCarrierBed('PILOT', {
-        carrierCenterHz: pilotProfile.carrierCenterHz,
-        avionicsHumHz: pilotProfile.avionicsHumHz,
-      });
-
-      const rawPilot = this.buildRawPilotTextForPack(item);
-      let pilotPlayedFromPack = false;
-      if (ctx) {
-        pilotPlayedFromPack = await voicePackPlayer.playTransmission({
-          ctx,
-          speakerId: pilotProfile.packSpeakerId,
-          role: 'PILOT',
-          rawText: rawPilot,
-          volume: this.volume,
-          playbackRate: pilotProfile.packPlaybackRate,
-          bandpassHz: pilotProfile.carrierCenterHz,
-          shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+      if (item.pilotText.trim().length > 0) {
+        this.setTransmission({
+          callsign: item.callsign,
+          speaker: 'PILOT',
+          voiceLabel: pilotProfile.personaLabel,
         });
-      }
-
-      if (!pilotPlayedFromPack && !this.isMuted && generation === this.queueGeneration) {
-        const spokenPilot = formatPhraseForSpeech(rawPilot);
-        let fallbackVoice: SpeechSynthesisVoice | null = null;
-        if (pilotProfile.voiceURI) {
-          fallbackVoice =
-            this.cachedVoices.find(v => v.voiceURI === pilotProfile.voiceURI) || null;
-        }
-        const ok = await this.speakViaOsFallback(spokenPilot, {
-          voice: fallbackVoice,
-          pitch: pilotProfile.pitch,
-          rate: pilotProfile.rate,
-          volumeScale: 0.92,
+        this.playRadioSquelch(0.06, 'START', pilotProfile.pttClickHz);
+        this.startCarrierBed('PILOT', {
+          carrierCenterHz: pilotProfile.carrierCenterHz,
+          avionicsHumHz: pilotProfile.avionicsHumHz,
         });
-        if (!ok) {
-          this.playRogerBeep(pilotProfile.pttClickHz);
-        }
-      }
 
-      this.stopCarrierBed();
-      if (!this.isMuted && generation === this.queueGeneration) {
-        this.playRadioSquelch(0.085, 'END', pilotProfile.pttClickHz);
+        const rawPilot = this.buildRawPilotTextForPack(item);
+        let pilotPlayedFromPack = false;
+        if (ctx) {
+          pilotPlayedFromPack = await voicePackPlayer.playTransmission({
+            ctx,
+            speakerId: pilotProfile.packSpeakerId,
+            role: 'PILOT',
+            rawText: rawPilot,
+            volume: this.volume,
+            playbackRate: pilotProfile.packPlaybackRate,
+            bandpassHz: pilotProfile.carrierCenterHz,
+            shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+          });
+        }
+
+        if (!pilotPlayedFromPack && !this.isMuted && generation === this.queueGeneration) {
+          const spokenPilot = formatPhraseForSpeech(rawPilot);
+          let fallbackVoice: SpeechSynthesisVoice | null = null;
+          if (pilotProfile.voiceURI) {
+            fallbackVoice =
+              this.cachedVoices.find(v => v.voiceURI === pilotProfile.voiceURI) || null;
+          }
+          const ok = await this.speakViaOsFallback(spokenPilot, {
+            voice: fallbackVoice,
+            pitch: pilotProfile.pitch,
+            rate: pilotProfile.rate,
+            volumeScale: 0.92,
+          });
+          if (!ok) {
+            this.playRogerBeep(pilotProfile.pttClickHz);
+          }
+        }
+
+        this.stopCarrierBed();
+        if (!this.isMuted && generation === this.queueGeneration) {
+          this.playRadioSquelch(0.075, 'END', pilotProfile.pttClickHz);
+        }
+        this.setTransmission(null);
       }
-      this.setTransmission(null);
     } finally {
       this.stopCarrierBed();
       this.setTransmission(null);
@@ -1255,7 +1260,7 @@ export class RadioAudioEngine {
         this.isBusy = false;
         setTimeout(() => {
           void this.processQueue();
-        }, 220);
+        }, 130);
       }
     }
   }

@@ -64,6 +64,18 @@ const globalRadarTracker = new RadarTrackingEngine({
   predictionToleranceSec: 4.5,
 });
 
+const trafficAlertCooldowns = new Map<string, number>();
+const pilotRequestCooldowns = new Map<string, number>();
+let lastPilotRequestSimTime = 0;
+let lastWeatherBroadcastSimTime = 0;
+
+function resetCommsTimers() {
+  trafficAlertCooldowns.clear();
+  pilotRequestCooldowns.clear();
+  lastPilotRequestSimTime = 0;
+  lastWeatherBroadcastSimTime = 0;
+}
+
 export interface RadarLayers {
   rangeRings: boolean;
   waypointLabels: boolean;
@@ -152,6 +164,7 @@ export interface SimulationStore {
   spawnInbound: () => void;
   spawnDeparture: () => void;
   triggerEmergency: (type?: 'ENGINE_FAILURE' | 'MEDICAL' | 'FUEL_CRITICAL') => void;
+  broadcastWeatherAdvisory: () => void;
   switchAirport: (
     icao: string,
     landingRunwayId?: string,
@@ -256,17 +269,19 @@ function logCommsExchange(
     atcText,
     ac.callsign,
     spokenPilotText,
-    () => {
-      const pilotMsg: RadioMessage = {
-        id: `pilot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        timestamp: getFormattedUTCTime(),
-        sender: 'PILOT',
-        callsign: ac.callsign,
-        text: pilotText,
-        frequency: airportProfile.vhfFrequency,
-      };
-      set(state => ({ radioMessages: [pilotMsg, ...state.radioMessages.slice(0, 49)] }));
-    },
+    spokenPilotText.trim().length > 0
+      ? () => {
+          const pilotMsg: RadioMessage = {
+            id: `pilot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            timestamp: getFormattedUTCTime(),
+            sender: 'PILOT',
+            callsign: ac.callsign,
+            text: pilotText,
+            frequency: airportProfile.vhfFrequency,
+          };
+          set(state => ({ radioMessages: [pilotMsg, ...state.radioMessages.slice(0, 49)] }));
+        }
+      : undefined,
     {
       airportIcao: airport.icao,
       airline: ac.airline,
@@ -423,6 +438,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
 
     const headingStr = target.toString().padStart(3, '0');
+    const atcCmd = pickVariant([
+      `${ac.callsign}, fly heading ${headingStr}`,
+      `${ac.callsign}, heading ${headingStr}`,
+    ]);
     const pilotPhrase = pickVariant([
       `Fly heading ${headingStr}`,
       `Roger, turning heading ${headingStr}`,
@@ -432,7 +451,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       get,
       set,
       ac,
-      `${ac.callsign}, fly heading ${headingStr}`,
+      atcCmd,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
       pilotPhrase
     );
@@ -503,6 +522,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ),
     }));
     const headingStr = newTarget.toString().padStart(3, '0');
+    const atcCmd = pickVariant([
+      `${ac.callsign}, turn left heading ${headingStr}`,
+      `${ac.callsign}, left heading ${headingStr}`,
+    ]);
     const pilotPhrase = pickVariant([
       `Left heading ${headingStr}`,
       `Turning left heading ${headingStr}`,
@@ -512,7 +535,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       get,
       set,
       ac,
-      `${ac.callsign}, turn left heading ${headingStr}`,
+      atcCmd,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
       pilotPhrase
     );
@@ -544,6 +567,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ),
     }));
     const headingStr = newTarget.toString().padStart(3, '0');
+    const atcCmd = pickVariant([
+      `${ac.callsign}, turn right heading ${headingStr}`,
+      `${ac.callsign}, right heading ${headingStr}`,
+    ]);
     const pilotPhrase = pickVariant([
       `Right heading ${headingStr}`,
       `Turning right heading ${headingStr}`,
@@ -553,7 +580,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       get,
       set,
       ac,
-      `${ac.callsign}, turn right heading ${headingStr}`,
+      atcCmd,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
       pilotPhrase
     );
@@ -579,7 +606,9 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
 
     const isClimb = target > ac.altitude;
-    const actionWord = isClimb ? 'Climb and maintain' : 'Descend and maintain';
+    const actionWord = isClimb
+      ? pickVariant(['climb', 'climb and maintain'])
+      : pickVariant(['descend', 'descend and maintain']);
     const pilotAction = isClimb ? 'Climbing' : 'Descending to';
     const altText = formatReadableAlt(target);
     const qnhTag = !isClimb && target < 8000 ? `, QNH ${weather.qnh}` : '';
@@ -590,7 +619,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       get,
       set,
       ac,
-      `${ac.callsign}, ${actionWord.toLowerCase()} ${altText}${qnhTag}${expeditePhrase}`,
+      `${ac.callsign}, ${actionWord} ${altText}${qnhTag}${expeditePhrase}`,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
       pilotPhrase
     );
@@ -609,10 +638,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
     const verb =
       target < ac.indicatedAirspeed - 5
-        ? 'Reduce speed to'
+        ? pickVariant(['reduce speed to', 'speed'])
         : target > ac.indicatedAirspeed + 5
-        ? 'Increase speed to'
-        : 'Maintain speed';
+        ? pickVariant(['increase speed to', 'speed'])
+        : 'maintain speed';
     const pilotPhrase =
       target < ac.indicatedAirspeed - 5
         ? `Reducing speed ${target} knots`
@@ -624,7 +653,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       get,
       set,
       ac,
-      `${ac.callsign}, ${verb.toLowerCase()} ${target} knots`,
+      `${ac.callsign}, ${verb} ${target} knots`,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
       pilotPhrase
     );
@@ -652,6 +681,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ),
     }));
 
+    const atcCmd = pickVariant([
+      `${ac.callsign}, cleared direct ${waypointName}`,
+      `${ac.callsign}, direct ${waypointName}`,
+    ]);
     const pilotPhrase = pickVariant([
       `Proceeding direct ${waypointName}`,
       `Direct ${waypointName}, roger`,
@@ -660,7 +693,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       get,
       set,
       ac,
-      `${ac.callsign}, cleared direct ${waypointName}`,
+      atcCmd,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
       pilotPhrase
     );
@@ -1047,7 +1080,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
 
     const windDirStr = Math.round(weather.windDirection).toString().padStart(3, '0');
-    const windText = `surface wind ${windDirStr} degrees ${Math.round(weather.windSpeed)} knots`;
+    const windText = `wind ${windDirStr} degrees ${Math.round(weather.windSpeed)} knots`;
     const pilotPhrase = `Cleared for takeoff runway ${ac.assignedRunway}`;
     logCommsExchange(
       get,
@@ -1227,11 +1260,45 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
   },
 
+  broadcastWeatherAdvisory: () => {
+    const { weather, airportProfile, airport, aircraft } = get();
+    const windDirStr = Math.round(weather.windDirection).toString().padStart(3, '0');
+    const windSpd = Math.round(weather.windSpeed);
+    const gustPart =
+      weather.gusts && weather.gusts > windSpd + 2
+        ? `, gusting ${Math.round(weather.gusts)} knots`
+        : '';
+    const visMiles = Math.max(1, Math.min(10, Math.round(weather.visibilityNM)));
+    const wxCond =
+      weather.precipitation === 'Rain' || weather.precipitation === 'Light Rain'
+        ? 'moderate rain'
+        : weather.precipitation === 'Fog'
+        ? 'fog'
+        : 'sky clear';
+
+    const atcWxText = `All stations, weather update, wind ${windDirStr} degrees ${windSpd} knots${gustPart}, visibility ${visMiles} miles, QNH ${weather.qnh}, ${wxCond}.`;
+    const wxMsg: RadioMessage = {
+      id: `wx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: getFormattedUTCTime(),
+      sender: 'ATC',
+      callsign: airportProfile.directorCallsign,
+      text: atcWxText,
+      frequency: airportProfile.vhfFrequency,
+    };
+
+    set(state => ({ radioMessages: [wxMsg, ...state.radioMessages.slice(0, 49)] }));
+    radioAudio.speakRadioExchange(atcWxText, aircraft[0]?.callsign || 'BAW452', '', undefined, {
+      airportIcao: airport.icao,
+      activeCallsigns: aircraft.map(f => f.callsign),
+    });
+  },
+
   switchAirport: (icao, landingRunwayId, departureRunwayId, weatherOverride) => {
     const resolved = resolveConfiguredAirport(icao, landingRunwayId, departureRunwayId);
     radioAudio.clearQueue();
     radioAudio.setAirportContext(resolved.airport.icao);
     globalConflictTracker.clear();
+    resetCommsTimers();
     globalOccupancyManager.configureAirport(
       resolved.runwayGeometries,
       resolved.profile.reciprocalPairs
@@ -1304,6 +1371,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     radioAudio.clearQueue();
     radioAudio.setAirportContext(resolved.airport.icao);
     globalConflictTracker.clear();
+    resetCommsTimers();
     globalOccupancyManager.configureAirport(
       resolved.runwayGeometries,
       resolved.profile.reciprocalPairs
@@ -1401,6 +1469,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     radioAudio.clearQueue();
     radioAudio.setAirportContext(resolved.airport.icao);
     globalConflictTracker.clear();
+    resetCommsTimers();
     globalOccupancyManager.configureAirport(
       resolved.runwayGeometries,
       resolved.profile.reciprocalPairs
@@ -1491,6 +1560,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     radioAudio.clearQueue();
     radioAudio.setAirportContext(airport.icao);
     globalConflictTracker.clear();
+    resetCommsTimers();
     globalOccupancyManager.clearAll();
     const freshFleet = createFleetForAirport(
       airport,
@@ -1656,6 +1726,82 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       if (p.severity === 'Critical') {
         newViolations += 1;
         radioAudio.playConflictAlert();
+      }
+    }
+
+    // Live Traffic Advisories on active conflicts (with 40s per-pair cooldown)
+    for (const conflict of activeConflicts) {
+      const pairKey = [conflict.aircraft1Id, conflict.aircraft2Id].sort().join(':');
+      const lastAlert = trafficAlertCooldowns.get(pairKey) ?? -999;
+      if (currentSimTime - lastAlert >= 40) {
+        const acA = updatedAircraft.find(a => a.id === conflict.aircraft1Id);
+        const acB = updatedAircraft.find(a => a.id === conflict.aircraft2Id);
+        if (acA && acB && acA.altitude > airport.elevationFeet + 500) {
+          trafficAlertCooldowns.set(pairKey, currentSimTime);
+          const hdgDiff = Math.abs(getHeadingDelta(acA.heading, acB.heading));
+          const geomPhrase = hdgDiff > 135 ? 'opposite direction' : 'converging';
+          const roundedAlt = Math.max(2000, Math.round(acA.altitude / 500) * 500);
+          const altStr = formatReadableAlt(roundedAlt);
+          const atcTraffic = `${acA.callsign}, traffic alert, ${geomPhrase}, maintain ${altStr}`;
+          const pilotAck = pickVariant(['Traffic in sight', 'Looking out for traffic']);
+          logCommsExchange(
+            get,
+            set,
+            acA,
+            atcTraffic,
+            `${pilotAck}, ${acA.telephony} ${acA.callsign.slice(3)}`,
+            pilotAck
+          );
+          break;
+        }
+      }
+    }
+
+    // Periodic Sector Weather Broadcast (~12s on hazardous weather, or every 150s)
+    const hasAdverseWeather =
+      weather.precipitation !== 'None' || weather.visibilityNM <= 6 || weather.windSpeed >= 18;
+    const wxThreshold = lastWeatherBroadcastSimTime === 0 && hasAdverseWeather ? 12 : 150;
+    if (
+      updatedAircraft.length > 0 &&
+      currentSimTime - lastWeatherBroadcastSimTime >= wxThreshold
+    ) {
+      lastWeatherBroadcastSimTime = currentSimTime;
+      get().broadcastWeatherAdvisory();
+    }
+
+    // Proactive Pilot Requests (Direct route & altitude change requests every ~40s)
+    if (
+      currentSimTime >= 20 &&
+      currentSimTime - lastPilotRequestSimTime >= 40 &&
+      activeConflicts.length === 0
+    ) {
+      const candidates = updatedAircraft.filter(ac => {
+        if (ac.isEmergency || ac.ilsArmed || ac.ilsLocalizerCaptured || ac.holdingWaypoint) {
+          return false;
+        }
+        const dist = Math.sqrt(ac.x * ac.x + ac.y * ac.y);
+        if (dist < 10 || dist > 45) return false;
+        const lastReq = pilotRequestCooldowns.get(ac.id) ?? -999;
+        return currentSimTime - lastReq >= 120;
+      });
+
+      if (candidates.length > 0) {
+        const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+        let reqText: string | null = null;
+        if (chosen.status === 'Inbound' && chosen.routeQueue && chosen.routeQueue.length > 0) {
+          reqText = `${airport.name} Director, ${chosen.callsign}, request direct ${chosen.routeQueue[0]}.`;
+        } else if (chosen.status === 'Inbound' && chosen.altitude >= 7000 && chosen.targetAltitude >= 6000) {
+          const reqFeet = Math.max(3000, Math.round((chosen.altitude - 3000) / 1000) * 1000);
+          reqText = `${airport.name} Director, ${chosen.callsign}, request lower ${formatReadableAlt(reqFeet)}.`;
+        } else if (chosen.status === 'Departing' && chosen.altitude >= 2500 && chosen.targetAltitude <= 10000) {
+          reqText = `${airport.name} Director, ${chosen.callsign}, request climb FL120.`;
+        }
+
+        if (reqText) {
+          lastPilotRequestSimTime = currentSimTime;
+          pilotRequestCooldowns.set(chosen.id, currentSimTime);
+          logPilotTransmission(get, set, chosen, reqText, true);
+        }
       }
     }
 

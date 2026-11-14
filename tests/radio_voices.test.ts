@@ -163,7 +163,49 @@ describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
     expect(spoken).toContain('three thousand feet');
   });
 
-  it('ships valid offline MP3 audio sprites and synchronized manifest entries for all 11 speakers', () => {
+  it('tokenizes concise ICAO variants, weather advisories, traffic alerts, and proactive pilot requests cleanly', () => {
+    const newAtcSamples = [
+      'BAW452, heading 270',
+      'BAW452, left heading 180',
+      'BAW452, right heading 315',
+      'DAL114, climb FL120',
+      'BAW452, descend 3,000 ft, QNH 1013',
+      'IRA712, speed 180 knots',
+      'BAW452, direct BNN',
+      'BAW452, traffic alert, opposite direction, maintain FL100',
+      'BAW452, traffic alert, converging, maintain 5,000 ft',
+      'All stations, weather update, wind 260 degrees 14 knots, gusting 24 knots, visibility 4 miles, QNH 1012, moderate rain.',
+      'All stations, weather update, wind 180 degrees 8 knots, visibility 1 miles, QNH 1008, fog.',
+      'All stations, weather update, wind 310 degrees 22 knots, visibility 10 miles, QNH 1015, sky clear.',
+    ];
+    for (const cmd of newAtcSamples) {
+      const tokens = tokenizeForVoicePack(cmd, 'TOWER');
+      expect(tokens, `Failed ATC v2 tokenization: ${cmd}`).not.toBeNull();
+    }
+
+    // Verify co-articulated single-unit chunks are preferred over chopped tokens
+    expect(tokenizeForVoicePack('BAW452, runway 27R cleared for takeoff', 'TOWER')).toContain('rwy_27R');
+    expect(tokenizeForVoicePack('BAW452, descend 3,000 ft', 'TOWER')).toContain('alt_3000');
+    expect(tokenizeForVoicePack('BAW452, climb FL120', 'TOWER')).toContain('fl_120');
+    expect(tokenizeForVoicePack('BAW452, speed 180 knots', 'TOWER')).toContain('spd_180');
+
+    const newPilotSamples = [
+      'London Heathrow Director, BAW452, request direct LAM.',
+      'London Heathrow Director, BAW452, request lower 5,000 ft.',
+      'Tehran Mehrabad Director, IRA712, request climb FL120.',
+      'Traffic in sight, Speedbird 452',
+      'Looking out for traffic, Iranair 712',
+      'Wilco, left 180, Air France 228',
+      'Heading 270, Speedbird 452',
+      'Direct BNN, roger, Speedbird 452',
+    ];
+    for (const msg of newPilotSamples) {
+      const tokens = tokenizeForVoicePack(msg, 'PILOT');
+      expect(tokens, `Failed Pilot v2 tokenization: ${msg}`).not.toBeNull();
+    }
+  });
+
+  it('ships valid offline MP3 audio sprites and synchronized v2 manifest entries for all 11 speakers', () => {
     const expectedSpeakers = [
       ...Object.values(TOWER_PACK_ID_MAP),
       ...PILOT_PACK_IDS,
@@ -174,13 +216,19 @@ describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
     expect(fs.existsSync(publicManifestPath)).toBe(true);
     const publicManifest = JSON.parse(fs.readFileSync(publicManifestPath, 'utf8'));
 
+    expect(bundledManifest.version).toBeGreaterThanOrEqual(2);
+    expect(publicManifest.version).toBeGreaterThanOrEqual(2);
     expect(Object.keys(bundledManifest.speakers).sort()).toEqual([...expectedSpeakers].sort());
     expect(Object.keys(publicManifest.speakers).sort()).toEqual([...expectedSpeakers].sort());
 
     const atcSamples = [
       'BAW452, fly heading 270',
+      'BAW452, heading 270',
+      'BAW452, left heading 180',
+      'BAW452, right heading 315',
       'IRA712, cancel route, maintain present heading 095',
       'DAL114, climb and maintain 12,000 feet',
+      'DAL114, climb FL120',
       'BAW452, descend and maintain 3,000 feet, QNH 1013, expedite',
       'IRA712, reduce speed to 180 knots',
       'BAW452, cleared direct BNN',
@@ -191,7 +239,9 @@ describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
       'BAW452, go around, climb straight ahead to 3,000 feet',
       'BAW452, hold at OCK as published, expect further clearance',
       'BAW452, behind landing traffic, runway 27L line up and wait',
-      'BAW452, surface wind 260 degrees 14 knots, QNH 1013, runway 27L cleared for takeoff',
+      'BAW452, wind 260 degrees 14 knots, QNH 1013, runway 27L cleared for takeoff',
+      'BAW452, traffic alert, opposite direction, maintain FL100',
+      'All stations, weather update, wind 260 degrees 14 knots, visibility 10 miles, QNH 1013, sky clear.',
       'BAW452, cancel takeoff, I say again cancel takeoff!',
       'BAW452, hold position, stop immediately, abort takeoff!',
       'BAW452, London Heathrow Airport Director, radio check on 119.725 MHz',
@@ -199,14 +249,17 @@ describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
 
     const pilotSamples = [
       'Roger, turning heading 270, Speedbird 452',
+      'Heading 270, Speedbird 452',
       'Maintaining present heading 095, Iranair 712',
       'Turning left heading 180, Air France 228',
       'Wilco, right 315, Emirates 310',
       'Climbing 12,000 feet, Delta 114',
       'Descending to 3,000 feet, expediting, QNH 1013, Speedbird 452',
       'Proceeding direct BNN, Speedbird 452',
+      'Cleared via BNN then LAM, Speedbird 452',
       'Route DMV, VAR, then ILS runway 29R, Iranair 712',
       'Expect runway 27R, Speedbird 452',
+      'Heading 240, descending 3,000 feet, cleared ILS runway 29R, Iranair 712',
       'Cleared ILS approach runway 31L, will report established, Delta 114',
       'Going around, climbing 3,000 feet on runway heading, Speedbird 452',
       'Entering hold at OCK as published, Speedbird 452',
@@ -217,6 +270,10 @@ describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
       'Stopping immediately, aborting takeoff runway 27L, Speedbird 452',
       'London Heathrow Airport Director, BAW452 Heavy, passing 8,000 feet direct LAM, with information Alpha.',
       'Tehran Mehrabad Tower, IRA712, holding short runway 29L, ready for departure.',
+      'London Heathrow Director, BAW452, request direct LAM.',
+      'London Heathrow Director, BAW452, request lower 5,000 ft.',
+      'Traffic in sight, Speedbird 452',
+      'Looking out for traffic, Iranair 712',
       'Mayday Mayday Mayday! New York Kennedy Director, AAL101 Heavy, squawking 7700, engine failure, requesting immediate priority vectors runway 31L!',
       'London Heathrow Airport Director, BAW452, established localizer runway 27R.',
       'BAW452, fully established ILS runway 27R, gear down, landing checks complete.',

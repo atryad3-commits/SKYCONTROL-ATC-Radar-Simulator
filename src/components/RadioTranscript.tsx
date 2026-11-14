@@ -6,7 +6,7 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
-import { Radio, Volume2, VolumeX, Mic, Headset } from 'lucide-react';
+import { Radio, Volume2, VolumeX, Mic, Headset, CloudSun } from 'lucide-react';
 import {
   radioAudio,
   TOWER_VOICE_PROFILES,
@@ -25,6 +25,7 @@ export const RadioTranscript: React.FC = () => {
   const setAudioMuted = useSimulationStore(state => state.setAudioMuted);
   const setAudioVolume = useSimulationStore(state => state.setAudioVolume);
   const setTowerVoice = useSimulationStore(state => state.setTowerVoice);
+  const broadcastWeatherAdvisory = useSimulationStore(state => state.broadcastWeatherAdvisory);
 
   const [offlineVoices, setOfflineVoices] = useState<OfflineVoiceOption[]>([]);
   const listTopRef = useRef<HTMLDivElement | null>(null);
@@ -161,6 +162,18 @@ export const RadioTranscript: React.FC = () => {
               )}
             </select>
           </label>
+
+          <button
+            onClick={() => {
+              radioAudio.initAudioContext();
+              broadcastWeatherAdvisory();
+            }}
+            className="px-2 py-0.5 bg-[#0d222b] hover:bg-[#13323f] text-[#7ae8ff] border border-[#1a4859] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Broadcast live weather & QNH update on frequency"
+          >
+            <CloudSun className="w-3 h-3 text-[#00e5ff]" />
+            <span>ATIS / WX</span>
+          </button>
 
           <button
             onClick={handleTestRadio}
