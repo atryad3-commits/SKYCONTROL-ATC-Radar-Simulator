@@ -16,6 +16,7 @@ import {
   TOWER_PACK_ID_MAP,
   tokenizeForVoicePack,
 } from './voicePackPlayer';
+import { audioEngine } from '../services/AudioEngine';
 
 export const AIRLINE_CALLSIGNS: Record<string, string> = {
   BAW: 'Speedbird',
@@ -603,8 +604,10 @@ export class RadioAudioEngine {
       const unlockAudio = () => {
         const ctx = this.initAudioContext();
         if (ctx) {
+          audioEngine.setAudioContext(ctx);
           const packId = TOWER_PACK_ID_MAP[this.towerVoiceId];
           if (packId) void voicePackPlayer.loadSpeakerBuffer(packId, ctx);
+          void audioEngine.preloadAllSpeakers(ctx);
         }
         if (typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.paused) {
           window.speechSynthesis.resume();
@@ -726,8 +729,11 @@ export class RadioAudioEngine {
         this.audioCtx = new AudioCtxClass();
       }
     }
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume().catch(() => undefined);
+    if (this.audioCtx) {
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume().catch(() => undefined);
+      }
+      audioEngine.setAudioContext(this.audioCtx);
     }
     return this.audioCtx;
   }

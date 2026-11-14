@@ -5,21 +5,13 @@
  * and schedules seamless crossfaded playback through the VHF Radio DSP chain.
  */
 
-import bundledVoicePackManifest from './voicePackManifest.json';
+import {
+  audioEngine,
+  VoicePackManifest,
+  VoicePackSpeakerManifest,
+} from '../services/AudioEngine';
 
-export interface VoicePackSpeakerManifest {
-  id: string;
-  role: 'TOWER' | 'PILOT';
-  label: string;
-  file: string;
-  clips: Record<string, [number, number]>; // [startSec, durationSec]
-}
-
-export interface VoicePackManifest {
-  version: number;
-  sampleRate: number;
-  speakers: Record<string, VoicePackSpeakerManifest>;
-}
+export type { VoicePackManifest, VoicePackSpeakerManifest };
 
 const KNOWN_AIRLINES = new Set([
   'BAW', 'IRA', 'VIR', 'DLH', 'AFR', 'KLM', 'UAE', 'AAL', 'DAL',
@@ -441,104 +433,29 @@ export const TOWER_PACK_ID_MAP: Record<string, string> = {
   puck: 'tower_puck',
 };
 
-function computeTokenStepOffsetSec(prevTok: string | null, currTok: string): number {
-  if (!prevTok) return 0;
-  const isDigit = (t: string) => t.startsWith('d_') || t.startsWith('nato_');
-  const isPhrase = (t: string) => t.startsWith('tc_') || t.startsWith('pr_');
-
-  // Digits inside callsigns / headings / QNH blend smoothly without staccato gaps
-  if (isDigit(prevTok) && isDigit(currTok)) {
-    return -0.022;
-  }
-  // Airline name -> digit group flows directly ("Speedbird four-five-two")
-  if (prevTok.startsWith('al_') && isDigit(currTok)) {
-    return -0.015;
-  }
-  // Brief breath beat between callsign digits and main instruction clause
-  if (isDigit(prevTok) && isPhrase(currTok)) {
-    return 0.016;
-  }
-  // Smooth continuous co-articulation across adjacent words & whole units
-  return -0.012;
-}
-
 export class OfflineVoicePackPlayer {
-  private manifest: VoicePackManifest | null =
-    (bundledVoicePackManifest as unknown as VoicePackManifest) || null;
-  private manifestPromise: Promise<VoicePackManifest | null> | null = null;
-  private bufferCache = new Map<string, AudioBuffer>();
-  private bufferPromises = new Map<string, Promise<AudioBuffer | null>>();
-  private activeNodes: AudioBufferSourceNode[] = [];
-
   public async loadManifest(): Promise<VoicePackManifest | null> {
-    if (this.manifest && (this.manifest.version ?? 1) >= 2 && Object.keys(this.manifest.speakers).length >= 11) {
-      return this.manifest;
-    }
-    if (this.manifestPromise) return this.manifestPromise;
-
-    if (typeof fetch !== 'function') return this.manifest;
-
-    this.manifestPromise = fetch('/voice-pack/manifest.json')
-      .then(async res => {
-        if (!res.ok) return this.manifest;
-        const data = (await res.json()) as VoicePackManifest;
-        if (!data?.speakers) return this.manifest;
-        if ((data.version ?? 1) >= (this.manifest?.version ?? 1)) {
-          this.manifest = data;
-        }
-        return this.manifest;
-      })
-      .catch(() => this.manifest);
-
-    return this.manifestPromise;
+    return audioEngine.loadManifest();
   }
 
   public getManifestSync(): VoicePackManifest | null {
-    return this.manifest;
+    return audioEngine.getManifestSync();
   }
 
   public async loadSpeakerBuffer(
     speakerId: string,
     ctx: AudioContext
   ): Promise<AudioBuffer | null> {
-    const cached = this.bufferCache.get(speakerId);
-    if (cached) return cached;
-
-    const existingPromise = this.bufferPromises.get(speakerId);
-    if (existingPromise) return existingPromise;
-
-    const manifest = await this.loadManifest();
-    const spec = manifest?.speakers?.[speakerId];
-    if (!spec) return null;
-
-    const p = fetch(spec.file)
-      .then(async res => {
-        if (!res.ok) return null;
-        const arr = await res.arrayBuffer();
-        const audioBuf = await ctx.decodeAudioData(arr);
-        this.bufferCache.set(speakerId, audioBuf);
-        return audioBuf;
-      })
-      .catch(() => null);
-
-    this.bufferPromises.set(speakerId, p);
-    return p;
+    return audioEngine.preloadSpeaker(speakerId, ctx);
   }
 
   public stopActive() {
-    for (const node of this.activeNodes) {
-      try {
-        node.stop();
-      } catch {
-        // Ignore already-stopped nodes
-      }
-    }
-    this.activeNodes = [];
+    audioEngine.stopActive();
   }
 
   /**
-   * Plays a tokenized aviation transmission from the offline real-human MP3 sprite pack
-   * with smooth equal-power overlapping crossfades and VHF Radio DSP filtering.
+   * Plays a tokenized aviation transmission through the shared AudioEngine
+   * with equal-power overlapping crossfades and VHF Radio DSP filtering.
    */
   public async playTransmission(params: {
     ctx: AudioContext;
@@ -550,107 +467,22 @@ export class OfflineVoicePackPlayer {
     bandpassHz?: number;
     shouldAbort: () => boolean;
   }): Promise<boolean> {
-    const manifest = await this.loadManifest();
+    const manifest = await audioEngine.loadManifest();
     const spk = manifest?.speakers?.[params.speakerId];
     if (!spk || params.shouldAbort()) return false;
 
     const tokens = tokenizeForVoicePack(params.rawText, params.role, spk.clips);
     if (!tokens || tokens.length === 0) return false;
 
-    const audioBuffer = await this.loadSpeakerBuffer(params.speakerId, params.ctx);
-    if (!audioBuffer || params.shouldAbort()) return false;
-
-    const rate = params.playbackRate ?? 1.0;
-
-    // VHF Aviation Radio DSP chain (warm body + crisp speech presence)
-    const highpass = params.ctx.createBiquadFilter();
-    highpass.type = 'highpass';
-    highpass.frequency.value = 320;
-
-    const presence = params.ctx.createBiquadFilter();
-    presence.type = 'peaking';
-    presence.frequency.value = params.bandpassHz ?? (params.role === 'TOWER' ? 1380 : 1520);
-    presence.Q.value = 1.05;
-    presence.gain.value = params.role === 'PILOT' ? 4.4 : 3.0;
-
-    const lowpass = params.ctx.createBiquadFilter();
-    lowpass.type = 'lowpass';
-    lowpass.frequency.value = params.role === 'TOWER' ? 3350 : 2950;
-
-    const compressor = params.ctx.createDynamicsCompressor();
-    compressor.threshold.value = -19;
-    compressor.knee.value = 8;
-    compressor.ratio.value = 6.5;
-    compressor.attack.value = 0.004;
-    compressor.release.value = 0.12;
-
-    const masterGain = params.ctx.createGain();
-    masterGain.gain.value = Math.min(1.25, params.volume * (params.role === 'TOWER' ? 1.08 : 0.98));
-
-    highpass.connect(presence);
-    presence.connect(lowpass);
-    lowpass.connect(compressor);
-    compressor.connect(masterGain);
-    masterGain.connect(params.ctx.destination);
-
-    let scheduledCursor = params.ctx.currentTime + 0.02;
-    const sources: AudioBufferSourceNode[] = [];
-    let prevTok: string | null = null;
-
-    for (const tok of tokens) {
-      const span = spk.clips[tok];
-      if (!span) continue;
-      const [clipOffset, clipDur] = span;
-      if (clipDur <= 0.01) continue;
-
-      const delta = computeTokenStepOffsetSec(prevTok, tok);
-      if (prevTok !== null) {
-        scheduledCursor = Math.max(params.ctx.currentTime + 0.015, scheduledCursor + delta);
-      }
-
-      const scaledDur = clipDur / rate;
-      const fadeInSec = Math.min(0.012, scaledDur * 0.25);
-      const fadeOutSec = Math.min(0.016, scaledDur * 0.3);
-
-      const src = params.ctx.createBufferSource();
-      src.buffer = audioBuffer;
-      src.playbackRate.value = rate;
-
-      const clipGain = params.ctx.createGain();
-      clipGain.gain.setValueAtTime(0.001, scheduledCursor);
-      clipGain.gain.linearRampToValueAtTime(1.0, scheduledCursor + fadeInSec);
-      clipGain.gain.setValueAtTime(1.0, Math.max(scheduledCursor + fadeInSec, scheduledCursor + scaledDur - fadeOutSec));
-      clipGain.gain.linearRampToValueAtTime(0.001, scheduledCursor + scaledDur + 0.003);
-
-      src.connect(clipGain);
-      clipGain.connect(highpass);
-
-      src.start(scheduledCursor, Math.max(0, clipOffset - 0.003), clipDur + 0.008);
-      sources.push(src);
-
-      scheduledCursor += scaledDur;
-      prevTok = tok;
-    }
-
-    if (sources.length === 0) return false;
-    this.activeNodes = sources;
-
-    const totalMs = Math.max(80, (scheduledCursor - params.ctx.currentTime) * 1000);
-    return new Promise<boolean>(resolve => {
-      let finished = false;
-      const done = (ok: boolean) => {
-        if (finished) return;
-        finished = true;
-        this.activeNodes = [];
-        resolve(ok);
-      };
-
-      const lastSource = sources[sources.length - 1];
-      lastSource.onended = () => done(!params.shouldAbort());
-
-      setTimeout(() => {
-        if (!finished) done(!params.shouldAbort());
-      }, totalMs + 220);
+    return audioEngine.playClipSequence({
+      ctx: params.ctx,
+      speakerId: params.speakerId,
+      role: params.role,
+      tokens,
+      volume: params.volume,
+      playbackRate: params.playbackRate,
+      bandpassHz: params.bandpassHz,
+      shouldAbort: params.shouldAbort,
     });
   }
 }

@@ -16,6 +16,7 @@ import {
   PILOT_PACK_IDS,
   TOWER_PACK_ID_MAP,
 } from '../src/audio/voicePackPlayer';
+import { AudioEngine, TARGET_PACE_MULTIPLIER } from '../src/services/AudioEngine';
 import { useSimulationStore } from '../src/store/simulationStore';
 
 const MOCK_OFFLINE_VOICES: VoiceLike[] = [
@@ -296,6 +297,86 @@ describe('100% Offline Multi-Voice Pack & Selectable Tower Voice', () => {
         const tokens = tokenizeForVoicePack(sample, spk.role, spk.clips);
         expect(tokens, `Missing clip token for ${speakerId} on: ${sample}`).not.toBeNull();
       }
+    }
+  });
+
+  it('schedules consecutive voice clips with overlapping crossfades and 15% pace cadence via AudioEngine', async () => {
+    const engine = new AudioEngine();
+    const charonClips = (bundledManifest.speakers as unknown as Record<string, { clips: Record<string, [number, number]> }>).tower_charon.clips;
+
+    const tokens = ['al_BAW', 'd_4', 'd_5', 'd_2', 'tc_turn_left_hdg', 'd_1', 'd_8', 'd_0'];
+    const plan = engine.computeSchedulePlan(tokens, charonClips, engine.resolveEffectivePlaybackRate('TOWER', 2), 1.0);
+
+    expect(plan.items).toHaveLength(tokens.length);
+    // Adjacent digits inside callsigns & headings overlap negatively for smooth unbroken flow
+    expect(plan.items[2].stepDeltaSec).toBeLessThan(0);
+    expect(plan.items[6].stepDeltaSec).toBeLessThan(0);
+    // Breath beat between callsign digits and phrase clause
+    expect(plan.items[4].stepDeltaSec).toBeGreaterThan(0);
+    // Legacy v1 manifest automatically receives the 1.15x (+15%) pace multiplier
+    expect(engine.resolveEffectivePlaybackRate('TOWER', 1)).toBeCloseTo(1.01 * TARGET_PACE_MULTIPLIER, 2);
+    expect(engine.resolveEffectivePlaybackRate('PILOT', 1)).toBeCloseTo(TARGET_PACE_MULTIPLIER, 2);
+
+    // Mock Web Audio API AudioContext to verify source node scheduling & equal-power crossfades
+    const startedCalls: Array<{ when: number; offset: number; duration: number }> = [];
+    const stoppedNodes: number[] = [];
+    const createParam = () => ({
+      value: 0,
+      setValueAtTime: () => undefined,
+      linearRampToValueAtTime: () => undefined,
+      setValueCurveAtTime: () => undefined,
+    });
+    const mockCtx = {
+      currentTime: 0.5,
+      destination: {},
+      createBiquadFilter: () => ({ type: '', frequency: createParam(), Q: createParam(), gain: createParam(), connect: () => undefined }),
+      createDynamicsCompressor: () => ({ threshold: createParam(), knee: createParam(), ratio: createParam(), attack: createParam(), release: createParam(), connect: () => undefined }),
+      createGain: () => ({ gain: createParam(), connect: () => undefined }),
+      createBufferSource: () => {
+        const idx = startedCalls.length;
+        const node = {
+          buffer: null,
+          playbackRate: { value: 1 },
+          connect: () => undefined,
+          start: (when: number, offset: number, duration: number) => {
+            startedCalls.push({ when, offset, duration });
+          },
+          stop: () => {
+            stoppedNodes.push(idx);
+          },
+          onended: null as null | (() => void),
+        };
+        setTimeout(() => node.onended?.(), 5);
+        return node;
+      },
+      decodeAudioData: async () => ({ duration: 100 } as AudioBuffer),
+    } as unknown as AudioContext;
+
+    // Seed buffer cache cleanly for unit test without network
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(16),
+      }) as Response) as typeof fetch;
+
+    try {
+      const ok = await engine.playClipSequence({
+        ctx: mockCtx,
+        speakerId: 'tower_charon',
+        role: 'TOWER',
+        tokens,
+        volume: 0.85,
+      });
+      expect(ok).toBe(true);
+      expect(startedCalls).toHaveLength(tokens.length);
+      // Each consecutive clip starts before the previous un-trimmed edge finishes cleanly
+      for (let i = 1; i < startedCalls.length; i++) {
+        expect(startedCalls[i].when).toBeGreaterThan(startedCalls[i - 1].when);
+      }
+      engine.stopActive();
+    } finally {
+      globalThis.fetch = origFetch;
     }
   });
 });
