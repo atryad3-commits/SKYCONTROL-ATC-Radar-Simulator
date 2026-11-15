@@ -1,6 +1,8 @@
 node_modules/
 build/
 dist/
+dist-server/
+local-data/audio-cache/
 coverage/
 .DS_Store
 *.log

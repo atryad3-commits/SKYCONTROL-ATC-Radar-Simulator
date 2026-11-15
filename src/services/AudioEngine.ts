@@ -513,6 +513,103 @@ export class AudioEngine {
       }, totalMs + 220);
     });
   }
+
+  /**
+   * Decodes and plays a complete WAV ArrayBuffer (e.g. from local Kokoro-82M TTS or sample files)
+   * directly through the VHF Radio DSP chain with pitch/rate trim and abort safety.
+   */
+  public async playWavBytes(params: {
+    wavBytes: ArrayBuffer;
+    role: RadioSpeakerRole;
+    volume: number;
+    playbackRate?: number;
+    bandpassHz?: number;
+    ctx?: AudioContext;
+    shouldAbort?: () => boolean;
+  }): Promise<boolean> {
+    const shouldAbort = params.shouldAbort ?? (() => false);
+    if (shouldAbort() || params.wavBytes.byteLength <= 44) return false;
+
+    const ctx = params.ctx || this.getAudioContext();
+    if (!ctx) return false;
+
+    try {
+      const decoded = await ctx.decodeAudioData(params.wavBytes.slice(0));
+      if (shouldAbort()) return false;
+      return this.playAudioBuffer({
+        buffer: decoded,
+        role: params.role,
+        volume: params.volume,
+        playbackRate: params.playbackRate,
+        bandpassHz: params.bandpassHz,
+        ctx,
+        shouldAbort,
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Plays a decoded AudioBuffer directly through the Web Audio VHF Radio DSP graph.
+   */
+  public playAudioBuffer(params: {
+    buffer: AudioBuffer;
+    role: RadioSpeakerRole;
+    volume: number;
+    playbackRate?: number;
+    bandpassHz?: number;
+    ctx?: AudioContext;
+    shouldAbort?: () => boolean;
+  }): Promise<boolean> {
+    const shouldAbort = params.shouldAbort ?? (() => false);
+    const ctx = params.ctx || this.getAudioContext();
+    if (!ctx || shouldAbort()) return Promise.resolve(false);
+
+    const rate = Math.max(0.75, Math.min(1.35, params.playbackRate ?? 1.0));
+    const { input: radioInput } = this.createVhfRadioGraph(
+      ctx,
+      params.role,
+      params.volume,
+      params.bandpassHz
+    );
+
+    const source = ctx.createBufferSource();
+    source.buffer = params.buffer;
+    source.playbackRate.value = rate;
+
+    const envGain = ctx.createGain();
+    const now = ctx.currentTime + 0.015;
+    const duration = Math.max(0.05, params.buffer.duration / rate);
+    const fadeEdge = Math.min(0.015, duration * 0.2);
+
+    envGain.gain.setValueAtTime(0.001, now);
+    envGain.gain.linearRampToValueAtTime(1.0, now + fadeEdge);
+    envGain.gain.setValueAtTime(1.0, Math.max(now + fadeEdge, now + duration - fadeEdge));
+    envGain.gain.linearRampToValueAtTime(0.001, now + duration);
+
+    source.connect(envGain);
+    envGain.connect(radioInput);
+    source.start(now);
+
+    this.activeNodes = [source];
+    const totalMs = Math.max(80, duration * 1000);
+
+    return new Promise<boolean>(resolve => {
+      let finished = false;
+      const done = (ok: boolean) => {
+        if (finished) return;
+        finished = true;
+        this.activeNodes = [];
+        resolve(ok);
+      };
+
+      source.onended = () => done(!shouldAbort());
+      setTimeout(() => {
+        if (!finished) done(!shouldAbort());
+      }, totalMs + 250);
+    });
+  }
 }
 
 export const audioEngine = new AudioEngine();

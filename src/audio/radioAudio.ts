@@ -1,13 +1,16 @@
 /**
- * 100% Offline Web Audio VHF Radio Simulator & Bundled Real-Human Voice Pack Engine
- * Models:
- * - Zero internet / API dependency at runtime:
- *   1. Primary: Pre-bundled offline Real-Human MP3 Audio Sprite Packs (/voice-pack/)
- *      covering 5 user-selectable Tower voices + 6 distinct international Pilot crew voices
- *      for ALL ATC commands, clearances, readbacks, check-ins, ILS callouts, and emergencies.
- *   2. Fallback: Installed offline OS/browser voices (localService prioritized) + vocal register spread.
- * - Authentic ICAO Annex 10 phraseology & digit normalization ("two seven zero", "niner", "runway two niner right")
- * - Web Audio VHF radio DSP chain (bandpass + radio compressor + PTT mic click + carrier static + squelch tail)
+ * SKYCONTROL - 100% Offline VHF Radio Simulator & Local Kokoro-82M Speech Coordinator
+ *
+ * Strictly zero cloud APIs / zero external internet required at runtime:
+ * 1. Primary Neural TTS: Local Kokoro-82M ONNX engine (15 genuinely distinct neural speaker profiles:
+ *    10 Pilots + 3 Tower + 1 Approach + 1 Ground) running in a background Node Worker Thread
+ *    with persistent disk + IndexedDB WAV caching and lookahead readback pre-synthesis.
+ * 2. Instant Zero-Latency Offline Fallback: Pre-bundled offline MP3 audio sprite packs (/voice-pack/)
+ *    for immediate playback while cold models warm up or if a local engine timeout triggers.
+ * 3. Last-Resort Fallback: Installed offline OS/browser voices (localService prioritized).
+ *
+ * All synthesized & cached WAV audio passes through the unified Web Audio VHF Radio DSP chain
+ * (320Hz-3350Hz bandpass, AGC radio compressor, PTT mic click, carrier static bed, & squelch tail).
  */
 
 import {
@@ -17,26 +20,26 @@ import {
   tokenizeForVoicePack,
 } from './voicePackPlayer';
 import { audioEngine } from '../services/AudioEngine';
+import { localTtsClient } from '../services/localTtsClient';
+import { audioLibraryClient } from '../services/audioLibraryClient';
+import { AudioLibraryManifestEntry } from '../../shared/audioLibraryTypes';
+import {
+  AIRLINE_CALLSIGNS,
+  WAYPOINT_SPEECH_MAP,
+  speakDigits,
+  formatRunwayForSpeech,
+  formatAltitudeForSpeech,
+  formatPhraseForSpeech,
+} from './phraseNormalizer';
+import { DEFAULT_VOICE_PROFILES, VoiceProfile, VoiceType } from '../../shared/ttsTypes';
 
-export const AIRLINE_CALLSIGNS: Record<string, string> = {
-  BAW: 'Speedbird',
-  IRA: 'Iranair',
-  VIR: 'Virgin',
-  DLH: 'Lufthansa',
-  AFR: 'Air France',
-  KLM: 'KLM',
-  UAE: 'Emirates',
-  AAL: 'American',
-  DAL: 'Delta',
-  UAL: 'United',
-  QTR: 'Qatari',
-  SWR: 'Swiss',
-  IBE: 'Iberia',
-  SAS: 'Scandinavian',
-  RYR: 'Ryanair',
-  EZY: 'Easy',
-  THY: 'Turkish',
-  SKY: 'Skyline',
+export {
+  AIRLINE_CALLSIGNS,
+  WAYPOINT_SPEECH_MAP,
+  speakDigits,
+  formatRunwayForSpeech,
+  formatAltitudeForSpeech,
+  formatPhraseForSpeech,
 };
 
 export type TowerPresetId = 'charon' | 'fenrir' | 'kore' | 'zephyr' | 'puck';
@@ -45,6 +48,8 @@ export type TowerVoiceId = TowerPresetId | `voice:${string}`;
 export interface TowerVoiceProfile {
   id: TowerPresetId;
   packSpeakerId: string;
+  localProfileId: string;
+  voiceType: Exclude<VoiceType, 'PILOT'>;
   label: string;
   shortLabel: string;
   gender: 'M' | 'F';
@@ -57,7 +62,9 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
   {
     id: 'charon',
     packSpeakerId: 'tower_charon',
-    label: 'Ryan · UK Deep Male Controller',
+    localProfileId: 'tower_charon',
+    voiceType: 'TOWER',
+    label: 'Ryan · UK Deep Male Tower Controller',
     shortLabel: 'برج: Ryan (مرد بم · UK)',
     gender: 'M',
     preferredLocale: 'en-GB',
@@ -67,7 +74,9 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
   {
     id: 'fenrir',
     packSpeakerId: 'tower_fenrir',
-    label: 'Guy · US Firm Radar Controller',
+    localProfileId: 'tower_fenrir',
+    voiceType: 'TOWER',
+    label: 'Guy · US Firm Male Tower Controller',
     shortLabel: 'برج: Guy (مرد جدی · US)',
     gender: 'M',
     preferredLocale: 'en-US',
@@ -77,8 +86,10 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
   {
     id: 'kore',
     packSpeakerId: 'tower_kore',
-    label: 'Sonia · UK Clear Female Controller',
-    shortLabel: 'برج: Sonia (زن شفاف · UK)',
+    localProfileId: 'tower_kore',
+    voiceType: 'TOWER',
+    label: 'Sonia · Clear Female Tower Controller',
+    shortLabel: 'برج: Sonia (زن شفاف · US/UK)',
     gender: 'F',
     preferredLocale: 'en-GB',
     basePitch: 1.09,
@@ -87,22 +98,26 @@ export const TOWER_VOICE_PROFILES: TowerVoiceProfile[] = [
   {
     id: 'zephyr',
     packSpeakerId: 'tower_zephyr',
-    label: 'Aria · US Calm Female Controller',
-    shortLabel: 'برج: Aria (زن آرام · US)',
+    localProfileId: 'approach_zephyr',
+    voiceType: 'APPROACH',
+    label: 'Isabella · UK Calm Approach Director',
+    shortLabel: 'اپروچ: Isabella (زن رادار · UK)',
     gender: 'F',
-    preferredLocale: 'en-US',
+    preferredLocale: 'en-GB',
     basePitch: 1.04,
-    baseRate: 1.12,
+    baseRate: 1.13,
   },
   {
     id: 'puck',
     packSpeakerId: 'tower_puck',
-    label: 'William · AU Brisk Director',
-    shortLabel: 'برج: William (چابک · AU)',
+    localProfileId: 'ground_puck',
+    voiceType: 'GROUND',
+    label: 'Puck · US Brisk Ground Controller',
+    shortLabel: 'گراند: Puck (تاکسی · US)',
     gender: 'M',
-    preferredLocale: 'en-AU',
+    preferredLocale: 'en-US',
     basePitch: 1.01,
-    baseRate: 1.18,
+    baseRate: 1.17,
   },
 ];
 
@@ -122,72 +137,45 @@ export interface VoiceLike {
   localService: boolean;
 }
 
-const PILOT_PACK_LABELS: Record<string, string> = {
-  pilot_thomas: 'Capt Thomas (UK)',
-  pilot_libby: 'FO Libby (UK)',
-  pilot_brian: 'Capt Chris (US)',
-  pilot_clara: 'Capt Clara (CA)',
-  pilot_prabhat: 'Capt Prabhat (Intl)',
-  pilot_connor: 'Capt Connor (EU)',
-};
+const PILOT_PACK_LABELS: Record<string, string> = Object.fromEntries(
+  DEFAULT_VOICE_PROFILES.filter(p => p.voiceType === 'PILOT').map(p => [
+    p.id,
+    p.displayName.split('·')[0].trim(),
+  ])
+);
+
+const ALL_PILOT_PROFILE_IDS = DEFAULT_VOICE_PROFILES.filter(p => p.voiceType === 'PILOT').map(
+  p => p.id
+);
 
 const AIRLINE_PREFERRED_PACK_ORDER: Record<string, readonly string[]> = {
-  BAW: ['pilot_thomas', 'pilot_libby', 'pilot_brian', 'pilot_clara', 'pilot_connor', 'pilot_prabhat'],
-  VIR: ['pilot_libby', 'pilot_thomas', 'pilot_clara', 'pilot_brian', 'pilot_connor', 'pilot_prabhat'],
-  EZY: ['pilot_libby', 'pilot_thomas', 'pilot_connor', 'pilot_clara', 'pilot_brian', 'pilot_prabhat'],
-  AAL: ['pilot_brian', 'pilot_clara', 'pilot_thomas', 'pilot_connor', 'pilot_libby', 'pilot_prabhat'],
-  DAL: ['pilot_clara', 'pilot_brian', 'pilot_libby', 'pilot_thomas', 'pilot_connor', 'pilot_prabhat'],
-  UAL: ['pilot_brian', 'pilot_clara', 'pilot_connor', 'pilot_thomas', 'pilot_libby', 'pilot_prabhat'],
-  IRA: ['pilot_prabhat', 'pilot_connor', 'pilot_clara', 'pilot_thomas', 'pilot_libby', 'pilot_brian'],
-  UAE: ['pilot_prabhat', 'pilot_clara', 'pilot_brian', 'pilot_connor', 'pilot_thomas', 'pilot_libby'],
-  QTR: ['pilot_prabhat', 'pilot_libby', 'pilot_brian', 'pilot_connor', 'pilot_clara', 'pilot_thomas'],
-  THY: ['pilot_connor', 'pilot_prabhat', 'pilot_clara', 'pilot_thomas', 'pilot_brian', 'pilot_libby'],
-  AFR: ['pilot_clara', 'pilot_connor', 'pilot_libby', 'pilot_thomas', 'pilot_prabhat', 'pilot_brian'],
-  DLH: ['pilot_connor', 'pilot_brian', 'pilot_thomas', 'pilot_clara', 'pilot_libby', 'pilot_prabhat'],
-  SWR: ['pilot_clara', 'pilot_thomas', 'pilot_connor', 'pilot_brian', 'pilot_libby', 'pilot_prabhat'],
-  KLM: ['pilot_connor', 'pilot_libby', 'pilot_thomas', 'pilot_brian', 'pilot_clara', 'pilot_prabhat'],
-  RYR: ['pilot_connor', 'pilot_libby', 'pilot_thomas', 'pilot_clara', 'pilot_brian', 'pilot_prabhat'],
+  BAW: ['pilot_thomas', 'pilot_libby', 'pilot_alice', 'pilot_daniel', 'pilot_clara', 'pilot_brian', 'pilot_connor', 'pilot_nova', 'pilot_liam', 'pilot_prabhat'],
+  VIR: ['pilot_libby', 'pilot_alice', 'pilot_thomas', 'pilot_clara', 'pilot_nova', 'pilot_daniel', 'pilot_brian', 'pilot_connor', 'pilot_liam', 'pilot_prabhat'],
+  EZY: ['pilot_libby', 'pilot_thomas', 'pilot_connor', 'pilot_alice', 'pilot_nova', 'pilot_daniel', 'pilot_clara', 'pilot_brian', 'pilot_liam', 'pilot_prabhat'],
+  AAL: ['pilot_brian', 'pilot_clara', 'pilot_liam', 'pilot_nova', 'pilot_thomas', 'pilot_prabhat', 'pilot_connor', 'pilot_alice', 'pilot_libby', 'pilot_daniel'],
+  DAL: ['pilot_clara', 'pilot_brian', 'pilot_nova', 'pilot_liam', 'pilot_libby', 'pilot_thomas', 'pilot_alice', 'pilot_connor', 'pilot_daniel', 'pilot_prabhat'],
+  UAL: ['pilot_liam', 'pilot_brian', 'pilot_clara', 'pilot_nova', 'pilot_connor', 'pilot_thomas', 'pilot_prabhat', 'pilot_libby', 'pilot_alice', 'pilot_daniel'],
+  IRA: ['pilot_prabhat', 'pilot_daniel', 'pilot_connor', 'pilot_clara', 'pilot_thomas', 'pilot_alice', 'pilot_brian', 'pilot_nova', 'pilot_libby', 'pilot_liam'],
+  UAE: ['pilot_prabhat', 'pilot_alice', 'pilot_clara', 'pilot_brian', 'pilot_connor', 'pilot_thomas', 'pilot_nova', 'pilot_daniel', 'pilot_libby', 'pilot_liam'],
+  QTR: ['pilot_prabhat', 'pilot_daniel', 'pilot_libby', 'pilot_brian', 'pilot_nova', 'pilot_thomas', 'pilot_clara', 'pilot_alice', 'pilot_connor', 'pilot_liam'],
+  THY: ['pilot_connor', 'pilot_prabhat', 'pilot_clara', 'pilot_thomas', 'pilot_liam', 'pilot_libby', 'pilot_daniel', 'pilot_nova', 'pilot_brian', 'pilot_alice'],
+  AFR: ['pilot_nova', 'pilot_clara', 'pilot_connor', 'pilot_libby', 'pilot_alice', 'pilot_brian', 'pilot_thomas', 'pilot_daniel', 'pilot_prabhat', 'pilot_liam'],
+  DLH: ['pilot_connor', 'pilot_brian', 'pilot_thomas', 'pilot_daniel', 'pilot_clara', 'pilot_libby', 'pilot_alice', 'pilot_nova', 'pilot_liam', 'pilot_prabhat'],
+  SWR: ['pilot_clara', 'pilot_alice', 'pilot_connor', 'pilot_thomas', 'pilot_brian', 'pilot_daniel', 'pilot_libby', 'pilot_nova', 'pilot_prabhat', 'pilot_liam'],
+  KLM: ['pilot_daniel', 'pilot_libby', 'pilot_connor', 'pilot_thomas', 'pilot_brian', 'pilot_nova', 'pilot_clara', 'pilot_alice', 'pilot_liam', 'pilot_prabhat'],
+  RYR: ['pilot_connor', 'pilot_libby', 'pilot_thomas', 'pilot_clara', 'pilot_brian', 'pilot_daniel', 'pilot_alice', 'pilot_liam', 'pilot_nova', 'pilot_prabhat'],
 };
 
 const PILOT_VOCAL_REGISTERS = [
-  { label: 'Senior Capt', pitch: 0.81, rate: 0.95 },
+  { label: 'Senior Capt', pitch: 0.85, rate: 0.96 },
   { label: 'First Officer', pitch: 1.02, rate: 1.04 },
-  { label: 'Female Capt', pitch: 1.15, rate: 0.98 },
-  { label: 'Baritone Capt', pitch: 0.90, rate: 0.99 },
-  { label: 'Female FO', pitch: 1.21, rate: 1.03 },
-  { label: 'Line Capt', pitch: 0.96, rate: 0.93 },
+  { label: 'Female Capt', pitch: 1.14, rate: 0.98 },
+  { label: 'Baritone Capt', pitch: 0.91, rate: 0.99 },
+  { label: 'Female FO', pitch: 1.19, rate: 1.03 },
+  { label: 'Line Capt', pitch: 0.96, rate: 0.94 },
 ];
 
 const TOWER_VOICE_STORAGE_KEY = 'skycontrol_tower_voice_offline_v3';
-
-const ICAO_DIGITS: Record<string, string> = {
-  '0': 'zero',
-  '1': 'one',
-  '2': 'two',
-  '3': 'three',
-  '4': 'four',
-  '5': 'five',
-  '6': 'six',
-  '7': 'seven',
-  '8': 'eight',
-  '9': 'niner',
-};
-
-const WAYPOINT_SPEECH_MAP: Record<string, string> = {
-  BNN: 'Bovingdon',
-  LAM: 'Lambourne',
-  BIG: 'Biggin',
-  OCK: 'Ockham',
-  VR: 'Varamin',
-  MEH: 'Mehrabad',
-  RUS: 'Rudeshur',
-  SAV: 'Saveh',
-  JFK: 'Kennedy',
-  DPK: 'Deer Park',
-  CAM: 'Camrn',
-  CRI: 'Canarsie',
-  LND: 'Lindy',
-};
 
 export interface ActiveTransmission {
   callsign: string;
@@ -201,13 +189,15 @@ export interface RadioExchangeOptions {
   aircraftType?: string;
   isEmergency?: boolean;
   isHeavy?: boolean;
-  /** If true, pilotText already contains callsign in natural position (e.g. initial call-in) */
   pilotHasCallsign?: boolean;
-  /** Currently active callsigns in sector to spread distinct voices cleanly */
   activeCallsigns?: string[];
+  atcRole?: Exclude<VoiceType, 'PILOT'>;
 }
 
 export interface PilotVoiceProfile {
+  /** Local Kokoro-82M voice profile ID (up to 10 distinct enabled pilot speakers) */
+  localProfileId: string;
+  /** Legacy sprite pack speaker ID (for zero-latency instant fallback) */
   packSpeakerId: string;
   packLabel: string;
   voiceURI: string | null;
@@ -216,6 +206,7 @@ export interface PilotVoiceProfile {
   pitch: number;
   rate: number;
   packPlaybackRate: number;
+  speed: number;
   carrierCenterHz: number;
   pttClickHz: number;
   avionicsHumHz: number;
@@ -241,14 +232,14 @@ function hashString(input: string): number {
 export function inferVoiceGender(name: string): 'M' | 'F' | 'N' {
   const lower = name.toLowerCase();
   if (
-    /\b(hazel|zira|susan|libby|sonia|jenny|aria|ava|emma|samantha|karen|moira|tessa|fiona|serena|kate|victoria|allison|nicky|heera|kalpana|catherine|martha|clara|female)\b/.test(
+    /\b(hazel|zira|susan|libby|sonia|jenny|aria|ava|emma|samantha|karen|moira|tessa|fiona|serena|kate|victoria|allison|nicky|heera|kalpana|catherine|martha|clara|isabella|bella|nova|alice|female)\b/.test(
       lower
     )
   ) {
     return 'F';
   }
   if (
-    /\b(george|david|mark|ryan|daniel|oliver|arthur|alex|aaron|rishi|lee|gordon|malcolm|guy|andrew|brian|thomas|sean|james|ravi|connor|prabhat|william|male)\b/.test(
+    /\b(george|david|mark|ryan|daniel|oliver|arthur|alex|aaron|rishi|lee|gordon|malcolm|guy|andrew|brian|thomas|sean|james|ravi|connor|prabhat|william|michael|liam|fable|onyx|puck|male)\b/.test(
       lower
     )
   ) {
@@ -300,18 +291,41 @@ export function rankOfflineEnglishVoices<T extends VoiceLike>(voices: T[]): T[] 
   return [...workingPool].sort((a, b) => scoreOfflineVoice(b) - scoreOfflineVoice(a));
 }
 
+export function inferAtcSubRole(atcText: string): Exclude<VoiceType, 'PILOT'> {
+  const lower = atcText.toLowerCase();
+  if (
+    /\b(vacate|taxi|ground|apron|holding short|line up and wait|cleared for takeoff|cancel takeoff|abort takeoff|hold position)\b/.test(
+      lower
+    )
+  ) {
+    return /\b(vacate|taxi|ground|apron|holding short)\b/.test(lower) ? 'GROUND' : 'TOWER';
+  }
+  if (
+    /\b(heading|descend|climb|flight level|speed|direct|route|vectors|hold at|traffic alert|weather update|all stations)\b/.test(
+      lower
+    )
+  ) {
+    return 'APPROACH';
+  }
+  return 'TOWER';
+}
+
 export function resolveTowerOfflineVoice<T extends VoiceLike>(
   voices: T[],
   selection: TowerVoiceId,
-  airportIcao: string = 'EGLL'
+  airportIcao: string = 'EGLL',
+  atcRoleHint?: Exclude<VoiceType, 'PILOT'>,
+  availableLocalProfiles?: VoiceProfile[]
 ): {
+  localProfile: VoiceProfile;
   packSpeakerId: string | null;
   voice: T | null;
   pitch: number;
   rate: number;
   label: string;
 } {
-  // Check exact OS voice selection first
+  const profilesPool = availableLocalProfiles?.length ? availableLocalProfiles : DEFAULT_VOICE_PROFILES;
+
   if (selection.startsWith('voice:')) {
     const targetUri = selection.slice('voice:'.length);
     const ranked = rankOfflineEnglishVoices(voices);
@@ -320,7 +334,10 @@ export function resolveTowerOfflineVoice<T extends VoiceLike>(
       voices.find(v => v.voiceURI === targetUri) ||
       null;
     if (exact) {
+      const fallbackLocal =
+        profilesPool.find(p => p.voiceType !== 'PILOT' && p.enabled) || profilesPool[0];
       return {
+        localProfile: fallbackLocal,
         packSpeakerId: null,
         voice: exact,
         pitch: 0.98,
@@ -332,6 +349,17 @@ export function resolveTowerOfflineVoice<T extends VoiceLike>(
 
   const preset =
     TOWER_VOICE_PROFILES.find(p => p.id === selection) || TOWER_VOICE_PROFILES[0];
+
+  // If preset matches an enabled local profile, use it; or route specialized sub-role if enabled
+  let localProfile = profilesPool.find(p => p.id === preset.localProfileId && p.enabled);
+  if (!localProfile && atcRoleHint) {
+    localProfile = profilesPool.find(p => p.voiceType === atcRoleHint && p.enabled);
+  }
+  if (!localProfile) {
+    localProfile =
+      profilesPool.find(p => p.voiceType !== 'PILOT' && p.enabled) || DEFAULT_VOICE_PROFILES[0];
+  }
+
   const ranked = rankOfflineEnglishVoices(voices);
   const preferredLocale =
     preset.preferredLocale ||
@@ -350,56 +378,99 @@ export function resolveTowerOfflineVoice<T extends VoiceLike>(
   }
 
   return {
-    packSpeakerId: preset.packSpeakerId,
+    localProfile,
+    packSpeakerId: localProfile.voiceConfig.legacyPackId || preset.packSpeakerId,
     voice: matchedOsVoice,
     pitch: preset.basePitch,
     rate: preset.baseRate,
-    label: preset.shortLabel,
+    label: localProfile.shortLabel || preset.shortLabel,
   };
 }
 
 /**
- * Selects a distinct bundled Real-Human Pilot Pack speaker + OS fallback voice for any callsign:
- * - Spreads concurrent active flights cleanly across all 6 distinct bundled Pilot voices
- * - Preferences match airline region (UK, US, EU, International/Middle-East) when available
- * - Guarantees zero overlap with Tower speakers
+ * Selects a genuinely distinct Pilot speaker from the enabled 10-pilot pool
+ * (or 6-pilot fallback sprite pack), guaranteeing zero overlap across active flights
+ * and never sharing a speaker with ATC Tower/Approach/Ground.
  */
 export function resolveOfflinePilotProfile<T extends VoiceLike>(
   callsign: string,
   voices: T[],
   towerVoice: T | null,
-  options?: RadioExchangeOptions
+  options?: RadioExchangeOptions,
+  availableLocalProfiles?: VoiceProfile[]
 ): PilotVoiceProfile {
   const cleanCallsign = callsign.trim().toUpperCase();
   const hash = hashString(cleanCallsign);
   const prefix = (options?.airline || cleanCallsign.slice(0, 3)).toUpperCase();
 
-  // 1. Choose distinct bundled real-human pilot speaker from the 6-voice pilot pack
-  const preferredOrder = AIRLINE_PREFERRED_PACK_ORDER[prefix] || PILOT_PACK_IDS;
-  let packSpeakerId = preferredOrder[hash % preferredOrder.length];
+  const profilesPool = (availableLocalProfiles?.length ? availableLocalProfiles : DEFAULT_VOICE_PROFILES).filter(
+    p => p.voiceType === 'PILOT' && p.enabled
+  );
+  const enabledPilotIds =
+    profilesPool.length > 0 ? profilesPool.map(p => p.id) : ALL_PILOT_PROFILE_IDS;
+
+  const basePreferred = AIRLINE_PREFERRED_PACK_ORDER[prefix] || enabledPilotIds;
+  const filteredPreferred = basePreferred.filter(id => enabledPilotIds.includes(id));
+  const candidateOrder =
+    filteredPreferred.length > 0
+      ? [...filteredPreferred, ...enabledPilotIds.filter(id => !filteredPreferred.includes(id))]
+      : enabledPilotIds;
+
+  let localProfileId = candidateOrder[hash % candidateOrder.length];
+  const getPackForProfileId = (id: string) =>
+    profilesPool.find(p => p.id === id)?.voiceConfig.legacyPackId ||
+    DEFAULT_VOICE_PROFILES.find(p => p.id === id)?.voiceConfig.legacyPackId ||
+    id;
+
+  let packSpeakerId = getPackForProfileId(localProfileId);
 
   if (options?.activeCallsigns && options.activeCallsigns.length > 0) {
-    // Greedily spread active flights across all 6 pilot packs without repeating until >6 flights
     const used = new Set<string>();
+    const usedPacks = new Set<string>();
     for (const acCs of options.activeCallsigns) {
       const normalizedCs = acCs.trim().toUpperCase();
       const acHash = hashString(normalizedCs);
       const acPrefix = normalizedCs.slice(0, 3);
-      const acOrder = AIRLINE_PREFERRED_PACK_ORDER[acPrefix] || PILOT_PACK_IDS;
+      const acBase = (AIRLINE_PREFERRED_PACK_ORDER[acPrefix] || enabledPilotIds).filter(id =>
+        enabledPilotIds.includes(id)
+      );
+      const acOrder = acBase.length > 0 ? acBase : enabledPilotIds;
+
       let picked = acOrder[acHash % acOrder.length];
-      if (used.has(picked)) {
-        const free = acOrder.find(id => !used.has(id)) || PILOT_PACK_IDS.find(id => !used.has(id));
+      if (used.has(picked) || (usedPacks.size < PILOT_PACK_IDS.length && usedPacks.has(getPackForProfileId(picked)))) {
+        const freeWithUnusedPack =
+          usedPacks.size < PILOT_PACK_IDS.length
+            ? acOrder.find(id => !used.has(id) && !usedPacks.has(getPackForProfileId(id))) ||
+              enabledPilotIds.find(id => !used.has(id) && !usedPacks.has(getPackForProfileId(id)))
+            : undefined;
+        const free =
+          freeWithUnusedPack ||
+          acOrder.find(id => !used.has(id)) ||
+          enabledPilotIds.find(id => !used.has(id));
         if (free) picked = free;
       }
       used.add(picked);
+      usedPacks.add(getPackForProfileId(picked));
       if (normalizedCs === cleanCallsign) {
-        packSpeakerId = picked;
+        localProfileId = picked;
+        packSpeakerId = getPackForProfileId(picked);
         break;
       }
     }
   }
 
-  // 2. Fallback OS voice selection (excluding active Tower voice)
+  const matchedProfile =
+    profilesPool.find(p => p.id === localProfileId) ||
+    DEFAULT_VOICE_PROFILES.find(p => p.id === localProfileId) ||
+    DEFAULT_VOICE_PROFILES.find(p => p.voiceType === 'PILOT')!;
+
+  if (!packSpeakerId) {
+    packSpeakerId =
+      matchedProfile.voiceConfig.legacyPackId ||
+      PILOT_PACK_IDS[hash % PILOT_PACK_IDS.length];
+  }
+
+  // Fallback OS voice selection (excluding active Tower voice)
   const ranked = rankOfflineEnglishVoices(voices);
   const distinctVoices = ranked.filter(v => !towerVoice || v.voiceURI !== towerVoice.voiceURI);
   const pool = distinctVoices.length > 0 ? distinctVoices : ranked;
@@ -424,23 +495,27 @@ export function resolveOfflinePilotProfile<T extends VoiceLike>(
 
   let pitch = hasRichVoicePool ? 0.94 + ((hash % 5) - 2) * 0.035 : register.pitch;
   let rate = hasRichVoicePool ? 1.10 + (((hash >> 3) % 4) - 1) * 0.025 : register.rate * 1.12;
-  // v2 packs are natively synthesized at +14%..+16%; subtle 0.99..1.03 per-crew nuance preserves natural prosody
   let packPlaybackRate = 0.99 + ((hash >> 2) % 4) * 0.012;
+  let kokoroSpeed = matchedProfile.speed;
 
   if (options?.isEmergency) {
     rate = Math.min(1.22, rate + 0.06);
     pitch = Math.min(1.16, pitch + 0.04);
     packPlaybackRate = 1.05;
+    kokoroSpeed = Math.min(1.3, kokoroSpeed + 0.06);
   }
 
-  const carrierCenterHz = 1160 + (hash % 8) * 95;
-  const pttClickHz = 700 + (hash % 7) * 65;
-  const avionicsHumHz = options?.isHeavy ? 385 + (hash % 3) * 15 : 640 + (hash % 5) * 45;
+  const carrierCenterHz = matchedProfile.voiceConfig.carrierCenterHz || 1160 + (hash % 8) * 95;
+  const pttClickHz = matchedProfile.voiceConfig.pttClickHz || 700 + (hash % 7) * 65;
+  const avionicsHumHz = options?.isHeavy
+    ? 385 + (hash % 3) * 15
+    : matchedProfile.voiceConfig.avionicsHumHz || 640 + (hash % 5) * 45;
 
-  const packLabel = PILOT_PACK_LABELS[packSpeakerId] || 'Pilot';
+  const packLabel = PILOT_PACK_LABELS[localProfileId] || matchedProfile.displayName.split('·')[0].trim();
   const airlineName = AIRLINE_CALLSIGNS[prefix] || prefix;
 
   return {
+    localProfileId,
     packSpeakerId,
     packLabel,
     voiceURI: chosenVoice?.voiceURI || null,
@@ -449,114 +524,11 @@ export function resolveOfflinePilotProfile<T extends VoiceLike>(
     pitch: Math.max(0.76, Math.min(1.24, pitch)),
     rate: Math.max(0.88, Math.min(1.14, rate)),
     packPlaybackRate,
+    speed: kokoroSpeed,
     carrierCenterHz,
     pttClickHz,
     avionicsHumHz,
   };
-}
-
-/**
- * Converts a string of digits into spaced ICAO words (e.g. "095" -> "zero niner five")
- */
-export function speakDigits(digits: string): string {
-  return digits
-    .split('')
-    .map(ch => ICAO_DIGITS[ch] ?? ch)
-    .join(' ');
-}
-
-/**
- * Converts runway identifier into ICAO phraseology (e.g. "29R" -> "two niner right")
- */
-export function formatRunwayForSpeech(runwayId: string): string {
-  const match = runwayId.trim().toUpperCase().match(/^(\d{1,2})([LRC])?$/);
-  if (!match) return runwayId;
-  const numWords = speakDigits(match[1].padStart(2, '0'));
-  const sideMap: Record<string, string> = {
-    L: 'left',
-    R: 'right',
-    C: 'center',
-  };
-  const side = match[2] ? ` ${sideMap[match[2]]}` : '';
-  return `${numWords}${side}`;
-}
-
-/**
- * Converts altitude in feet or flight level into natural ICAO aviation speech
- */
-export function formatAltitudeForSpeech(altText: string): string {
-  const flMatch = altText.trim().toUpperCase().match(/^FL\s*0*(\d{2,3})$/);
-  if (flMatch) {
-    return `flight level ${speakDigits(flMatch[1].padStart(3, '0'))}`;
-  }
-  const num = parseInt(altText.replace(/,/g, ''), 10);
-  if (Number.isNaN(num)) return altText;
-  if (num >= 1000) {
-    const thousands = Math.floor(num / 1000);
-    const hundreds = Math.round((num % 1000) / 100);
-    const thousandWords = speakDigits(String(thousands));
-    if (hundreds > 0) {
-      return `${thousandWords} thousand ${speakDigits(String(hundreds))} hundred feet`;
-    }
-    return `${thousandWords} thousand feet`;
-  }
-  return `${num} feet`;
-}
-
-/**
- * Normalizes aviation transcripts into authentic spoken ICAO English
- */
-export function formatPhraseForSpeech(rawText: string): string {
-  let text = rawText;
-
-  text = text.replace(/\b([A-Z]{3})(\d{2,4}[A-Z]?)\b/g, (_, prefix: string, num: string) => {
-    const telephony = AIRLINE_CALLSIGNS[prefix];
-    if (!telephony) return `${prefix} ${speakDigits(num)}`;
-    return `${telephony} ${speakDigits(num)}`;
-  });
-
-  text = text.replace(/\b(?:RWY|Runway)\s+(\d{1,2}[LRC]?)\b/gi, (_, rwy: string) => {
-    return `runway ${formatRunwayForSpeech(rwy)}`;
-  });
-
-  text = text.replace(/\b(?:Flight\s+Level|FL)\s*0*(\d{2,3})\b/gi, (_, fl: string) => {
-    return `flight level ${speakDigits(fl.padStart(3, '0'))}`;
-  });
-
-  text = text.replace(/\b(\d{1,2},?\d{3})\s*(?:feet|ft)\b/gi, (_, alt: string) => {
-    return formatAltitudeForSpeech(alt);
-  });
-
-  text = text.replace(/\b(?:heading|hdg)\s+(\d{1,3})\b/gi, (_, hdg: string) => {
-    return `heading ${speakDigits(hdg.padStart(3, '0'))}`;
-  });
-
-  text = text.replace(/\b(\d{3})\s*(?:knots|kts|kt)\b/gi, (_, spd: string) => {
-    return `${speakDigits(spd)} knots`;
-  });
-  text = text.replace(/\bV1\b/g, 'V one');
-
-  text = text.replace(
-    /\bwind\s+(\d{3})\s*(?:degrees\s*)?(?:at|\/)\s*(\d{1,2})(?:\s*(?:knots|kt|kts))?\b/gi,
-    (_, dir: string, spd: string) => `wind ${speakDigits(dir)} degrees, ${speakDigits(spd)} knots`
-  );
-
-  text = text.replace(/\bQNH\s+(\d{3,4})\b/gi, (_, qnh: string) => `Q N H ${speakDigits(qnh)}`);
-  text = text.replace(
-    /\b(squawk(?:ing)?)\s+(\d{4})\b/gi,
-    (_, word: string, code: string) => `${word} ${speakDigits(code)}`
-  );
-  text = text.replace(/\b(\d{3})\.(\d{1,3})\b/g, (_, whole: string, frac: string) => {
-    const trimmedFrac = frac.replace(/0+$/, '') || '0';
-    return `${speakDigits(whole)} decimal ${speakDigits(trimmedFrac)}`;
-  });
-
-  text = text.replace(/\bILS\b/g, 'I L S');
-  text = text.replace(/\bTMA\b/g, 'terminal area');
-  text = text.replace(/\b([A-Z]{2,3})\b/g, code => WAYPOINT_SPEECH_MAP[code] || code);
-
-  text = text.replace(/\s*·\s*/g, ', ').replace(/[()]/g, ', ');
-  return text.replace(/\s+/g, ' ').trim();
 }
 
 export class RadioAudioEngine {
@@ -590,8 +562,9 @@ export class RadioAudioEngine {
         // Ignore storage errors
       }
 
-      // Eagerly fetch offline voice-pack manifest
+      // Eagerly fetch offline voice-pack manifest & sync 15 local Kokoro profiles
       void voicePackPlayer.loadManifest();
+      void localTtsClient.fetchProfiles();
 
       this.loadVoices();
       if ('speechSynthesis' in window && window.speechSynthesis.onvoiceschanged !== undefined) {
@@ -709,6 +682,7 @@ export class RadioAudioEngine {
     this.exchangeQueue = [];
     this.isBusy = false;
     voicePackPlayer.stopActive();
+    audioEngine.stopActive();
     this.stopCarrierBed();
     this.setTransmission(null);
     if (this.isSpeechAvailable) {
@@ -760,28 +734,159 @@ export class RadioAudioEngine {
     options?: RadioExchangeOptions
   ): PilotVoiceProfile {
     if (this.cachedVoices.length === 0) this.loadVoices();
+    const localProfiles = localTtsClient.getProfilesSync();
     const towerResolved = resolveTowerOfflineVoice(
       this.cachedVoices,
       this.towerVoiceId,
-      options?.airportIcao || this.currentAirportIcao
+      options?.airportIcao || this.currentAirportIcao,
+      options?.atcRole,
+      localProfiles
     );
     return resolveOfflinePilotProfile(
       callsign,
       this.cachedVoices,
       towerResolved.voice,
-      options
+      options,
+      localProfiles
     );
   }
 
-  /**
-   * Checks whether a given transcript is 100% covered by our bundled offline voice pack tokenizer
-   */
   public canTokenizeForOfflinePack(rawText: string, role: 'TOWER' | 'PILOT'): boolean {
     const manifest = voicePackPlayer.getManifestSync();
     const spk = manifest
       ? Object.values(manifest.speakers).find(s => s.role === role)
       : undefined;
     return tokenizeForVoicePack(rawText, role, spk?.clips) !== null;
+  }
+
+  /**
+   * Auditions any of the 15 voice profiles by playing its local Kokoro-82M WAV sample
+   * (or dynamically synthesizing custom text) right through the VHF transceiver DSP chain!
+   */
+  public async auditionVoiceProfile(
+    profile: VoiceProfile,
+    customText?: string
+  ): Promise<boolean> {
+    const ctx = this.initAudioContext();
+    if (!ctx) return false;
+
+    const role: 'TOWER' | 'PILOT' = profile.voiceType === 'PILOT' ? 'PILOT' : 'TOWER';
+    this.clearQueue();
+
+    let wavBytes: ArrayBuffer | null = null;
+    if (customText && customText.trim().length > 0) {
+      const res = await localTtsClient.synthesizeWav({
+        rawText: customText,
+        voiceId: profile.id,
+        voiceType: profile.voiceType,
+        speed: profile.speed,
+        priority: 'high',
+      });
+      wavBytes = res?.wavBytes || null;
+    } else {
+      wavBytes = await localTtsClient.fetchProfileSampleWav(profile.id, false);
+    }
+
+    if (!wavBytes) return false;
+
+    this.setTransmission({
+      callsign: profile.voiceType === 'PILOT' ? 'SAMPLE' : profile.voiceType,
+      speaker: role === 'TOWER' ? 'ATC' : 'PILOT',
+      voiceLabel: profile.shortLabel,
+    });
+    this.playRadioSquelch(0.055, 'START', profile.voiceConfig.pttClickHz || 920);
+    this.startCarrierBed(role === 'TOWER' ? 'ATC' : 'PILOT', {
+      carrierCenterHz: profile.voiceConfig.carrierCenterHz || 1350,
+      avionicsHumHz: profile.voiceConfig.avionicsHumHz || 400,
+    });
+
+    const ok = await audioEngine.playWavBytes({
+      ctx,
+      wavBytes,
+      role,
+      volume: this.volume,
+      playbackRate: profile.pitch || 1.0,
+      bandpassHz: profile.voiceConfig.bandpassHz || 1400,
+      shouldAbort: () => this.isMuted,
+    });
+
+    this.stopCarrierBed();
+    this.playRadioSquelch(0.06, 'END', profile.voiceConfig.pttClickHz || 920);
+    this.setTransmission(null);
+    return ok;
+  }
+
+  /**
+   * Previews any pre-generated Audio Library asset either through the VHF radio transceiver DSP
+   * chain ('vhf') or as clean dry studio WAV PCM ('dry').
+   */
+  public async previewLibraryAsset(
+    entry: AudioLibraryManifestEntry,
+    mode: 'vhf' | 'dry' = 'vhf'
+  ): Promise<boolean> {
+    const ctx = this.initAudioContext();
+    if (!ctx) return false;
+
+    this.clearQueue();
+    const generation = this.queueGeneration;
+    const wavBytes = await audioLibraryClient.fetchAssetAudioBytes(entry.assetId);
+    if (generation !== this.queueGeneration || wavBytes.byteLength <= 44) return false;
+
+    const profiles = localTtsClient.getProfilesSync();
+    const profile =
+      profiles.find(p => p.id === entry.voiceId) ||
+      DEFAULT_VOICE_PROFILES.find(p => p.id === entry.voiceId);
+    const role: 'TOWER' | 'PILOT' = entry.voiceType === 'PILOT' ? 'PILOT' : 'TOWER';
+
+    if (mode === 'dry') {
+      const decoded = await ctx.decodeAudioData(wavBytes.slice(0));
+      if (generation !== this.queueGeneration) return false;
+      return new Promise<boolean>(resolve => {
+        const src = ctx.createBufferSource();
+        src.buffer = decoded;
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(Math.max(0.05, this.volume), ctx.currentTime);
+        src.connect(gain);
+        gain.connect(ctx.destination);
+        let settled = false;
+        const finish = (ok: boolean) => {
+          if (settled) return;
+          settled = true;
+          resolve(ok);
+        };
+        src.onended = () => finish(true);
+        src.start();
+        setTimeout(() => finish(true), decoded.duration * 1000 + 200);
+      });
+    }
+
+    this.setTransmission({
+      callsign: entry.voiceType === 'PILOT' ? 'LIB · PILOT' : `LIB · ${entry.voiceType}`,
+      speaker: role === 'TOWER' ? 'ATC' : 'PILOT',
+      voiceLabel: profile?.shortLabel || entry.voiceId,
+    });
+    this.playRadioSquelch(0.055, 'START', profile?.voiceConfig.pttClickHz || 920);
+    this.startCarrierBed(role === 'TOWER' ? 'ATC' : 'PILOT', {
+      carrierCenterHz: profile?.voiceConfig.carrierCenterHz || 1350,
+      avionicsHumHz: profile?.voiceConfig.avionicsHumHz || 400,
+    });
+
+    const ok = await audioEngine.playWavBytes({
+      ctx,
+      wavBytes,
+      role,
+      volume: this.volume,
+      playbackRate: profile?.pitch || 1.0,
+      bandpassHz: profile?.voiceConfig.bandpassHz || 1400,
+      shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+    });
+
+    this.stopCarrierBed();
+    if (generation === this.queueGeneration) {
+      this.playRadioSquelch(0.06, 'END', profile?.voiceConfig.pttClickHz || 920);
+      this.setTransmission(null);
+    }
+    return ok;
   }
 
   private startCarrierBed(
@@ -817,7 +922,7 @@ export class RadioAudioEngine {
       const bandpass = ctx.createBiquadFilter();
       bandpass.type = 'bandpass';
       bandpass.frequency.setValueAtTime(
-        speaker === 'PILOT' ? acoustics?.carrierCenterHz ?? 1480 : 1260,
+        speaker === 'PILOT' ? acoustics?.carrierCenterHz ?? 1480 : acoustics?.carrierCenterHz ?? 1260,
         now
       );
       bandpass.Q.setValueAtTime(speaker === 'PILOT' ? 1.25 : 1.05, now);
@@ -825,7 +930,7 @@ export class RadioAudioEngine {
       const humOsc = ctx.createOscillator();
       humOsc.type = 'sine';
       humOsc.frequency.setValueAtTime(
-        speaker === 'PILOT' ? acoustics?.avionicsHumHz ?? 400 : 110,
+        speaker === 'PILOT' ? acoustics?.avionicsHumHz ?? 400 : acoustics?.avionicsHumHz ?? 110,
         now
       );
 
@@ -1133,41 +1238,92 @@ export class RadioAudioEngine {
     try {
       if (this.cachedVoices.length === 0) this.loadVoices();
 
+      const localProfiles = localTtsClient.getProfilesSync();
       const airportIcao = item.options?.airportIcao || this.currentAirportIcao;
+      const atcSubRole =
+        item.options?.atcRole || (item.atcText ? inferAtcSubRole(item.atcText) : 'TOWER');
+
       const towerResolved = resolveTowerOfflineVoice(
         this.cachedVoices,
         this.towerVoiceId,
-        airportIcao
+        airportIcao,
+        atcSubRole,
+        localProfiles
       );
       const pilotProfile = resolveOfflinePilotProfile(
         item.callsign,
         this.cachedVoices,
         towerResolved.voice,
-        item.options
+        item.options,
+        localProfiles
       );
 
       const ctx = this.initAudioContext();
+      const rawPilot = item.pilotText.trim().length > 0 ? this.buildRawPilotTextForPack(item) : '';
 
-      // Preload Tower & Pilot bundled sprites in parallel cleanly before transmission starts
+      // Preload offline sprite buffers AND trigger non-blocking background Kokoro pre-synthesis
+      // for Pilot readback while ATC is speaking!
       if (ctx) {
         if (towerResolved.packSpeakerId) {
           void voicePackPlayer.loadSpeakerBuffer(towerResolved.packSpeakerId, ctx);
         }
         void voicePackPlayer.loadSpeakerBuffer(pilotProfile.packSpeakerId, ctx);
       }
+      if (rawPilot) {
+        localTtsClient.prewarmPhrase({
+          rawText: rawPilot,
+          voiceId: pilotProfile.localProfileId,
+          voiceType: 'PILOT',
+          speed: pilotProfile.speed,
+        });
+      }
 
+      // === 1. ATC CONTROLLER TRANSMISSION ===
       if (item.atcText) {
         this.setTransmission({
           callsign: item.callsign,
           speaker: 'ATC',
           voiceLabel: towerResolved.label,
         });
-        this.playRadioSquelch(0.055, 'START', 920);
-        this.startCarrierBed('ATC');
+        this.playRadioSquelch(0.055, 'START', towerResolved.localProfile.voiceConfig.pttClickHz || 920);
+        this.startCarrierBed('ATC', {
+          carrierCenterHz: towerResolved.localProfile.voiceConfig.carrierCenterHz || 1260,
+          avionicsHumHz: towerResolved.localProfile.voiceConfig.avionicsHumHz || 110,
+        });
 
-        let playedFromPack = false;
-        if (ctx && towerResolved.packSpeakerId) {
-          playedFromPack = await voicePackPlayer.playTransmission({
+        let playedAtc = false;
+        const canUseSpriteFallback =
+          Boolean(towerResolved.packSpeakerId) &&
+          this.canTokenizeForOfflinePack(item.atcText, 'TOWER');
+
+        // Tier 1: Local Kokoro-82M Neural TTS (IndexedDB cached or Worker synthesized WAV)
+        if (ctx && !this.towerVoiceId.startsWith('voice:')) {
+          const kokoroRes = await localTtsClient.synthesizeWav({
+            rawText: item.atcText,
+            voiceId: towerResolved.localProfile.id,
+            voiceType: towerResolved.localProfile.voiceType,
+            speed: item.options?.isEmergency
+              ? Math.min(1.3, towerResolved.localProfile.speed + 0.06)
+              : towerResolved.localProfile.speed,
+            priority: item.options?.isEmergency ? 'critical' : 'high',
+            timeoutMs: canUseSpriteFallback ? 1100 : 4800,
+          });
+          if (kokoroRes && !this.isMuted && generation === this.queueGeneration) {
+            playedAtc = await audioEngine.playWavBytes({
+              ctx,
+              wavBytes: kokoroRes.wavBytes,
+              role: 'TOWER',
+              volume: this.volume,
+              playbackRate: towerResolved.localProfile.pitch || 1.0,
+              bandpassHz: towerResolved.localProfile.voiceConfig.bandpassHz || 1360,
+              shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+            });
+          }
+        }
+
+        // Tier 2: Zero-Latency Bundled Offline Sprite Pack Fallback
+        if (!playedAtc && ctx && towerResolved.packSpeakerId && !this.isMuted && generation === this.queueGeneration) {
+          playedAtc = await voicePackPlayer.playTransmission({
             ctx,
             speakerId: towerResolved.packSpeakerId,
             role: 'TOWER',
@@ -1179,7 +1335,8 @@ export class RadioAudioEngine {
           });
         }
 
-        if (!playedFromPack && !this.isMuted && generation === this.queueGeneration) {
+        // Tier 3: Installed Local OS Speech Fallback
+        if (!playedAtc && !this.isMuted && generation === this.queueGeneration) {
           const spokenAtc = formatPhraseForSpeech(item.atcText);
           await this.speakViaOsFallback(spokenAtc, {
             voice: towerResolved.voice,
@@ -1193,12 +1350,12 @@ export class RadioAudioEngine {
 
         this.stopCarrierBed();
         if (!this.isMuted && generation === this.queueGeneration) {
-          this.playRadioSquelch(0.055, 'END', 920);
+          this.playRadioSquelch(0.055, 'END', towerResolved.localProfile.voiceConfig.pttClickHz || 920);
         }
         this.setTransmission(null);
 
         if (this.isMuted || generation !== this.queueGeneration) return;
-        if (item.pilotText.trim().length > 0) {
+        if (rawPilot.length > 0) {
           await this.waitMs(210);
         }
       }
@@ -1208,7 +1365,8 @@ export class RadioAudioEngine {
       }
       if (this.isMuted || generation !== this.queueGeneration) return;
 
-      if (item.pilotText.trim().length > 0) {
+      // === 2. PILOT READBACK / CALL-IN TRANSMISSION ===
+      if (rawPilot.length > 0) {
         this.setTransmission({
           callsign: item.callsign,
           speaker: 'PILOT',
@@ -1220,10 +1378,35 @@ export class RadioAudioEngine {
           avionicsHumHz: pilotProfile.avionicsHumHz,
         });
 
-        const rawPilot = this.buildRawPilotTextForPack(item);
-        let pilotPlayedFromPack = false;
+        let playedPilot = false;
+        const canUsePilotSprite = this.canTokenizeForOfflinePack(rawPilot, 'PILOT');
+
+        // Tier 1: Local Kokoro-82M Neural TTS (likely already cached from lookahead!)
         if (ctx) {
-          pilotPlayedFromPack = await voicePackPlayer.playTransmission({
+          const kokoroPilotRes = await localTtsClient.synthesizeWav({
+            rawText: rawPilot,
+            voiceId: pilotProfile.localProfileId,
+            voiceType: 'PILOT',
+            speed: pilotProfile.speed,
+            priority: item.options?.isEmergency ? 'critical' : 'high',
+            timeoutMs: canUsePilotSprite ? 1100 : 4800,
+          });
+          if (kokoroPilotRes && !this.isMuted && generation === this.queueGeneration) {
+            playedPilot = await audioEngine.playWavBytes({
+              ctx,
+              wavBytes: kokoroPilotRes.wavBytes,
+              role: 'PILOT',
+              volume: this.volume,
+              playbackRate: 1.0,
+              bandpassHz: pilotProfile.carrierCenterHz,
+              shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+            });
+          }
+        }
+
+        // Tier 2: Zero-Latency Bundled Offline Sprite Pack Fallback
+        if (!playedPilot && ctx && !this.isMuted && generation === this.queueGeneration) {
+          playedPilot = await voicePackPlayer.playTransmission({
             ctx,
             speakerId: pilotProfile.packSpeakerId,
             role: 'PILOT',
@@ -1235,7 +1418,8 @@ export class RadioAudioEngine {
           });
         }
 
-        if (!pilotPlayedFromPack && !this.isMuted && generation === this.queueGeneration) {
+        // Tier 3: Installed Local OS Speech Fallback
+        if (!playedPilot && !this.isMuted && generation === this.queueGeneration) {
           const spokenPilot = formatPhraseForSpeech(rawPilot);
           let fallbackVoice: SpeechSynthesisVoice | null = null;
           if (pilotProfile.voiceURI) {
