@@ -291,31 +291,92 @@ export const CommandPanel: React.FC = () => {
             </button>
           </div>
 
-          <div className="grid grid-cols-4 gap-1.5 mb-2">
+          {/* Quick Cardinal Headings */}
+          <div className="grid grid-cols-4 gap-1.5 mb-2 text-[10px]">
+            {[
+              { label: '360° N', hdg: 360 },
+              { label: '090° E', hdg: 90 },
+              { label: '180° S', hdg: 180 },
+              { label: '270° W', hdg: 270 },
+            ].map(card => (
+              <button
+                key={card.label}
+                onClick={() => handleAssignHeading(card.hdg)}
+                className={`py-1 px-1 rounded border transition-colors font-semibold ${
+                  Math.round(aircraft.targetHeading) === (card.hdg % 360) ||
+                  (card.hdg === 360 && Math.round(aircraft.targetHeading) === 0)
+                    ? 'bg-[#1e4d35] border-[#00ff66] text-[#00ff66]'
+                    : 'bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] border-[#1d4d33]'
+                }`}
+              >
+                {card.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Incremental Steppers */}
+          <div className="grid grid-cols-6 gap-1 mb-2 text-[10px]">
             <button
               onClick={() => turnLeft(aircraft.id, 30)}
-              className="py-1 px-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              title="Turn Left 30°"
             >
               -30°
             </button>
             <button
               onClick={() => turnLeft(aircraft.id, 10)}
-              className="py-1 px-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              title="Turn Left 10°"
             >
               -10°
             </button>
             <button
+              onClick={() => turnLeft(aircraft.id, 5)}
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              title="Turn Left 5°"
+            >
+              -5°
+            </button>
+            <button
+              onClick={() => turnRight(aircraft.id, 5)}
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              title="Turn Right 5°"
+            >
+              +5°
+            </button>
+            <button
               onClick={() => turnRight(aircraft.id, 10)}
-              className="py-1 px-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              title="Turn Right 10°"
             >
               +10°
             </button>
             <button
               onClick={() => turnRight(aircraft.id, 30)}
-              className="py-1 px-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              title="Turn Right 30°"
             >
               +30°
             </button>
+          </div>
+
+          {/* Interactive Heading Range Slider */}
+          <div className="mb-2 bg-[#06100b] p-1.5 rounded border border-[#163826]">
+            <div className="flex justify-between items-center text-[10px] text-[#5da87d] mb-1">
+              <span>SCRUB HEADING</span>
+              <span className="text-[#00ff66] font-bold">
+                {Math.round(aircraft.targetHeading).toString().padStart(3, '0')}°
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="359"
+              step="1"
+              value={Math.round(aircraft.targetHeading)}
+              onChange={e => handleAssignHeading(Number(e.target.value))}
+              className="w-full accent-[#00ff66] bg-[#050e09] h-2 rounded cursor-pointer"
+            />
           </div>
 
           <form
@@ -333,7 +394,7 @@ export const CommandPanel: React.FC = () => {
               type="number"
               min="0"
               max="360"
-              placeholder="Hdg (001-360°)"
+              placeholder="Custom Hdg (001-360°)"
               value={headingInput}
               onChange={e => setHeadingInput(e.target.value)}
               className="flex-1 bg-[#050e09] border border-[#163826] rounded px-2 py-1 text-white placeholder-[#2f5c40] outline-none"
@@ -370,26 +431,57 @@ export const CommandPanel: React.FC = () => {
             ))}
           </div>
 
-          <div className="flex gap-1.5 mb-2">
+          <div className="grid grid-cols-5 gap-1 mb-2 text-[10px]">
             <button
               onClick={() => setAltitude(aircraft.id, aircraft.targetAltitude - 1000)}
-              className="flex-1 py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
             >
-              -1,000
+              -1k
+            </button>
+            <button
+              onClick={() => setAltitude(aircraft.id, aircraft.targetAltitude - 500)}
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+            >
+              -500
+            </button>
+            <button
+              onClick={() => setAltitude(aircraft.id, aircraft.targetAltitude + 500)}
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+            >
+              +500
             </button>
             <button
               onClick={() => setAltitude(aircraft.id, aircraft.targetAltitude + 1000)}
-              className="flex-1 py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
+              className="py-1 bg-[#102a1c] hover:bg-[#1a442c] text-[#a2f5bf] rounded border border-[#1d4d33] transition-colors"
             >
-              +1,000
+              +1k
             </button>
             <button
               onClick={() => setAltitude(aircraft.id, aircraft.targetAltitude, true)}
-              className="px-2 py-1 bg-[#3a2010] hover:bg-[#522d16] text-[#ffb703] rounded border border-[#7a421e] font-semibold transition-colors"
+              className="py-1 bg-[#3a2010] hover:bg-[#522d16] text-[#ffb703] rounded border border-[#7a421e] font-semibold transition-colors"
               title="Expedite Climb / Descent"
             >
-              EXPEDITE
+              EXP
             </button>
+          </div>
+
+          {/* Interactive Altitude Range Slider */}
+          <div className="mb-2 bg-[#06100b] p-1.5 rounded border border-[#163826]">
+            <div className="flex justify-between items-center text-[10px] text-[#5da87d] mb-1">
+              <span>SCRUB ALTITUDE</span>
+              <span className="text-[#00ff66] font-bold">
+                {Math.round(aircraft.targetAltitude).toLocaleString()}'
+              </span>
+            </div>
+            <input
+              type="range"
+              min={Math.max(1000, Math.ceil((airport.elevationFeet || 0) / 500) * 500)}
+              max="15000"
+              step="500"
+              value={Math.round(aircraft.targetAltitude)}
+              onChange={e => setAltitude(aircraft.id, Number(e.target.value))}
+              className="w-full accent-[#00ff66] bg-[#050e09] h-2 rounded cursor-pointer"
+            />
           </div>
 
           <form
@@ -461,6 +553,25 @@ export const CommandPanel: React.FC = () => {
             ))}
           </div>
 
+          {/* Interactive Speed Range Slider */}
+          <div className="mb-2 bg-[#06100b] p-1.5 rounded border border-[#163826]">
+            <div className="flex justify-between items-center text-[10px] text-[#5da87d] mb-1">
+              <span>SCRUB SPEED</span>
+              <span className="text-[#00e5ff] font-bold">
+                {Math.round(aircraft.targetAirspeed)} kt
+              </span>
+            </div>
+            <input
+              type="range"
+              min="140"
+              max="280"
+              step="5"
+              value={Math.round(aircraft.targetAirspeed)}
+              onChange={e => setSpeed(aircraft.id, Number(e.target.value))}
+              className="w-full accent-[#00e5ff] bg-[#050e09] h-2 rounded cursor-pointer"
+            />
+          </div>
+
           <form
             onSubmit={e => {
               e.preventDefault();
@@ -475,9 +586,9 @@ export const CommandPanel: React.FC = () => {
             <input
               type="number"
               min="140"
-              max="260"
+              max="280"
               step="5"
-              placeholder="Speed (140-260kt)"
+              placeholder="Speed (140-280kt)"
               value={speedInput}
               onChange={e => setSpeedInput(e.target.value)}
               className="flex-1 bg-[#050e09] border border-[#163826] rounded px-2 py-1 text-white placeholder-[#2f5c40] outline-none"

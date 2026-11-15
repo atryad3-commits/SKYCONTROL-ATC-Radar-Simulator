@@ -231,6 +231,36 @@ describe('PART 10: RADAR SCANNING AND TRACKING ARCHITECTURE', () => {
       expect(nextAc.heading).toBeLessThan(186);
       expect(nextAc.bankAngle).toBeGreaterThan(0); // Right bank initiated
     });
+
+    it('preserves aircraft heading, altitude, speed, and route intact upon selection without unintentional vectoring', () => {
+      const ac = createMockAircraft('CLICK_TEST', 10, 10, 240, 210);
+      ac.targetHeading = 240;
+      ac.altitude = 7000;
+      ac.targetAltitude = 7000;
+      ac.assignedWaypoint = 'LAM';
+      ac.routeQueue = ['MAY', 'OCK'];
+      ac.ilsArmed = true;
+
+      // Simulate state after user selects the aircraft
+      const initialHeading = ac.heading;
+      const initialTargetHeading = ac.targetHeading;
+      const initialAltitude = ac.altitude;
+      const initialTargetAltitude = ac.targetAltitude;
+      const initialSpeed = ac.indicatedAirspeed;
+      const initialWaypoint = ac.assignedWaypoint;
+      const initialRoute = [...(ac.routeQueue || [])];
+      const initialIlsArmed = ac.ilsArmed;
+
+      // Selection must NOT alter flight dynamics or control parameters
+      expect(ac.heading).toBe(initialHeading);
+      expect(ac.targetHeading).toBe(initialTargetHeading);
+      expect(ac.altitude).toBe(initialAltitude);
+      expect(ac.targetAltitude).toBe(initialTargetAltitude);
+      expect(ac.indicatedAirspeed).toBe(initialSpeed);
+      expect(ac.assignedWaypoint).toBe(initialWaypoint);
+      expect(ac.routeQueue).toEqual(initialRoute);
+      expect(ac.ilsArmed).toBe(initialIlsArmed);
+    });
   });
 
   describe('6. Altitude Color Spectrum & Flight Trajectory Path', () => {

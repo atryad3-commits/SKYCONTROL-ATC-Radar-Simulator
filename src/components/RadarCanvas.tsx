@@ -94,6 +94,7 @@ export const RadarCanvas: React.FC = () => {
 
   // Interactive Heading Vector Drag state
   const [isDraggingHeading, setIsDraggingHeading] = useState<boolean>(false);
+  const [hasDraggedHeading, setHasDraggedHeading] = useState<boolean>(false);
   const [previewHeading, setPreviewHeading] = useState<number | null>(null);
 
   // Hover waypoint / ILS gate preview in DIRECT_TO mode
@@ -158,6 +159,7 @@ export const RadarCanvas: React.FC = () => {
       switch (e.key) {
         case 'Escape':
           setIsDraggingHeading(false);
+          setHasDraggedHeading(false);
           setPreviewHeading(null);
           setMeasuringRuler(null);
           setActiveTool('SELECT');
@@ -1280,7 +1282,40 @@ export const RadarCanvas: React.FC = () => {
     }
 
     if (e.button === 0) {
-      // 1. Check Direct-To Waypoint or ILS Gate click FIRST when DIRECT_TO tool is active
+      // 1. Direct click on aircraft blip FIRST (click-to-select without changing heading or controls)
+      for (const ac of aircraft) {
+        const blipPos = worldToScreen(ac.x, ac.y);
+        const dist = Math.hypot(sx - blipPos.sx, sy - blipPos.sy);
+        if (dist <= 20) {
+          selectAircraft(ac.id);
+          setIsDraggingHeading(false);
+          setHasDraggedHeading(false);
+          setPreviewHeading(null);
+          return;
+        }
+      }
+
+      // 2. Direct click on aircraft data tag (click-to-select & drag-repositioning)
+      for (const ac of aircraft) {
+        const blipPos = worldToScreen(ac.x, ac.y);
+        const tagOff = ac.tagOffset || { x: 28, y: -24 };
+        const tagX = blipPos.sx + tagOff.x;
+        const tagY = blipPos.sy + tagOff.y;
+        const isSel = ac.id === selectedAircraftId;
+        const boxWidth = isSel ? 125 : 100;
+        const boxHeight = isSel ? 50 : 40;
+
+        if (sx >= tagX - 4 && sx <= tagX + boxWidth + 4 && sy >= tagY - 12 && sy <= tagY + boxHeight + 4) {
+          selectAircraft(ac.id);
+          setDraggingTagId(ac.id);
+          setIsDraggingHeading(false);
+          setHasDraggedHeading(false);
+          setPreviewHeading(null);
+          return;
+        }
+      }
+
+      // 3. Check Direct-To Waypoint or ILS Gate click when DIRECT_TO tool is active
       if (selectedAircraftId && activeTool === 'DIRECT_TO') {
         const selAc = aircraft.find(a => a.id === selectedAircraftId);
         if (selAc) {
@@ -1312,54 +1347,19 @@ export const RadarCanvas: React.FC = () => {
         }
       }
 
-      // 2. Check if initiating Heading Vector Drag around selected aircraft (or anywhere in HEADING_VECTOR mode)
-      if (selectedAircraftId) {
+      // 4. Heading Vector Drag ONLY when HEADING_VECTOR tool is explicitly active or Alt key is held
+      if (selectedAircraftId && (activeTool === 'HEADING_VECTOR' || e.altKey)) {
         const selAc = aircraft.find(a => a.id === selectedAircraftId);
         if (selAc) {
           const blipPos = worldToScreen(selAc.x, selAc.y);
           const distToBlip = Math.hypot(sx - blipPos.sx, sy - blipPos.sy);
-
-          // Check if user clicked directly on another aircraft blip to switch selection
-          const clickedOtherAc = aircraft.some(
-            other =>
-              other.id !== selAc.id &&
-              Math.hypot(sx - worldToScreen(other.x, other.y).sx, sy - worldToScreen(other.x, other.y).sy) <= 15
-          );
-
-          if (
-            (!clickedOtherAc && activeTool === 'HEADING_VECTOR') ||
-            (distToBlip >= 24 && distToBlip <= 60) ||
-            (e.altKey && !clickedOtherAc)
-          ) {
+          if (distToBlip >= 15 && distToBlip <= 250) {
             setIsDraggingHeading(true);
+            setHasDraggedHeading(false);
             const hdg = calculateBearing(blipPos.sx, blipPos.sy, sx, sy);
             setPreviewHeading(normalizeHeading(Math.round(hdg)));
             return;
           }
-        }
-      }
-
-      // 3. Check data tags for drag-and-drop repositioning
-      for (const ac of aircraft) {
-        const blipPos = worldToScreen(ac.x, ac.y);
-        const tagOff = ac.tagOffset || { x: 28, y: -24 };
-        const tagX = blipPos.sx + tagOff.x;
-        const tagY = blipPos.sy + tagOff.y;
-
-        if (sx >= tagX && sx <= tagX + 105 && sy >= tagY - 10 && sy <= tagY + 34) {
-          selectAircraft(ac.id);
-          setDraggingTagId(ac.id);
-          return;
-        }
-      }
-
-      // 4. Check aircraft blips for click-to-select
-      for (const ac of aircraft) {
-        const blipPos = worldToScreen(ac.x, ac.y);
-        const dist = Math.hypot(sx - blipPos.sx, sy - blipPos.sy);
-        if (dist <= 18) {
-          selectAircraft(ac.id);
-          return;
         }
       }
 
@@ -1422,6 +1422,7 @@ export const RadarCanvas: React.FC = () => {
         const blipPos = worldToScreen(selAc.x, selAc.y);
         const hdg = calculateBearing(blipPos.sx, blipPos.sy, sx, sy);
         setPreviewHeading(normalizeHeading(Math.round(hdg)));
+        setHasDraggedHeading(true);
       }
       return;
     }
@@ -1448,8 +1449,8 @@ export const RadarCanvas: React.FC = () => {
   };
 
   const handleMouseUp = (_e: React.MouseEvent<HTMLCanvasElement>) => {
-    // If we were dragging heading vector, apply heading command directly!
-    if (isDraggingHeading && selectedAircraftId && previewHeading !== null) {
+    // Only apply heading command if heading vector tool was dragging AND mouse was actively moved!
+    if (isDraggingHeading && hasDraggedHeading && selectedAircraftId && previewHeading !== null) {
       const selAc = aircraft.find(a => a.id === selectedAircraftId);
       if (selAc) {
         setHeading(selAc.id, previewHeading);
@@ -1457,6 +1458,7 @@ export const RadarCanvas: React.FC = () => {
     }
 
     setIsDraggingHeading(false);
+    setHasDraggedHeading(false);
     setPreviewHeading(null);
     setIsPanning(false);
     setDraggingTagId(null);
