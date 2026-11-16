@@ -33,7 +33,14 @@ import {
   generateInboundFlight,
   generateDepartureFlight,
 } from '../engine/trafficGenerator';
-import { radioAudio, TowerVoiceId } from '../audio/radioAudio';
+import {
+  radioAudio,
+  TowerVoiceId,
+  AtcStationRole,
+  CommsPriority,
+  formatPhraseForSpeech,
+  buildPilotInitialContact,
+} from '../audio/radioAudio';
 import { RunwayOccupancyManager } from '../engine/runwayOccupancy';
 import {
   stepTakeoffSequence,
@@ -245,22 +252,40 @@ function formatReadableAlt(altFeet: number): string {
   return `${altFeet.toLocaleString('en-US')} ft`;
 }
 
+interface CommsExchangeMeta {
+  atcRole?: AtcStationRole;
+  priority?: CommsPriority;
+  frequency?: string;
+  atcSpokenText?: string;
+  pilotSpokenText?: string;
+}
+
+function resolveExchangePriority(ac: Aircraft, defaultPriority: CommsPriority, override?: CommsPriority): CommsPriority {
+  if (override) return override;
+  return ac.isEmergency ? 'EMERGENCY' : defaultPriority;
+}
+
 function logCommsExchange(
   get: () => SimulationStore,
   set: (fn: (state: SimulationStore) => Partial<SimulationStore>) => void,
   ac: Aircraft,
   atcText: string,
   pilotText: string,
-  spokenPilotText: string
+  spokenPilotText: string,
+  meta?: CommsExchangeMeta
 ) {
   const { airportProfile, airport, aircraft } = get();
+  const frequency = meta?.frequency || airportProfile.vhfFrequency;
+  const priority = resolveExchangePriority(ac, 'ATC_CLEARANCE', meta?.priority);
+  const atcRole: AtcStationRole = meta?.atcRole || 'APPROACH';
+
   const atcMsg: RadioMessage = {
     id: `atc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     timestamp: getFormattedUTCTime(),
     sender: 'ATC',
     callsign: airportProfile.directorCallsign,
     text: atcText,
-    frequency: airportProfile.vhfFrequency,
+    frequency,
   };
 
   set(state => ({ radioMessages: [atcMsg, ...state.radioMessages.slice(0, 49)] }));
@@ -277,15 +302,22 @@ function logCommsExchange(
             sender: 'PILOT',
             callsign: ac.callsign,
             text: pilotText,
-            frequency: airportProfile.vhfFrequency,
+            frequency,
           };
           set(state => ({ radioMessages: [pilotMsg, ...state.radioMessages.slice(0, 49)] }));
         }
       : undefined,
     {
       airportIcao: airport.icao,
+      aircraftId: ac.id,
       airline: ac.airline,
+      telephony: ac.telephony,
       aircraftType: ac.aircraftType,
+      frequency,
+      priority,
+      atcRole,
+      atcSpokenText: meta?.atcSpokenText || formatPhraseForSpeech(atcText),
+      pilotSpokenText: meta?.pilotSpokenText,
       isEmergency: ac.isEmergency,
       isHeavy: ac.category === 'Heavy',
       pilotHasCallsign: false,
@@ -299,24 +331,37 @@ function logPilotTransmission(
   set: (fn: (state: SimulationStore) => Partial<SimulationStore>) => void,
   ac: Aircraft,
   pilotText: string,
-  speakAudio: boolean = true
+  speakAudio: boolean = true,
+  meta?: {
+    priority?: CommsPriority;
+    atcRole?: AtcStationRole;
+    frequency?: string;
+    pilotSpokenText?: string;
+  }
 ) {
   const { airportProfile, airport, aircraft } = get();
+  const frequency = meta?.frequency || airportProfile.vhfFrequency;
   const pilotMsg: RadioMessage = {
     id: `pilot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     timestamp: getFormattedUTCTime(),
     sender: 'PILOT',
     callsign: ac.callsign,
     text: pilotText,
-    frequency: airportProfile.vhfFrequency,
+    frequency,
   };
   set(state => ({ radioMessages: [pilotMsg, ...state.radioMessages.slice(0, 49)] }));
 
   if (speakAudio) {
     radioAudio.speakPilotReadback(ac.callsign, pilotText, {
       airportIcao: airport.icao,
+      aircraftId: ac.id,
       airline: ac.airline,
+      telephony: ac.telephony,
       aircraftType: ac.aircraftType,
+      frequency,
+      priority: resolveExchangePriority(ac, 'PILOT_READBACK', meta?.priority),
+      atcRole: meta?.atcRole || 'TOWER',
+      pilotSpokenText: meta?.pilotSpokenText || formatPhraseForSpeech(pilotText),
       isEmergency: ac.isEmergency,
       isHeavy: ac.category === 'Heavy',
       pilotHasCallsign: true,
@@ -958,7 +1003,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ac,
       `${ac.callsign}, go around, climb straight ahead to ${altStr}`,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
-      pilotPhrase
+      pilotPhrase,
+      { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
     );
   },
 
@@ -1016,7 +1062,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         ac,
         `${ac.callsign}, runway ${runwayId}, line up and wait`,
         `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
-        pilotPhrase
+        pilotPhrase,
+        { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
       );
       return;
     }
@@ -1032,7 +1079,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ac,
       `${ac.callsign}, behind landing traffic, runway ${runwayId} line up and wait`,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
-      pilotPhrase
+      pilotPhrase,
+      { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
     );
   },
 
@@ -1058,7 +1106,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         ac,
         `${ac.callsign}, runway ${ac.assignedRunway} cleared for takeoff`,
         `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
-        pilotPhrase
+        pilotPhrase,
+        { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
       );
       return;
     }
@@ -1088,7 +1137,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ac,
       `${ac.callsign}, ${windText}, QNH ${weather.qnh}, runway ${ac.assignedRunway} cleared for takeoff`,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
-      pilotPhrase
+      pilotPhrase,
+      { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
     );
   },
 
@@ -1097,6 +1147,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
     const res = rejectTakeoff(ac, 'Aborted on ATC instruction', airport.elevationFeet);
+    radioAudio.cancelCallsignTransmissions(ac.id);
     if (!res.success) {
       const pilotPhrase = `Unable to stop, past V1, continuing takeoff`;
       logCommsExchange(
@@ -1105,7 +1156,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         ac,
         `${ac.callsign}, cancel takeoff, I say again cancel takeoff!`,
         `Unable abort - past V1 (${Math.round(ac.indicatedAirspeed)}kt), committing to takeoff!`,
-        pilotPhrase
+        pilotPhrase,
+        { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
       );
       return;
     }
@@ -1121,7 +1173,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       ac,
       `${ac.callsign}, hold position, stop immediately, abort takeoff!`,
       `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
-      pilotPhrase
+      pilotPhrase,
+      { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
     );
   },
 
@@ -1182,19 +1235,33 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       aircraft: [...state.aircraft, newAc],
     }));
 
-    const altStr = formatReadableAlt(newAc.altitude);
-    const hdgStr = Math.round(newAc.heading).toString().padStart(3, '0');
     const infoLetter = pickVariant(['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo']);
-    const checkInMsg = newAc.assignedWaypoint
-      ? `${airport.name} Director, ${newAc.callsign}${newAc.category === 'Heavy' ? ' Heavy' : ''}, passing ${altStr} direct ${newAc.assignedWaypoint}, with information ${infoLetter}.`
-      : `${airport.name} Director, ${newAc.callsign}${newAc.category === 'Heavy' ? ' Heavy' : ''}, passing ${altStr} heading ${hdgStr}, with information ${infoLetter}.`;
+    const initial = buildPilotInitialContact(
+      {
+        id: newAc.id,
+        callsign: newAc.callsign,
+        airline: newAc.airline,
+        telephony: newAc.telephony,
+        category: newAc.category,
+        altitude: newAc.altitude,
+        heading: newAc.heading,
+        assignedWaypoint: newAc.assignedWaypoint,
+        airportName: airport.name,
+        airportIcao: airport.icao,
+      },
+      { informationLetter: infoLetter }
+    );
 
-    logPilotTransmission(get, set, newAc, checkInMsg, true);
-    void airportProfile;
+    logPilotTransmission(get, set, newAc, initial.displayText, true, {
+      priority: 'PILOT_CALLIN',
+      atcRole: 'APPROACH',
+      frequency: airportProfile.vhfFrequency,
+      pilotSpokenText: initial.spokenText,
+    });
   },
 
   spawnDeparture: () => {
-    const { airport, activeDepartureRunwayId, heavyRatio, aircraft } = get();
+    const { airport, activeDepartureRunwayId, heavyRatio, aircraft, airportProfile } = get();
     const depRwy =
       airport.runways.find(r => r.id === activeDepartureRunwayId) ||
       airport.runways[1] ||
@@ -1209,8 +1276,26 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       aircraft: [...state.aircraft, newAc],
     }));
 
-    const depCheckIn = `${airport.name} Tower, ${newAc.callsign}${newAc.category === 'Heavy' ? ' Heavy' : ''}, holding short runway ${depRwy.id}, ready for departure.`;
-    logPilotTransmission(get, set, newAc, depCheckIn, true);
+    const initial = buildPilotInitialContact(
+      {
+        id: newAc.id,
+        callsign: newAc.callsign,
+        airline: newAc.airline,
+        telephony: newAc.telephony,
+        category: newAc.category,
+        assignedRunway: depRwy.id,
+        airportName: airport.name,
+        airportIcao: airport.icao,
+      },
+      { isDeparture: true }
+    );
+
+    logPilotTransmission(get, set, newAc, initial.displayText, true, {
+      priority: 'PILOT_CALLIN',
+      atcRole: 'TOWER',
+      frequency: airportProfile.vhfFrequency,
+      pilotSpokenText: initial.spokenText,
+    });
   },
 
   triggerEmergency: (type = 'ENGINE_FAILURE') => {
@@ -1231,25 +1316,64 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         ? 'medical emergency on board'
         : 'minimum fuel emergency';
 
-    const emerText = `Mayday Mayday Mayday! ${airport.name} Director, ${emerAc.callsign}${emerAc.category === 'Heavy' ? ' Heavy' : ''}, squawking 7700, ${emergencyDesc}, requesting immediate priority vectors runway ${arrRwy.id}!`;
+    const emerPhrase = buildPilotInitialContact(
+      {
+        id: emerAc.id,
+        callsign: emerAc.callsign,
+        airline: emerAc.airline,
+        telephony: emerAc.telephony,
+        category: emerAc.category,
+        transponder: emerAc.transponder,
+        assignedRunway: arrRwy.id,
+        airportName: airport.name,
+        airportIcao: airport.icao,
+      },
+      { emergencyReason: emergencyDesc }
+    );
     const emergencyMsg: RadioMessage = {
       id: `emer_${Date.now()}`,
       timestamp: getFormattedUTCTime(),
       sender: 'PILOT',
       callsign: emerAc.callsign,
-      text: emerText,
+      text: emerPhrase.displayText,
       frequency: airportProfile.vhfFrequency,
     };
 
+    const atcAckText = `${emerAc.callsign}, roger Mayday, radar contact, expect immediate priority runway ${arrRwy.id}.`;
+
     radioAudio.playConflictAlert();
-    radioAudio.speakPilotReadback(emerAc.callsign, emerText, {
-      airportIcao: airport.icao,
-      airline: emerAc.airline,
-      aircraftType: emerAc.aircraftType,
-      isEmergency: true,
-      isHeavy: emerAc.category === 'Heavy',
-      pilotHasCallsign: true,
-      activeCallsigns: [emerAc.callsign, ...aircraft.map(f => f.callsign)],
+    radioAudio.speakPilotToController({
+      callsign: emerAc.callsign,
+      aircraftId: emerAc.id,
+      pilotText: emerPhrase.displayText,
+      pilotSpokenText: emerPhrase.spokenText,
+      atcReplyText: atcAckText,
+      atcReplySpokenText: formatPhraseForSpeech(atcAckText),
+      onAtcReplyStart: () => {
+        const ackMsg: RadioMessage = {
+          id: `atc_emer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: getFormattedUTCTime(),
+          sender: 'ATC',
+          callsign: airportProfile.directorCallsign,
+          text: atcAckText,
+          frequency: airportProfile.vhfFrequency,
+        };
+        set(state => ({ radioMessages: [ackMsg, ...state.radioMessages.slice(0, 49)] }));
+      },
+      options: {
+        airportIcao: airport.icao,
+        aircraftId: emerAc.id,
+        airline: emerAc.airline,
+        telephony: emerAc.telephony,
+        aircraftType: emerAc.aircraftType,
+        frequency: airportProfile.vhfFrequency,
+        priority: 'EMERGENCY',
+        atcRole: 'APPROACH',
+        isEmergency: true,
+        isHeavy: emerAc.category === 'Heavy',
+        pilotHasCallsign: true,
+        activeCallsigns: [emerAc.callsign, ...aircraft.map(f => f.callsign)],
+      },
     });
 
     set(state => ({
@@ -1289,6 +1413,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     set(state => ({ radioMessages: [wxMsg, ...state.radioMessages.slice(0, 49)] }));
     radioAudio.speakRadioExchange(atcWxText, aircraft[0]?.callsign || 'BAW452', '', undefined, {
       airportIcao: airport.icao,
+      aircraftId: aircraft[0]?.id,
+      frequency: airportProfile.vhfFrequency,
+      priority: 'ADVISORY',
+      atcRole: 'APPROACH',
+      atcSpokenText: formatPhraseForSpeech(atcWxText),
       activeCallsigns: aircraft.map(f => f.callsign),
     });
   },
@@ -1313,6 +1442,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       3,
       1
     );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
     globalRadarTracker.seedInitialTracks(freshFleet, 0);
 
     set({
@@ -1388,6 +1518,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       0.35,
       Boolean(mission.requireEmergencyHandled)
     );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
     globalRadarTracker.seedInitialTracks(freshFleet, 0);
 
     const initialStats: SimulationStats = {
@@ -1485,6 +1616,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       config.initialDepartures,
       config.heavyRatio
     );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
     globalRadarTracker.seedInitialTracks(freshFleet, 0);
 
     const customWeather: WeatherCondition = {
@@ -1571,6 +1703,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       1,
       heavyRatio
     );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
     globalRadarTracker.reset();
     globalRadarTracker.seedInitialTracks(freshFleet, 0);
 
@@ -1679,23 +1812,39 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               emergencyLandedThisTick = true;
             }
             const touchMsg = `${ac.callsign}, touchdown runway ${assignedRwyGeom.id}, rolling out.`;
-            logPilotTransmission(get, set, currentAc, touchMsg, true);
+            logPilotTransmission(get, set, currentAc, touchMsg, true, {
+              priority: ac.isEmergency ? 'EMERGENCY' : 'PILOT_READBACK',
+              atcRole: 'TOWER',
+            });
           } else if (ilsResult.eventType === 'LOC_CAPTURED') {
             const locMsg = `${airport.name} Director, ${ac.callsign}, established localizer runway ${assignedRwyGeom.id}.`;
-            logPilotTransmission(get, set, currentAc, locMsg, true);
+            logPilotTransmission(get, set, currentAc, locMsg, true, {
+              priority: ac.isEmergency ? 'EMERGENCY' : 'PILOT_READBACK',
+              atcRole: 'APPROACH',
+            });
           } else if (ilsResult.eventType === 'GS_CAPTURED') {
             const gsMsg = `${ac.callsign}, fully established ILS runway ${assignedRwyGeom.id}, gear down, landing checks complete.`;
-            logPilotTransmission(get, set, currentAc, gsMsg, true);
+            logPilotTransmission(get, set, currentAc, gsMsg, true, {
+              priority: ac.isEmergency ? 'EMERGENCY' : 'PILOT_READBACK',
+              atcRole: 'TOWER',
+            });
           } else if (ilsResult.eventType === 'RUNWAY_VACATED') {
             const vacMsg = `${ac.callsign}, runway ${assignedRwyGeom.id} vacated, contacting ground 121.9.`;
-            logPilotTransmission(get, set, currentAc, vacMsg, true);
+            logPilotTransmission(get, set, currentAc, vacMsg, true, {
+              priority: 'PILOT_READBACK',
+              atcRole: 'GROUND',
+              frequency: '121.9 MHz',
+            });
           } else if (
             ilsResult.eventType === 'UNSTABLE_GO_AROUND' ||
             ilsResult.eventType === 'LANDING_REJECTED'
           ) {
             goAroundThisTick = true;
             const gaMsg = `${ac.callsign}, going around runway ${assignedRwyGeom.id}, ${ilsResult.eventMessage || 'missed approach'}.`;
-            logPilotTransmission(get, set, currentAc, gaMsg, true);
+            logPilotTransmission(get, set, currentAc, gaMsg, true, {
+              priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC',
+              atcRole: 'TOWER',
+            });
           }
         }
       }
@@ -1709,7 +1858,13 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
       if (!isLandedStopped && !isFarOut) {
         updatedAircraft.push(currentAc);
+      } else {
+        radioAudio.cancelCallsignTransmissions(currentAc.id);
       }
+    }
+
+    if (updatedAircraft.length !== aircraft.length) {
+      radioAudio.pruneActiveAircraft(updatedAircraft.map(a => a.id));
     }
 
     globalRadarTracker.update(actualDt, currentSimTime, updatedAircraft);
@@ -1750,7 +1905,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
             acA,
             atcTraffic,
             `${pilotAck}, ${acA.telephony} ${acA.callsign.slice(3)}`,
-            pilotAck
+            pilotAck,
+            { atcRole: 'APPROACH', priority: 'CONFLICT_ALERT' }
           );
           break;
         }
@@ -1800,7 +1956,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         if (reqText) {
           lastPilotRequestSimTime = currentSimTime;
           pilotRequestCooldowns.set(chosen.id, currentSimTime);
-          logPilotTransmission(get, set, chosen, reqText, true);
+          logPilotTransmission(get, set, chosen, reqText, true, {
+            priority: 'PILOT_CALLIN',
+            atcRole: 'APPROACH',
+          });
         }
       }
     }

@@ -420,19 +420,20 @@ export class AudioGenerationQueue {
       next.job.status = 'processing';
       next.job.startedAt = new Date().toISOString();
 
+      const timeoutMs = Math.max(35_000, Math.min(90_000, next.job.normalizedText.length * 450 + 15_000));
       const timeoutId = setTimeout(() => {
         const entry = this.pendingSynthResolvers.get(next.job.jobId);
         if (!entry) return;
         this.pendingSynthResolvers.delete(next.job.jobId);
         this.activeTask = null;
         next.job.status = 'failed';
-        next.job.error = 'Synthesis timed out (25s)';
+        next.job.error = `Synthesis timed out (${Math.round(timeoutMs / 1000)}s)`;
         next.job.completedAt = new Date().toISOString();
         this.failedCount += 1;
         this.recordRecentJob(next.job);
-        next.reject(new Error('Synthesis timed out (25s)'));
+        next.reject(new Error(`Synthesis timed out (${Math.round(timeoutMs / 1000)}s)`));
         void this.pump();
-      }, 25_000);
+      }, timeoutMs);
 
       this.pendingSynthResolvers.set(next.job.jobId, { task: next, timeoutId });
 

@@ -71,6 +71,7 @@ export class AudioLibraryManager {
   private runtimeIndex = new Map<string, string>(); // `${voiceId}::${normalizedSpoken}` -> assetId
   private inFlightAssetPromises = new Map<string, Promise<AudioLibraryManifestEntry>>();
   private cancelBulkRequested = false;
+  private libraryHitCount = 0;
 
   private bulkJob: BulkGenerationJobState = {
     jobId: null,
@@ -253,7 +254,7 @@ export class AudioLibraryManager {
 
   private saveManifest(): void {
     const out: ManifestFile = {
-      version: 1,
+      version: 2,
       updatedAt: new Date().toISOString(),
       entries: Object.fromEntries(this.entries.entries()),
     };
@@ -287,7 +288,16 @@ export class AudioLibraryManager {
 
     const wavBuffer = fs.readFileSync(diskPath);
     if (wavBuffer.length <= 44) return null;
+    this.libraryHitCount += 1;
     return { wavBuffer, entry };
+  }
+
+  public getLibraryHitCount(): number {
+    return this.libraryHitCount;
+  }
+
+  public resetLibraryHitCount(): void {
+    this.libraryHitCount = 0;
   }
 
   public getAsset(assetId: string): AudioLibraryManifestEntry | undefined {
@@ -715,6 +725,75 @@ export class AudioLibraryManager {
     this.rebuildRuntimeIndex();
     this.saveManifest();
     return { deletedFile, removedEntry: false, entry };
+  }
+
+  /**
+   * Deletes orphaned/unused WAV files under libraryDir that are not referenced by the manifest
+   * as well as any custom ungenerated entries or inactive profile slots if requested.
+   */
+  public cleanupUnusedAssets(): {
+    removedOrphanFiles: number;
+    removedEmptyDirs: number;
+    removedInactiveEntries: number;
+    freedBytes: number;
+  } {
+    const validDiskPaths = new Set<string>();
+    const activeVoiceIds = new Set(this.profileManager.listProfiles().map(p => p.id));
+    let removedInactiveEntries = 0;
+
+    for (const [assetId, entry] of this.entries.entries()) {
+      const voiceExists = activeVoiceIds.has(entry.voiceId);
+      if (!voiceExists && entry.status !== 'generating') {
+        this.entries.delete(assetId);
+        removedInactiveEntries += 1;
+        continue;
+      }
+      if (entry.status === 'ready') {
+        validDiskPaths.add(this.resolveDiskPath(entry));
+      }
+    }
+
+    let removedOrphanFiles = 0;
+    let removedEmptyDirs = 0;
+    let freedBytes = 0;
+
+    if (fs.existsSync(this.libraryDir)) {
+      const subdirs = fs.readdirSync(this.libraryDir, { withFileTypes: true });
+      for (const dirent of subdirs) {
+        const full = path.join(this.libraryDir, dirent.name);
+        if (dirent.isDirectory()) {
+          const children = fs.readdirSync(full);
+          for (const child of children) {
+            const childPath = path.join(full, child);
+            const stat = fs.statSync(childPath);
+            if (stat.isFile() && !validDiskPaths.has(childPath)) {
+              freedBytes += stat.size;
+              fs.unlinkSync(childPath);
+              removedOrphanFiles += 1;
+            }
+          }
+          if (fs.readdirSync(full).length === 0) {
+            fs.rmdirSync(full);
+            removedEmptyDirs += 1;
+          }
+        } else if (dirent.isFile() && !validDiskPaths.has(full)) {
+          const stat = fs.statSync(full);
+          freedBytes += stat.size;
+          fs.unlinkSync(full);
+          removedOrphanFiles += 1;
+        }
+      }
+    }
+
+    this.rebuildRuntimeIndex();
+    this.saveManifest();
+
+    return {
+      removedOrphanFiles,
+      removedEmptyDirs,
+      removedInactiveEntries,
+      freedBytes,
+    };
   }
 
   public getBulkJobState(): BulkGenerationJobState {

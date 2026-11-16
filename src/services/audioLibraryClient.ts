@@ -135,6 +135,20 @@ export class AudioLibraryClient {
     }
     return res.arrayBuffer();
   }
+
+  public async cleanupUnusedAssets(): Promise<{
+    removedOrphanFiles: number;
+    removedEmptyDirs: number;
+    removedInactiveEntries: number;
+    freedBytes: number;
+  }> {
+    const res = await fetch('/api/library/cleanup-unused', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || `Cleanup failed (${res.status})`);
+    }
+    return data;
+  }
 }
 
 export const audioLibraryClient = new AudioLibraryClient();

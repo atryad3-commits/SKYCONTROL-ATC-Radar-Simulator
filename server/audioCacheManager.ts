@@ -10,12 +10,13 @@ import crypto from 'node:crypto';
 import { AudioMetadataEntry, CacheStats, VoiceProfile } from '../shared/ttsTypes';
 import { readWavMetadata } from './wavEncoder';
 
-const MAX_CACHE_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB local cache ceiling
+const DEFAULT_MAX_CACHE_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB default ceiling
 const MAX_CACHE_ENTRIES = 2000;
 
 export class AudioCacheManager {
   private readonly cacheDir: string;
   private readonly metadataPath: string;
+  private maxCacheSizeBytes: number = DEFAULT_MAX_CACHE_SIZE_BYTES;
   private entries = new Map<string, AudioMetadataEntry>();
   private hitCount = 0;
   private missCount = 0;
@@ -24,6 +25,13 @@ export class AudioCacheManager {
     this.cacheDir = path.join(dataDir, 'audio-cache');
     this.metadataPath = path.join(this.cacheDir, 'metadata.json');
     this.loadIndex();
+  }
+
+  public setMaxCacheSizeMb(limitMb: number): void {
+    const clampedMb = Math.max(50, Math.min(2048, Math.round(limitMb)));
+    this.maxCacheSizeBytes = clampedMb * 1024 * 1024;
+    this.evictIfNeeded();
+    this.persistIndex();
   }
 
   private loadIndex() {
@@ -185,7 +193,7 @@ export class AudioCacheManager {
       totalBytes += entry.sizeBytes;
     }
 
-    if (totalBytes <= MAX_CACHE_SIZE_BYTES && this.entries.size <= MAX_CACHE_ENTRIES) {
+    if (totalBytes <= this.maxCacheSizeBytes && this.entries.size <= MAX_CACHE_ENTRIES) {
       return;
     }
 
@@ -194,7 +202,7 @@ export class AudioCacheManager {
     );
 
     for (const victim of sortedLru) {
-      if (totalBytes <= MAX_CACHE_SIZE_BYTES * 0.85 && this.entries.size <= MAX_CACHE_ENTRIES * 0.9) {
+      if (totalBytes <= this.maxCacheSizeBytes * 0.85 && this.entries.size <= MAX_CACHE_ENTRIES * 0.9) {
         break;
       }
       this.entries.delete(victim.cacheKey);
@@ -237,7 +245,7 @@ export class AudioCacheManager {
     return {
       entryCount: this.entries.size,
       totalSizeBytes,
-      maxSizeBytes: MAX_CACHE_SIZE_BYTES,
+      maxSizeBytes: this.maxCacheSizeBytes,
       hitCount: this.hitCount,
       missCount: this.missCount,
     };

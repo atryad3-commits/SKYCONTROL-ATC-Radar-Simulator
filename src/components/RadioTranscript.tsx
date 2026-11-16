@@ -6,15 +6,17 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
-import { Radio, Volume2, VolumeX, Mic, Headset, CloudSun, Sliders, Database } from 'lucide-react';
+import { Radio, Volume2, VolumeX, Mic, Headset, CloudSun, Sliders, Database, Waves } from 'lucide-react';
 import {
   radioAudio,
   TOWER_VOICE_PROFILES,
   TowerVoiceId,
   OfflineVoiceOption,
 } from '../audio/radioAudio';
+import { VHF_RADIO_PRESETS, VhfRadioSettings } from '../audio/vhfRadioDsp';
 import { VoiceEngineModal } from './VoiceEngineModal';
 import { VoiceLibraryModal } from './VoiceLibraryModal';
+import { VhfRadioSettingsModal } from './VhfRadioSettingsModal';
 
 export const RadioTranscript: React.FC = () => {
   const radioMessages = useSimulationStore(state => state.radioMessages);
@@ -32,10 +34,17 @@ export const RadioTranscript: React.FC = () => {
   const [offlineVoices, setOfflineVoices] = useState<OfflineVoiceOption[]>([]);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isLibraryModalOpen, setIsLibraryModalOpen] = useState(false);
+  const [isVhfModalOpen, setIsVhfModalOpen] = useState(false);
+  const [vhfSettings, setVhfSettings] = useState<VhfRadioSettings>(radioAudio.getVhfSettings());
   const listTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    return radioAudio.onVoicesChange(voices => setOfflineVoices(voices));
+    const unsubVoices = radioAudio.onVoicesChange(voices => setOfflineVoices(voices));
+    const unsubVhf = radioAudio.onVhfSettingsChange(next => setVhfSettings(next));
+    return () => {
+      unsubVoices();
+      unsubVhf();
+    };
   }, []);
 
   // Keep newest message (prepended at index 0) visible at top of log
@@ -89,8 +98,13 @@ export const RadioTranscript: React.FC = () => {
       },
       {
         airportIcao: airportProfile.airport.icao,
+        aircraftId: targetAc?.id,
         airline: targetAc?.airline,
+        telephony: targetAc?.telephony,
         aircraftType: targetAc?.aircraftType,
+        frequency: freq,
+        priority: 'ATC_CLEARANCE',
+        atcRole: 'APPROACH',
         isHeavy: targetAc?.category === 'Heavy',
         pilotHasCallsign: false,
         activeCallsigns: aircraft.map(f => f.callsign),
@@ -194,6 +208,25 @@ export const RadioTranscript: React.FC = () => {
           <button
             onClick={() => {
               radioAudio.initAudioContext();
+              setIsVhfModalOpen(true);
+            }}
+            className="px-2 py-0.5 bg-[#0d1f15] hover:bg-[#163625] text-[#ffd166] border border-[#1e4d35] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="تنظیمات پردازشگر رادیویی VHF، پریست‌ها و پیش‌نمایش Clean در مقابل VHF"
+          >
+            <Waves className="w-3 h-3" />
+            <span>
+              VHF ·{' '}
+              {!vhfSettings.enabled
+                ? 'OFF'
+                : vhfSettings.preset === 'custom'
+                  ? 'Custom'
+                  : VHF_RADIO_PRESETS[vhfSettings.preset]?.shortName || vhfSettings.preset}
+            </span>
+          </button>
+
+          <button
+            onClick={() => {
+              radioAudio.initAudioContext();
               broadcastWeatherAdvisory();
             }}
             className="px-2 py-0.5 bg-[#0d222b] hover:bg-[#13323f] text-[#7ae8ff] border border-[#1a4859] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
@@ -259,6 +292,10 @@ export const RadioTranscript: React.FC = () => {
       <VoiceLibraryModal
         isOpen={isLibraryModalOpen}
         onClose={() => setIsLibraryModalOpen(false)}
+      />
+      <VhfRadioSettingsModal
+        isOpen={isVhfModalOpen}
+        onClose={() => setIsVhfModalOpen(false)}
       />
     </div>
   );

@@ -308,6 +308,69 @@ async function startServer() {
     res.json({ bulkJob });
   });
 
+  app.post('/api/library/cleanup-unused', (_req, res) => {
+    try {
+      const cleanup = localTtsService.libraryManager.cleanupUnusedAssets();
+      res.json(cleanup);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/tts/worker/recover', async (_req, res) => {
+    try {
+      const status = await localTtsService.recoverWorker();
+      res.json({ status });
+    } catch (err) {
+      localTtsService.recordError('worker', err instanceof Error ? err.message : String(err));
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+        status: localTtsService.getStatus(),
+      });
+    }
+  });
+
+  // =========================================================================
+  // Audio Studio Global Settings, Diagnostics & Migrations (/api/audio/*)
+  // =========================================================================
+
+  app.get('/api/audio/settings', (_req, res) => {
+    res.json({ settings: localTtsService.getAudioSettings() });
+  });
+
+  app.put('/api/audio/settings', (req, res) => {
+    try {
+      const settings = localTtsService.updateAudioSettings(req.body || {});
+      res.json({ settings });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.get('/api/audio/diagnostics', async (_req, res) => {
+    try {
+      const diagnostics = await localTtsService.getDiagnosticsReport();
+      res.json(diagnostics);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/audio/diagnostics/reset', (_req, res) => {
+    localTtsService.resetDiagnostics();
+    res.json({ reset: true });
+  });
+
+  app.get('/api/audio/migrations', (_req, res) => {
+    res.json(localTtsService.getDatabaseState());
+  });
+
   // =========================================================================
   // Frontend Mounting (Vite dev middleware in development, dist/ in prod)
   // =========================================================================

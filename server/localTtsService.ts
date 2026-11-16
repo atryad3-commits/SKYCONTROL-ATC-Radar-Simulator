@@ -16,10 +16,18 @@ import {
   VoiceProfileUpdatePatch,
   VoiceType,
 } from '../shared/ttsTypes';
+import {
+  AudioDiagnosticsErrorEntry,
+  AudioDiagnosticsReport,
+  GlobalAudioSettings,
+  LocalDatabaseState,
+} from '../shared/audioStudioTypes';
 import { formatPhraseForSpeech } from '../src/audio/phraseNormalizer';
 import { AudioCacheManager } from './audioCacheManager';
 import { AudioGenerationQueue } from './audioGenerationQueue';
 import { AudioLibraryManager } from './audioLibraryManager';
+import { collectHardwareTelemetry } from './hardwareTelemetry';
+import { LocalAudioDatabase } from './localDatabase';
 import { ModelManager } from './modelManager';
 import { VoiceProfileManager } from './voiceProfileManager';
 
@@ -31,12 +39,16 @@ export interface SynthesizeSpeechResult {
 }
 
 export class LocalTtsService {
+  public readonly database: LocalAudioDatabase;
   public readonly profileManager: VoiceProfileManager;
   public readonly modelManager: ModelManager;
   public readonly cacheManager: AudioCacheManager;
   public readonly queue: AudioGenerationQueue;
   public readonly libraryManager: AudioLibraryManager;
   public readonly samplesDir: string;
+
+  private recentLatenciesMs: number[] = [];
+  private recentErrors: AudioDiagnosticsErrorEntry[] = [];
 
   constructor(options?: {
     dataDir?: string;
@@ -49,9 +61,11 @@ export class LocalTtsService {
     this.samplesDir = options?.samplesDir || path.resolve(process.cwd(), 'public/voice-samples');
     const libraryDir = options?.libraryDir || path.resolve(process.cwd(), 'public/audio-library');
 
+    this.database = new LocalAudioDatabase(dataDir);
     this.profileManager = new VoiceProfileManager(dataDir);
     this.modelManager = new ModelManager(modelsDir, 'q8');
     this.cacheManager = new AudioCacheManager(dataDir);
+    this.cacheManager.setMaxCacheSizeMb(this.database.getSettings().maxCacheSizeMb);
     this.queue = new AudioGenerationQueue(this.modelManager);
     this.libraryManager = new AudioLibraryManager({
       profileManager: this.profileManager,
@@ -62,6 +76,25 @@ export class LocalTtsService {
     });
 
     fs.mkdirSync(this.samplesDir, { recursive: true });
+  }
+
+  private recordLatency(ms: number): void {
+    if (!Number.isFinite(ms) || ms < 0) return;
+    this.recentLatenciesMs.push(Math.round(ms));
+    if (this.recentLatenciesMs.length > 100) {
+      this.recentLatenciesMs = this.recentLatenciesMs.slice(-100);
+    }
+  }
+
+  public recordError(source: AudioDiagnosticsErrorEntry['source'], message: string): void {
+    this.recentErrors.unshift({
+      timestamp: new Date().toISOString(),
+      source,
+      message: message.slice(0, 320),
+    });
+    if (this.recentErrors.length > 40) {
+      this.recentErrors = this.recentErrors.slice(0, 40);
+    }
   }
 
   /**
@@ -185,16 +218,23 @@ export class LocalTtsService {
       }
     }
 
-    const { promise } = this.queue.enqueue({
-      cacheKey,
-      rawText,
-      normalizedText,
-      profile,
-      speed: effectiveSpeed,
-      priority: req.priority || 'high',
-    });
+    let result;
+    try {
+      const enqueued = this.queue.enqueue({
+        cacheKey,
+        rawText,
+        normalizedText,
+        profile,
+        speed: effectiveSpeed,
+        priority: req.priority || 'high',
+      });
+      result = await enqueued.promise;
+    } catch (err) {
+      this.recordError('queue', err instanceof Error ? err.message : String(err));
+      throw err;
+    }
 
-    const result = await promise;
+    this.recordLatency(result.generationMs);
     const metadata = this.cacheManager.put({
       cacheKey,
       textHash,
@@ -222,10 +262,14 @@ export class LocalTtsService {
     cacheHit: boolean;
     job: AudioGenerationJob | null;
     metadata?: AudioMetadataEntry;
+    skippedDueToConfig?: boolean;
   } {
     const rawText = (req.text || '').trim();
     if (!rawText) {
       throw new Error('Cannot enqueue empty text');
+    }
+    if (!this.database.getSettings().backgroundGenerationEnabled && (req.priority || 'low') === 'low') {
+      return { cacheHit: false, job: null, skippedDueToConfig: true };
     }
 
     const profile = this.resolveProfile({
@@ -320,6 +364,140 @@ export class LocalTtsService {
 
   public updateVoiceProfile(id: string, patch: VoiceProfileUpdatePatch): VoiceProfile {
     return this.profileManager.updateProfile(id, patch);
+  }
+
+  public getAudioSettings(): GlobalAudioSettings {
+    return this.database.getSettings();
+  }
+
+  public updateAudioSettings(patch: Partial<GlobalAudioSettings>): GlobalAudioSettings {
+    const updated = this.database.updateSettings(patch);
+    this.cacheManager.setMaxCacheSizeMb(updated.maxCacheSizeMb);
+    return updated;
+  }
+
+  public getDatabaseState(): LocalDatabaseState {
+    return this.database.getDbState();
+  }
+
+  public async recoverWorker(): Promise<TtsEngineStatus> {
+    await this.queue.shutdown();
+    await this.queue.ensureModelLoaded();
+    return this.getStatus();
+  }
+
+  private measureSamplesBytes(): number {
+    try {
+      if (!fs.existsSync(this.samplesDir)) return 0;
+      let total = 0;
+      for (const f of fs.readdirSync(this.samplesDir)) {
+        const p = path.join(this.samplesDir, f);
+        const st = fs.statSync(p);
+        if (st.isFile()) total += st.size;
+      }
+      return total;
+    } catch {
+      return 0;
+    }
+  }
+
+  public async getDiagnosticsReport(): Promise<AudioDiagnosticsReport> {
+    const hardware = await collectHardwareTelemetry();
+    const libSummary = this.libraryManager.getSummary();
+    const cacheStats = this.cacheManager.getStats();
+    const queueStats = this.queue.getStats();
+    const modelInfo = this.modelManager.getModelInfo();
+    const samplesSizeBytes = this.measureSamplesBytes();
+
+    const latencies = this.recentLatenciesMs.length > 0
+      ? [...this.recentLatenciesMs]
+      : queueStats.recentJobs
+          .map(j => j.durationMs)
+          .filter((d): d is number => typeof d === 'number' && d >= 0);
+
+    const sorted = [...latencies].sort((a, b) => a - b);
+    const sampleCount = sorted.length;
+    const avgMs =
+      sampleCount > 0 ? Math.round(sorted.reduce((s, n) => s + n, 0) / sampleCount) : 0;
+    const minMs = sampleCount > 0 ? sorted[0] : 0;
+    const maxMs = sampleCount > 0 ? sorted[sampleCount - 1] : 0;
+    const p95Ms =
+      sampleCount > 0 ? sorted[Math.min(sampleCount - 1, Math.floor(sampleCount * 0.95))] : 0;
+
+    const libraryHits = this.libraryManager.getLibraryHitCount();
+    const diskHits = cacheStats.hitCount;
+    const misses = cacheStats.missCount;
+    const totalCacheChecks = libraryHits + diskHits + misses;
+    const hitRatePercent =
+      totalCacheChecks > 0
+        ? Math.round(((libraryHits + diskHits) / totalCacheChecks) * 1000) / 10
+        : libSummary.readyCount > 0
+          ? 100
+          : 0;
+
+    const recentErrors: AudioDiagnosticsErrorEntry[] = [...this.recentErrors];
+    if (modelInfo.lastError) {
+      recentErrors.unshift({
+        timestamp: new Date().toISOString(),
+        source: 'model',
+        message: modelInfo.lastError,
+      });
+    }
+    for (const job of queueStats.recentJobs) {
+      if (job.status === 'failed' && job.error) {
+        recentErrors.push({
+          timestamp: job.completedAt || job.createdAt,
+          source: 'queue',
+          message: `[${job.voiceId}] ${job.error}`,
+        });
+      }
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      latency: {
+        avgMs,
+        p95Ms,
+        minMs,
+        maxMs,
+        sampleCount,
+        recentMs: latencies.slice(-20),
+      },
+      cache: {
+        libraryHits,
+        diskHits,
+        misses,
+        hitRatePercent,
+      },
+      assets: {
+        totalMatrix: libSummary.totalAssets,
+        readyCount: libSummary.readyCount,
+        missingCount: libSummary.missingCount,
+        failedCount: libSummary.failedCount,
+        cacheEntries: cacheStats.entryCount,
+        librarySizeBytes: libSummary.totalSizeBytes,
+        cacheSizeBytes: cacheStats.totalSizeBytes,
+        modelSizeBytes: modelInfo.totalDiskBytes,
+        samplesSizeBytes,
+        totalStorageBytes:
+          libSummary.totalSizeBytes +
+          cacheStats.totalSizeBytes +
+          modelInfo.totalDiskBytes +
+          samplesSizeBytes,
+      },
+      errors: {
+        ttsFailedCount: queueStats.failedCount,
+        workerRestarts: this.queue.getWorkerRestarts(),
+        recentErrors: recentErrors.slice(0, 25),
+      },
+      hardware,
+    };
+  }
+
+  public resetDiagnostics(): void {
+    this.recentLatenciesMs = [];
+    this.recentErrors = [];
+    this.libraryManager.resetLibraryHitCount();
   }
 
   public getStatus(): TtsEngineStatus {

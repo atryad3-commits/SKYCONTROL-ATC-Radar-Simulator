@@ -12,6 +12,12 @@ import {
   VoiceProfileUpdatePatch,
   VoiceType,
 } from '../../shared/ttsTypes';
+import {
+  AudioDiagnosticsReport,
+  DEFAULT_GLOBAL_AUDIO_SETTINGS,
+  GlobalAudioSettings,
+  LocalDatabaseState,
+} from '../../shared/audioStudioTypes';
 import { formatPhraseForSpeech } from '../audio/phraseNormalizer';
 import { audioCacheDb } from './audioCacheDb';
 
@@ -33,12 +39,60 @@ export class LocalTtsClient {
     ...p,
     voiceConfig: { ...p.voiceConfig },
   }));
+  private availableSpeakers: string[] = [];
   private profileListeners: Array<(profiles: VoiceProfile[]) => void> = [];
   private inFlightSynths = new Map<string, Promise<SynthesizedWavResult | null>>();
   private engineReachable: boolean | null = null;
+  private prewarmEnabled = true;
+  private ttsEnabled = true;
+  private clientCacheHits = 0;
+  private clientCacheMisses = 0;
+  private clientPlaybackErrors: Array<{ timestamp: string; source: string; message: string }> = [];
 
   public getProfilesSync(): VoiceProfile[] {
     return this.profiles;
+  }
+
+  public getAvailableSpeakersSync(): string[] {
+    return this.availableSpeakers;
+  }
+
+  public setPrewarmEnabled(enabled: boolean): void {
+    this.prewarmEnabled = enabled;
+  }
+
+  public setTtsEnabled(enabled: boolean): void {
+    this.ttsEnabled = enabled;
+  }
+
+  public isTtsEnabled(): boolean {
+    return this.ttsEnabled;
+  }
+
+  public recordPlaybackError(source: string, message: string): void {
+    this.clientPlaybackErrors.unshift({
+      timestamp: new Date().toISOString(),
+      source,
+      message,
+    });
+    if (this.clientPlaybackErrors.length > 30) {
+      this.clientPlaybackErrors = this.clientPlaybackErrors.slice(0, 30);
+    }
+  }
+
+  public clearClientDiagnostics(): void {
+    this.clientCacheHits = 0;
+    this.clientCacheMisses = 0;
+    this.clientPlaybackErrors = [];
+  }
+
+  public getClientDiagnostics() {
+    return {
+      clientCacheHits: this.clientCacheHits,
+      clientCacheMisses: this.clientCacheMisses,
+      playbackErrorCount: this.clientPlaybackErrors.length,
+      playbackErrors: [...this.clientPlaybackErrors],
+    };
   }
 
   public onProfilesChange(cb: (profiles: VoiceProfile[]) => void): () => void {
@@ -65,6 +119,9 @@ export class LocalTtsClient {
       const res = await fetch('/api/tts/voices');
       if (!res.ok) return this.profiles;
       const data = await res.json();
+      if (Array.isArray(data?.availableSpeakers)) {
+        this.availableSpeakers = data.availableSpeakers;
+      }
       if (Array.isArray(data?.profiles) && data.profiles.length > 0) {
         this.profiles = data.profiles;
         this.engineReachable = true;
@@ -181,6 +238,7 @@ export class LocalTtsClient {
     timeoutMs?: number;
     bypassCache?: boolean;
   }): Promise<SynthesizedWavResult | null> {
+    if (!this.ttsEnabled) return null;
     const normalizedText = formatPhraseForSpeech(params.rawText) || params.rawText.trim();
     if (!normalizedText) return null;
 
@@ -189,6 +247,7 @@ export class LocalTtsClient {
     if (!params.bypassCache) {
       const localCached = await audioCacheDb.get(key);
       if (localCached) {
+        this.clientCacheHits += 1;
         return {
           wavBytes: localCached.wavBytes.slice(0),
           voiceId: localCached.voiceId,
@@ -199,6 +258,7 @@ export class LocalTtsClient {
         };
       }
     }
+    this.clientCacheMisses += 1;
 
     if (typeof fetch !== 'function') return null;
 
@@ -218,11 +278,17 @@ export class LocalTtsClient {
               bypassCache: params.bypassCache,
             }),
           });
-          if (!res.ok) return null;
+          if (!res.ok) {
+            this.recordPlaybackError('tts-http', `Synthesis HTTP ${res.status} for ${params.voiceId}`);
+            return null;
+          }
           this.engineReachable = true;
 
           const wavBytes = await res.arrayBuffer();
-          if (wavBytes.byteLength <= 44) return null;
+          if (wavBytes.byteLength <= 44) {
+            this.recordPlaybackError('tts-wav', `Empty WAV buffer returned for ${params.voiceId}`);
+            return null;
+          }
 
           const durationSec = Number(res.headers.get('X-TTS-Duration-Sec') || '0');
           const generationMs = Number(res.headers.get('X-TTS-Generation-Ms') || '0');
@@ -247,8 +313,12 @@ export class LocalTtsClient {
             generationMs,
             cacheHit,
           };
-        } catch {
+        } catch (err) {
           this.engineReachable = false;
+          this.recordPlaybackError(
+            'tts-network',
+            err instanceof Error ? err.message : 'Local TTS server unreachable'
+          );
           return null;
         } finally {
           this.inFlightSynths.delete(key);
@@ -281,10 +351,78 @@ export class LocalTtsClient {
     voiceType: VoiceType;
     speed: number;
   }): void {
+    if (!this.prewarmEnabled || !this.ttsEnabled) return;
     void this.synthesizeWav({
       ...params,
       priority: 'low',
     });
+  }
+
+  public async recoverWorker(): Promise<TtsEngineStatus | null> {
+    if (typeof fetch !== 'function') return null;
+    const res = await fetch('/api/tts/worker/recover', { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Worker recovery failed (${res.status})`);
+    }
+    const data = await res.json();
+    return (data?.status as TtsEngineStatus) || null;
+  }
+
+  public async fetchGlobalSettings(): Promise<GlobalAudioSettings> {
+    if (typeof fetch !== 'function') return DEFAULT_GLOBAL_AUDIO_SETTINGS;
+    try {
+      const res = await fetch('/api/audio/settings');
+      if (!res.ok) return DEFAULT_GLOBAL_AUDIO_SETTINGS;
+      const data = await res.json();
+      return (data?.settings as GlobalAudioSettings) || DEFAULT_GLOBAL_AUDIO_SETTINGS;
+    } catch {
+      return DEFAULT_GLOBAL_AUDIO_SETTINGS;
+    }
+  }
+
+  public async updateGlobalSettings(
+    patch: Partial<GlobalAudioSettings>
+  ): Promise<GlobalAudioSettings> {
+    if (typeof fetch !== 'function') return { ...DEFAULT_GLOBAL_AUDIO_SETTINGS, ...patch };
+    const res = await fetch('/api/audio/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || `Failed updating audio settings (${res.status})`);
+    }
+    return data.settings as GlobalAudioSettings;
+  }
+
+  public async fetchDiagnostics(): Promise<AudioDiagnosticsReport | null> {
+    if (typeof fetch !== 'function') return null;
+    try {
+      const res = await fetch('/api/audio/diagnostics');
+      if (!res.ok) return null;
+      return (await res.json()) as AudioDiagnosticsReport;
+    } catch {
+      return null;
+    }
+  }
+
+  public async resetDiagnostics(): Promise<void> {
+    this.clearClientDiagnostics();
+    if (typeof fetch !== 'function') return;
+    await fetch('/api/audio/diagnostics/reset', { method: 'POST' }).catch(() => undefined);
+  }
+
+  public async fetchDatabaseState(): Promise<LocalDatabaseState | null> {
+    if (typeof fetch !== 'function') return null;
+    try {
+      const res = await fetch('/api/audio/migrations');
+      if (!res.ok) return null;
+      return (await res.json()) as LocalDatabaseState;
+    } catch {
+      return null;
+    }
   }
 
   public isEngineReachable(): boolean | null {

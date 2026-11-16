@@ -6,6 +6,12 @@
  */
 
 import bundledVoicePackManifest from '../audio/voicePackManifest.json';
+import {
+  createVhfProcessingChain,
+  DEFAULT_VHF_SETTINGS,
+  sanitizeVhfSettings,
+  VhfRadioSettings,
+} from '../audio/vhfRadioDsp';
 
 export type RadioSpeakerRole = 'TOWER' | 'PILOT';
 
@@ -96,6 +102,16 @@ export class AudioEngine {
   private bufferPromises = new Map<string, Promise<AudioBuffer | null>>();
   private activeNodes: AudioBufferSourceNode[] = [];
   private preloadAllPromise: Promise<PreloadSummary> | null = null;
+  private vhfSettings: VhfRadioSettings = { ...DEFAULT_VHF_SETTINGS };
+
+  public getVhfSettings(): VhfRadioSettings {
+    return { ...this.vhfSettings };
+  }
+
+  public setVhfSettings(settings: Partial<VhfRadioSettings>): VhfRadioSettings {
+    this.vhfSettings = sanitizeVhfSettings({ ...this.vhfSettings, ...settings });
+    return { ...this.vhfSettings };
+  }
 
   /**
    * Lazily initializes and resumes the Web Audio API AudioContext.
@@ -355,45 +371,32 @@ export class AudioEngine {
   }
 
   /**
-   * Creates the VHF aviation radio DSP chain (bandpass + presence + AGC compressor).
+   * Creates the configurable VHF aviation radio DSP chain (bandpass 300-3000Hz,
+   * soft saturation, AGC compressor, RF fading/dropouts, and peak limiter).
    */
   public createVhfRadioGraph(
     ctx: AudioContext,
     role: RadioSpeakerRole,
     volume: number,
-    bandpassHz?: number
+    bandpassHz?: number,
+    options?: {
+      startTimeSec?: number;
+      durationSec?: number;
+      bypassDsp?: boolean;
+      settingsOverride?: VhfRadioSettings;
+    }
   ): { input: AudioNode; masterGain: GainNode } {
-    const highpass = ctx.createBiquadFilter();
-    highpass.type = 'highpass';
-    highpass.frequency.value = 320;
-
-    const presence = ctx.createBiquadFilter();
-    presence.type = 'peaking';
-    presence.frequency.value = bandpassHz ?? (role === 'TOWER' ? 1380 : 1520);
-    presence.Q.value = 1.05;
-    presence.gain.value = role === 'PILOT' ? 4.4 : 3.0;
-
-    const lowpass = ctx.createBiquadFilter();
-    lowpass.type = 'lowpass';
-    lowpass.frequency.value = role === 'TOWER' ? 3350 : 2950;
-
-    const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.value = -19;
-    compressor.knee.value = 8;
-    compressor.ratio.value = 6.5;
-    compressor.attack.value = 0.004;
-    compressor.release.value = 0.12;
-
-    const masterGain = ctx.createGain();
-    masterGain.gain.value = Math.min(1.25, Math.max(0, volume) * (role === 'TOWER' ? 1.08 : 0.98));
-
-    highpass.connect(presence);
-    presence.connect(lowpass);
-    lowpass.connect(compressor);
-    compressor.connect(masterGain);
-    masterGain.connect(ctx.destination);
-
-    return { input: highpass, masterGain };
+    const baseSettings = options?.settingsOverride || this.vhfSettings;
+    const effectiveSettings = options?.bypassDsp
+      ? { ...baseSettings, enabled: false }
+      : baseSettings;
+    const chain = createVhfProcessingChain(ctx, role, effectiveSettings, {
+      bandpassHz,
+      volumeScale: volume,
+      startTimeSec: options?.startTimeSec,
+      durationSec: options?.durationSec,
+    });
+    return { input: chain.input, masterGain: chain.masterGain };
   }
 
   private applyEqualPowerEnvelope(
@@ -466,7 +469,11 @@ export class AudioEngine {
       ctx,
       params.role,
       params.volume,
-      params.bandpassHz
+      params.bandpassHz,
+      {
+        startTimeSec: scheduleStart,
+        durationSec: plan.totalDurationSec,
+      }
     );
 
     const sources: AudioBufferSourceNode[] = [];
@@ -525,6 +532,8 @@ export class AudioEngine {
     playbackRate?: number;
     bandpassHz?: number;
     ctx?: AudioContext;
+    bypassDsp?: boolean;
+    settingsOverride?: VhfRadioSettings;
     shouldAbort?: () => boolean;
   }): Promise<boolean> {
     const shouldAbort = params.shouldAbort ?? (() => false);
@@ -543,6 +552,8 @@ export class AudioEngine {
         playbackRate: params.playbackRate,
         bandpassHz: params.bandpassHz,
         ctx,
+        bypassDsp: params.bypassDsp,
+        settingsOverride: params.settingsOverride,
         shouldAbort,
       });
     } catch {
@@ -560,6 +571,8 @@ export class AudioEngine {
     playbackRate?: number;
     bandpassHz?: number;
     ctx?: AudioContext;
+    bypassDsp?: boolean;
+    settingsOverride?: VhfRadioSettings;
     shouldAbort?: () => boolean;
   }): Promise<boolean> {
     const shouldAbort = params.shouldAbort ?? (() => false);
@@ -567,11 +580,19 @@ export class AudioEngine {
     if (!ctx || shouldAbort()) return Promise.resolve(false);
 
     const rate = Math.max(0.75, Math.min(1.35, params.playbackRate ?? 1.0));
+    const now = ctx.currentTime + 0.015;
+    const duration = Math.max(0.05, params.buffer.duration / rate);
     const { input: radioInput } = this.createVhfRadioGraph(
       ctx,
       params.role,
       params.volume,
-      params.bandpassHz
+      params.bandpassHz,
+      {
+        startTimeSec: now,
+        durationSec: duration,
+        bypassDsp: params.bypassDsp,
+        settingsOverride: params.settingsOverride,
+      }
     );
 
     const source = ctx.createBufferSource();
@@ -579,8 +600,6 @@ export class AudioEngine {
     source.playbackRate.value = rate;
 
     const envGain = ctx.createGain();
-    const now = ctx.currentTime + 0.015;
-    const duration = Math.max(0.05, params.buffer.duration / rate);
     const fadeEdge = Math.min(0.015, duration * 0.2);
 
     envGain.gain.setValueAtTime(0.001, now);

@@ -24,22 +24,83 @@ import { localTtsClient } from '../services/localTtsClient';
 import { audioLibraryClient } from '../services/audioLibraryClient';
 import { AudioLibraryManifestEntry } from '../../shared/audioLibraryTypes';
 import {
+  ActiveCarrierBedHandle,
+  DEFAULT_VHF_SETTINGS,
+  playVhfPttTransient,
+  sanitizeVhfSettings,
+  startVhfCarrierBed,
+  stopVhfCarrierBed,
+  VHF_RADIO_PRESETS,
+  VhfQualityPresetId,
+  VhfRadioSettings,
+} from './vhfRadioDsp';
+import {
   AIRLINE_CALLSIGNS,
   WAYPOINT_SPEECH_MAP,
+  AtcStationRole,
+  StructuredFlightContext,
   speakDigits,
+  speakAlphanumericTokens,
+  formatRegistrationForSpeech,
+  formatCallsignForSpeech as grammarFormatCallsign,
   formatRunwayForSpeech,
   formatAltitudeForSpeech,
+  formatHeadingForSpeech,
+  formatAirspeedForSpeech,
+  formatFrequencyForSpeech,
+  formatSquawkForSpeech,
+  formatWaypointForSpeech,
+  formatNavigationForSpeech,
+  buildPilotInitialContact,
   formatPhraseForSpeech,
 } from './phraseNormalizer';
+import {
+  AssignedPilotIdentity,
+  AssignedStationController,
+  VoiceAssignmentRegistry,
+  voiceAssignmentRegistry,
+} from './voiceAssignmentRegistry';
+import {
+  CommsDirection,
+  CommsManagerSnapshot,
+  CommsPriority,
+  CommsQueuePayload,
+  DEFAULT_PTT_TIMING,
+  PttTimingConfig,
+  RadioCommsManager,
+} from './commsManager';
 import { DEFAULT_VOICE_PROFILES, VoiceProfile, VoiceType } from '../../shared/ttsTypes';
 
 export {
   AIRLINE_CALLSIGNS,
   WAYPOINT_SPEECH_MAP,
   speakDigits,
+  speakAlphanumericTokens,
+  formatRegistrationForSpeech,
   formatRunwayForSpeech,
   formatAltitudeForSpeech,
+  formatHeadingForSpeech,
+  formatAirspeedForSpeech,
+  formatFrequencyForSpeech,
+  formatSquawkForSpeech,
+  formatWaypointForSpeech,
+  formatNavigationForSpeech,
+  buildPilotInitialContact,
   formatPhraseForSpeech,
+  VoiceAssignmentRegistry,
+  voiceAssignmentRegistry,
+  RadioCommsManager,
+  DEFAULT_PTT_TIMING,
+};
+export type {
+  AtcStationRole,
+  StructuredFlightContext,
+  AssignedPilotIdentity,
+  AssignedStationController,
+  CommsDirection,
+  CommsManagerSnapshot,
+  CommsPriority,
+  PttTimingConfig,
 };
 
 export type TowerPresetId = 'charon' | 'fenrir' | 'kore' | 'zephyr' | 'puck';
@@ -176,22 +237,38 @@ const PILOT_VOCAL_REGISTERS = [
 ];
 
 const TOWER_VOICE_STORAGE_KEY = 'skycontrol_tower_voice_offline_v3';
+const VHF_DSP_STORAGE_KEY = 'skycontrol_vhf_dsp_settings_v1';
 
 export interface ActiveTransmission {
+  txId?: string;
   callsign: string;
   speaker: 'ATC' | 'PILOT';
   voiceLabel?: string;
+  frequency?: string;
+  stationRole?: AtcStationRole;
+  priority?: CommsPriority;
 }
 
 export interface RadioExchangeOptions {
   airportIcao?: string;
+  aircraftId?: string;
+  registration?: string;
   airline?: string;
+  telephony?: string;
+  flightNumber?: string;
   aircraftType?: string;
+  frequency?: string;
+  priority?: CommsPriority;
+  direction?: CommsDirection;
   isEmergency?: boolean;
   isHeavy?: boolean;
   pilotHasCallsign?: boolean;
   activeCallsigns?: string[];
   atcRole?: Exclude<VoiceType, 'PILOT'>;
+  atcSpokenText?: string;
+  pilotSpokenText?: string;
+  onAtcStart?: () => void;
+  onCancelled?: (reason: string) => void;
 }
 
 export interface PilotVoiceProfile {
@@ -210,14 +287,6 @@ export interface PilotVoiceProfile {
   carrierCenterHz: number;
   pttClickHz: number;
   avionicsHumHz: number;
-}
-
-interface RadioExchangeQueueItem {
-  atcText?: string;
-  callsign: string;
-  pilotText: string;
-  onPilotStart?: () => void;
-  options?: RadioExchangeOptions;
 }
 
 function hashString(input: string): number {
@@ -536,31 +605,36 @@ export class RadioAudioEngine {
   private isMuted: boolean = false;
   private volume: number = 0.85;
   private isSpeechAvailable: boolean = typeof window !== 'undefined' && 'speechSynthesis' in window;
-  private exchangeQueue: RadioExchangeQueueItem[] = [];
-  private isBusy: boolean = false;
+  private commsManager = new RadioCommsManager<RadioExchangeOptions>();
+  private voiceRegistry = voiceAssignmentRegistry;
   private cachedVoices: SpeechSynthesisVoice[] = [];
   private activeTransmission: ActiveTransmission | null = null;
   private transmissionListeners: Array<(tx: ActiveTransmission | null) => void> = [];
   private voiceListeners: Array<(voices: OfflineVoiceOption[]) => void> = [];
   private currentAirportIcao: string = 'EGLL';
   private towerVoiceId: TowerVoiceId = 'charon';
-  private queueGeneration: number = 0;
-  private carrierNodes: {
-    noiseSource: AudioBufferSourceNode;
-    humOsc: OscillatorNode;
-    masterGain: GainNode;
-  } | null = null;
+  private carrierNodes: ActiveCarrierBedHandle | null = null;
+  private vhfSettings: VhfRadioSettings = { ...DEFAULT_VHF_SETTINGS };
+  private vhfSettingsListeners: Array<(settings: VhfRadioSettings) => void> = [];
 
   constructor() {
+    this.commsManager.setExecutor((item, ctx) => this.executeQueuedTransmission(item, ctx));
+
     if (typeof window !== 'undefined') {
       try {
         const storedVoice = window.localStorage.getItem(TOWER_VOICE_STORAGE_KEY) as TowerVoiceId | null;
         if (storedVoice && this.isValidTowerSelection(storedVoice)) {
           this.towerVoiceId = storedVoice;
         }
+        const rawDsp = window.localStorage.getItem(VHF_DSP_STORAGE_KEY);
+        if (rawDsp) {
+          const parsed = JSON.parse(rawDsp) as Partial<VhfRadioSettings>;
+          this.vhfSettings = sanitizeVhfSettings(parsed);
+        }
       } catch {
         // Ignore storage errors
       }
+      audioEngine.setVhfSettings(this.vhfSettings);
 
       // Eagerly fetch offline voice-pack manifest & sync 15 local Kokoro profiles
       void voicePackPlayer.loadManifest();
@@ -578,6 +652,7 @@ export class RadioAudioEngine {
         const ctx = this.initAudioContext();
         if (ctx) {
           audioEngine.setAudioContext(ctx);
+          audioEngine.setVhfSettings(this.vhfSettings);
           const packId = TOWER_PACK_ID_MAP[this.towerVoiceId];
           if (packId) void voicePackPlayer.loadSpeakerBuffer(packId, ctx);
           void audioEngine.preloadAllSpeakers(ctx);
@@ -593,6 +668,65 @@ export class RadioAudioEngine {
     }
   }
 
+  public getVhfSettings(): VhfRadioSettings {
+    return { ...this.vhfSettings };
+  }
+
+  public onVhfSettingsChange(cb: (settings: VhfRadioSettings) => void): () => void {
+    this.vhfSettingsListeners.push(cb);
+    cb({ ...this.vhfSettings });
+    return () => {
+      this.vhfSettingsListeners = this.vhfSettingsListeners.filter(l => l !== cb);
+    };
+  }
+
+  private persistAndBroadcastVhfSettings() {
+    audioEngine.setVhfSettings(this.vhfSettings);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(VHF_DSP_STORAGE_KEY, JSON.stringify(this.vhfSettings));
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    const snapshot = { ...this.vhfSettings };
+    for (const listener of this.vhfSettingsListeners) {
+      try {
+        listener(snapshot);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  }
+
+  public setVhfPreset(presetId: Exclude<VhfQualityPresetId, 'custom'>): VhfRadioSettings {
+    const def = VHF_RADIO_PRESETS[presetId];
+    if (!def) return this.getVhfSettings();
+    this.vhfSettings = sanitizeVhfSettings({
+      preset: def.id,
+      ...def.settings,
+    });
+    this.persistAndBroadcastVhfSettings();
+    return this.getVhfSettings();
+  }
+
+  public updateVhfSettings(patch: Partial<VhfRadioSettings>): VhfRadioSettings {
+    const next = sanitizeVhfSettings({
+      ...this.vhfSettings,
+      ...patch,
+      preset: patch.preset ?? 'custom',
+    });
+    this.vhfSettings = next;
+    this.persistAndBroadcastVhfSettings();
+    return this.getVhfSettings();
+  }
+
+  public resetVhfSettings(): VhfRadioSettings {
+    this.vhfSettings = { ...DEFAULT_VHF_SETTINGS };
+    this.persistAndBroadcastVhfSettings();
+    return this.getVhfSettings();
+  }
+
   private isValidTowerSelection(id: string): id is TowerVoiceId {
     return id.startsWith('voice:') || TOWER_VOICE_PROFILES.some(p => p.id === id);
   }
@@ -604,6 +738,7 @@ export class RadioAudioEngine {
   public setTowerVoiceId(voiceId: TowerVoiceId) {
     if (!this.isValidTowerSelection(voiceId)) return;
     this.towerVoiceId = voiceId;
+    this.voiceRegistry.clearStations();
     if (typeof window !== 'undefined') {
       try {
         window.localStorage.setItem(TOWER_VOICE_STORAGE_KEY, voiceId);
@@ -678,9 +813,7 @@ export class RadioAudioEngine {
   }
 
   public clearQueue() {
-    this.queueGeneration += 1;
-    this.exchangeQueue = [];
-    this.isBusy = false;
+    this.commsManager.clearAll('QUEUE_CLEARED');
     voicePackPlayer.stopActive();
     audioEngine.stopActive();
     this.stopCarrierBed();
@@ -692,6 +825,56 @@ export class RadioAudioEngine {
         // Ignore browser cancel exceptions
       }
     }
+  }
+
+  public cancelCallsignTransmissions(callsignOrAircraftId: string): number {
+    const cancelled = this.commsManager.cancelForCallsign(callsignOrAircraftId, 'FLIGHT_CANCELLED');
+    if (cancelled > 0) {
+      const snap = this.commsManager.getSnapshot();
+      if (!snap.activeTx) {
+        voicePackPlayer.stopActive();
+        audioEngine.stopActive();
+        this.stopCarrierBed();
+        this.setTransmission(null);
+      }
+    }
+    return cancelled;
+  }
+
+  public cancelTransmissionById(txId: string): boolean {
+    return this.commsManager.cancelById(txId);
+  }
+
+  public cancelFrequency(frequency: string): number {
+    return this.commsManager.cancelFrequency(frequency);
+  }
+
+  public pruneActiveAircraft(activeIdsOrCallsigns: Iterable<string>): number {
+    return this.voiceRegistry.pruneInactiveAircraft(activeIdsOrCallsigns);
+  }
+
+  public releaseAircraftVoice(idOrCallsign: string): boolean {
+    return this.voiceRegistry.releaseAircraft(idOrCallsign);
+  }
+
+  public getCommsQueueSnapshot(): CommsManagerSnapshot {
+    return this.commsManager.getSnapshot();
+  }
+
+  public onCommsQueueChange(cb: (snapshot: CommsManagerSnapshot) => void): () => void {
+    return this.commsManager.onSnapshotChange(cb);
+  }
+
+  public getPttTiming(): PttTimingConfig {
+    return this.commsManager.getPttTiming();
+  }
+
+  public setPttTiming(patch: Partial<PttTimingConfig>): PttTimingConfig {
+    return this.commsManager.setPttTiming(patch);
+  }
+
+  public getVoiceAssignmentSnapshot() {
+    return this.voiceRegistry.getSnapshot();
   }
 
   public initAudioContext(): AudioContext | null {
@@ -729,26 +912,127 @@ export class RadioAudioEngine {
     }
   }
 
+  /**
+   * Resolves consistent ATC station controller voice for an airport facility (TOWER / APPROACH / GROUND).
+   */
+  public resolveStationControllerVoice(params: {
+    airportIcao?: string;
+    stationRole: AtcStationRole;
+    frequency?: string;
+  }) {
+    if (this.cachedVoices.length === 0) this.loadVoices();
+    const localProfiles = localTtsClient.getProfilesSync();
+    const airportIcao = (params.airportIcao || this.currentAirportIcao).toUpperCase();
+    const role = params.stationRole || 'TOWER';
+
+    // Determine preferred profile ID per station role:
+    // - TOWER honors user's selected preset (e.g. charon, fenrir, kore)
+    // - APPROACH keeps dedicated approach_zephyr (unless user selected custom OS override)
+    // - GROUND keeps dedicated ground_puck
+    const towerPreset = TOWER_VOICE_PROFILES.find(p => p.id === this.towerVoiceId);
+    const osCustomUri = this.towerVoiceId.startsWith('voice:')
+      ? this.towerVoiceId.slice('voice:'.length)
+      : null;
+
+    let preferredProfileId: string | undefined;
+    if (role === 'TOWER') {
+      preferredProfileId = towerPreset?.localProfileId;
+    } else if (role === 'APPROACH') {
+      preferredProfileId =
+        this.towerVoiceId === 'zephyr'
+          ? 'approach_zephyr'
+          : towerPreset?.localProfileId && towerPreset.voiceType === 'APPROACH'
+            ? towerPreset.localProfileId
+            : 'approach_zephyr';
+    } else {
+      preferredProfileId = 'ground_puck';
+    }
+
+    const baseResolved = resolveTowerOfflineVoice(
+      this.cachedVoices,
+      role === 'TOWER'
+        ? this.towerVoiceId
+        : role === 'APPROACH'
+          ? (osCustomUri ? this.towerVoiceId : 'zephyr')
+          : (osCustomUri ? this.towerVoiceId : 'puck'),
+      airportIcao,
+      role,
+      localProfiles
+    );
+
+    const pinned = this.voiceRegistry.getOrAssignStationController({
+      airportIcao,
+      stationRole: role,
+      frequency: params.frequency,
+      preferredProfileId,
+      osVoiceURI: osCustomUri || baseResolved.voice?.voiceURI || null,
+      labelOverride: baseResolved.label,
+      availableProfiles: localProfiles,
+    });
+
+    return {
+      ...baseResolved,
+      localProfile: pinned.localProfile,
+      packSpeakerId: osCustomUri ? null : pinned.packSpeakerId,
+      label: pinned.label,
+    };
+  }
+
+  /**
+   * Resolves persistent, flight-lifetime-stable Pilot voice using VoiceAssignmentRegistry
+   * keyed by `aircraftId || callsign` so an aircraft NEVER changes pilot voice mid-flight.
+   */
   public getPilotVoiceForCallsign(
     callsign: string,
     options?: RadioExchangeOptions
   ): PilotVoiceProfile {
     if (this.cachedVoices.length === 0) this.loadVoices();
     const localProfiles = localTtsClient.getProfilesSync();
-    const towerResolved = resolveTowerOfflineVoice(
-      this.cachedVoices,
-      this.towerVoiceId,
-      options?.airportIcao || this.currentAirportIcao,
-      options?.atcRole,
-      localProfiles
-    );
-    return resolveOfflinePilotProfile(
+    const stationCtrl = this.resolveStationControllerVoice({
+      airportIcao: options?.airportIcao || this.currentAirportIcao,
+      stationRole: options?.atcRole || 'TOWER',
+      frequency: options?.frequency,
+    });
+
+    const rankedOs = rankOfflineEnglishVoices(this.cachedVoices);
+    const pinned = this.voiceRegistry.getOrAssignPilot({
+      aircraftId: options?.aircraftId,
       callsign,
-      this.cachedVoices,
-      towerResolved.voice,
-      options,
-      localProfiles
-    );
+      airline: options?.airline,
+      isHeavy: options?.isHeavy,
+      availableProfiles: localProfiles,
+      excludedControllerProfileIds: [stationCtrl.localProfile.id],
+      osVoices: rankedOs,
+      excludedOsVoiceURI: stationCtrl.voice?.voiceURI || null,
+    });
+
+    let pitch = pinned.basePitch;
+    let rate = pinned.baseRate;
+    let packPlaybackRate = pinned.basePackPlaybackRate;
+    let speed = pinned.baseSpeed;
+
+    if (options?.isEmergency) {
+      rate = Math.min(1.22, rate + 0.06);
+      pitch = Math.min(1.16, pitch + 0.04);
+      packPlaybackRate = 1.05;
+      speed = Math.min(1.3, speed + 0.06);
+    }
+
+    return {
+      localProfileId: pinned.localProfileId,
+      packSpeakerId: pinned.packSpeakerId,
+      packLabel: pinned.packLabel,
+      voiceURI: pinned.osVoiceURI,
+      voiceName: pinned.voiceName,
+      personaLabel: pinned.personaLabel,
+      pitch: Math.max(0.76, Math.min(1.24, pitch)),
+      rate: Math.max(0.88, Math.min(1.14, rate)),
+      packPlaybackRate,
+      speed,
+      carrierCenterHz: pinned.carrierCenterHz,
+      pttClickHz: pinned.pttClickHz,
+      avionicsHumHz: pinned.avionicsHumHz,
+    };
   }
 
   public canTokenizeForOfflinePack(rawText: string, role: 'TOWER' | 'PILOT'): boolean {
@@ -828,9 +1112,9 @@ export class RadioAudioEngine {
     if (!ctx) return false;
 
     this.clearQueue();
-    const generation = this.queueGeneration;
+    const generation = this.commsManager.getGeneration();
     const wavBytes = await audioLibraryClient.fetchAssetAudioBytes(entry.assetId);
-    if (generation !== this.queueGeneration || wavBytes.byteLength <= 44) return false;
+    if (generation !== this.commsManager.getGeneration() || wavBytes.byteLength <= 44) return false;
 
     const profiles = localTtsClient.getProfilesSync();
     const profile =
@@ -840,7 +1124,7 @@ export class RadioAudioEngine {
 
     if (mode === 'dry') {
       const decoded = await ctx.decodeAudioData(wavBytes.slice(0));
-      if (generation !== this.queueGeneration) return false;
+      if (generation !== this.commsManager.getGeneration()) return false;
       return new Promise<boolean>(resolve => {
         const src = ctx.createBufferSource();
         src.buffer = decoded;
@@ -878,156 +1162,179 @@ export class RadioAudioEngine {
       volume: this.volume,
       playbackRate: profile?.pitch || 1.0,
       bandpassHz: profile?.voiceConfig.bandpassHz || 1400,
-      shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+      shouldAbort: () => this.isMuted || generation !== this.commsManager.getGeneration(),
     });
 
     this.stopCarrierBed();
-    if (generation === this.queueGeneration) {
-      this.playRadioSquelch(0.06, 'END', profile?.voiceConfig.pttClickHz || 920);
+    if (generation === this.commsManager.getGeneration()) {
+      this.playRadioSquelch(this.vhfSettings.pttDurationMs / 1000, 'END', profile?.voiceConfig.pttClickHz || 920);
       this.setTransmission(null);
     }
     return ok;
   }
 
+  /**
+   * Side-by-side preview comparing unprocessed neural TTS audio vs full processed VHF radio audio.
+   */
+  public async previewVhfComparison(params: {
+    voiceId?: string;
+    customText?: string;
+    mode: 'clean' | 'vhf' | 'ab';
+    onPhaseChange?: (phase: 'clean' | 'vhf' | null) => void;
+  }): Promise<boolean> {
+    const ctx = this.initAudioContext();
+    if (!ctx) return false;
+
+    this.clearQueue();
+    const generation = this.commsManager.getGeneration();
+    const profiles = localTtsClient.getProfilesSync();
+    const profile =
+      profiles.find(p => p.id === params.voiceId) ||
+      DEFAULT_VOICE_PROFILES.find(p => p.id === params.voiceId) ||
+      DEFAULT_VOICE_PROFILES[0];
+
+    let wavBytes: ArrayBuffer | null = null;
+    if (params.customText && params.customText.trim().length > 0) {
+      const res = await localTtsClient.synthesizeWav({
+        rawText: params.customText.trim(),
+        voiceId: profile.id,
+        voiceType: profile.voiceType,
+        speed: profile.speed,
+        priority: 'high',
+      });
+      wavBytes = res?.wavBytes || null;
+    } else {
+      wavBytes = await localTtsClient.fetchProfileSampleWav(profile.id, false);
+    }
+
+    if (!wavBytes || generation !== this.commsManager.getGeneration()) {
+      params.onPhaseChange?.(null);
+      return false;
+    }
+
+    const role: 'TOWER' | 'PILOT' = profile.voiceType === 'PILOT' ? 'PILOT' : 'TOWER';
+
+    const playClean = async (): Promise<boolean> => {
+      if (generation !== this.commsManager.getGeneration()) return false;
+      params.onPhaseChange?.('clean');
+      return audioEngine.playWavBytes({
+        ctx,
+        wavBytes: wavBytes!,
+        role,
+        volume: this.volume,
+        playbackRate: profile.pitch || 1.0,
+        bypassDsp: true,
+        shouldAbort: () => this.isMuted || generation !== this.commsManager.getGeneration(),
+      });
+    };
+
+    const playVhf = async (): Promise<boolean> => {
+      if (generation !== this.commsManager.getGeneration()) return false;
+      params.onPhaseChange?.('vhf');
+      const previewSettings: VhfRadioSettings = {
+        ...this.vhfSettings,
+        enabled: true,
+      };
+      const clickHz = profile.voiceConfig.pttClickHz || 920;
+
+      this.setTransmission({
+        callsign: profile.voiceType === 'PILOT' ? 'PREVIEW' : profile.voiceType,
+        speaker: role === 'TOWER' ? 'ATC' : 'PILOT',
+        voiceLabel: `${profile.shortLabel} · VHF`,
+      });
+      playVhfPttTransient(ctx, 'START', previewSettings, this.volume, clickHz);
+      this.carrierNodes = startVhfCarrierBed(
+        ctx,
+        role === 'TOWER' ? 'ATC' : 'PILOT',
+        previewSettings,
+        this.volume,
+        {
+          carrierCenterHz: profile.voiceConfig.carrierCenterHz || 1350,
+          avionicsHumHz: profile.voiceConfig.avionicsHumHz || 400,
+        }
+      );
+
+      const ok = await audioEngine.playWavBytes({
+        ctx,
+        wavBytes: wavBytes!,
+        role,
+        volume: this.volume,
+        playbackRate: profile.pitch || 1.0,
+        bandpassHz: profile.voiceConfig.bandpassHz || 1400,
+        settingsOverride: previewSettings,
+        shouldAbort: () => this.isMuted || generation !== this.commsManager.getGeneration(),
+      });
+
+      this.stopCarrierBed();
+      if (generation === this.commsManager.getGeneration()) {
+        playVhfPttTransient(ctx, 'END', previewSettings, this.volume, clickHz);
+        this.setTransmission(null);
+      }
+      return ok;
+    };
+
+    try {
+      if (params.mode === 'clean') {
+        return await playClean();
+      }
+      if (params.mode === 'vhf') {
+        return await playVhf();
+      }
+      // Compare A/B: Clean TTS -> 420ms silence gap -> Full Processed VHF
+      await playClean();
+      if (generation !== this.commsManager.getGeneration() || this.isMuted) return false;
+      await this.waitMs(420);
+      return await playVhf();
+    } finally {
+      this.stopCarrierBed();
+      this.setTransmission(null);
+      params.onPhaseChange?.(null);
+    }
+  }
+
   private startCarrierBed(
     speaker: 'ATC' | 'PILOT',
-    acoustics?: { carrierCenterHz: number; avionicsHumHz: number }
+    acoustics?: { carrierCenterHz: number; avionicsHumHz: number },
+    settingsOverride?: VhfRadioSettings
   ) {
     if (this.isMuted) return;
     const ctx = this.initAudioContext();
     if (!ctx) return;
 
     this.stopCarrierBed();
-
-    try {
-      const now = ctx.currentTime;
-      const bufferSize = Math.floor(ctx.sampleRate * 2);
-      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      let b0 = 0;
-      let b1 = 0;
-      let b2 = 0;
-      for (let i = 0; i < bufferSize; i++) {
-        const white = Math.random() * 2 - 1;
-        b0 = 0.99765 * b0 + white * 0.099046;
-        b1 = 0.963 * b1 + white * 0.2965164;
-        b2 = 0.57 * b2 + white * 1.0526913;
-        data[i] = (b0 + b1 + b2 + white * 0.1848) * 0.14;
-      }
-
-      const noiseSource = ctx.createBufferSource();
-      noiseSource.buffer = buffer;
-      noiseSource.loop = true;
-
-      const bandpass = ctx.createBiquadFilter();
-      bandpass.type = 'bandpass';
-      bandpass.frequency.setValueAtTime(
-        speaker === 'PILOT' ? acoustics?.carrierCenterHz ?? 1480 : acoustics?.carrierCenterHz ?? 1260,
-        now
-      );
-      bandpass.Q.setValueAtTime(speaker === 'PILOT' ? 1.25 : 1.05, now);
-
-      const humOsc = ctx.createOscillator();
-      humOsc.type = 'sine';
-      humOsc.frequency.setValueAtTime(
-        speaker === 'PILOT' ? acoustics?.avionicsHumHz ?? 400 : acoustics?.avionicsHumHz ?? 110,
-        now
-      );
-
-      const humGain = ctx.createGain();
-      humGain.gain.setValueAtTime((speaker === 'PILOT' ? 0.004 : 0.0014) * this.volume, now);
-
-      const masterGain = ctx.createGain();
-      const bedLevel = (speaker === 'PILOT' ? 0.036 : 0.018) * this.volume;
-      masterGain.gain.setValueAtTime(0.0001, now);
-      masterGain.gain.linearRampToValueAtTime(bedLevel, now + 0.03);
-
-      noiseSource.connect(bandpass);
-      bandpass.connect(masterGain);
-      humOsc.connect(humGain);
-      humGain.connect(masterGain);
-      masterGain.connect(ctx.destination);
-
-      noiseSource.start(now);
-      humOsc.start(now);
-
-      this.carrierNodes = { noiseSource, humOsc, masterGain };
-    } catch {
-      // Audio fallback
-    }
+    this.carrierNodes = startVhfCarrierBed(
+      ctx,
+      speaker,
+      settingsOverride || this.vhfSettings,
+      this.volume,
+      acoustics
+    );
   }
 
   private stopCarrierBed() {
-    if (!this.carrierNodes || !this.audioCtx) return;
-    const nodes = this.carrierNodes;
+    if (!this.carrierNodes) return;
+    const handle = this.carrierNodes;
     this.carrierNodes = null;
-
-    try {
-      const now = this.audioCtx.currentTime;
-      nodes.masterGain.gain.cancelScheduledValues(now);
-      nodes.masterGain.gain.setValueAtTime(nodes.masterGain.gain.value, now);
-      nodes.masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
-      nodes.noiseSource.stop(now + 0.05);
-      nodes.humOsc.stop(now + 0.05);
-    } catch {
-      // Ignore already-stopped nodes
-    }
+    stopVhfCarrierBed(this.audioCtx, handle);
   }
 
   public playRadioSquelch(
-    durationSec: number = 0.09,
+    _durationSec: number = 0.09,
     phase: 'START' | 'END' = 'START',
-    clickFreqHz: number = 920
+    clickFreqHz: number = 920,
+    settingsOverride?: VhfRadioSettings
   ) {
     if (this.isMuted) return;
     const ctx = this.initAudioContext();
     if (!ctx) return;
 
-    try {
-      const now = ctx.currentTime;
-      const bufferSize = Math.floor(ctx.sampleRate * durationSec);
-      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        data[i] = (Math.random() * 2 - 1) * (phase === 'END' ? 0.34 : 0.2);
-      }
-
-      const noiseNode = ctx.createBufferSource();
-      noiseNode.buffer = buffer;
-
-      const bandpass = ctx.createBiquadFilter();
-      bandpass.type = 'bandpass';
-      bandpass.frequency.setValueAtTime(phase === 'END' ? 1850 : 1400, now);
-      bandpass.Q.setValueAtTime(1.5, now);
-
-      const clickOsc = ctx.createOscillator();
-      clickOsc.type = 'triangle';
-      clickOsc.frequency.setValueAtTime(phase === 'START' ? clickFreqHz : clickFreqHz * 0.68, now);
-      clickOsc.frequency.exponentialRampToValueAtTime(110, now + 0.018);
-
-      const clickGain = ctx.createGain();
-      clickGain.gain.setValueAtTime(0.18 * this.volume, now);
-      clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.022);
-
-      clickOsc.connect(clickGain);
-      clickGain.connect(ctx.destination);
-      clickOsc.start(now);
-      clickOsc.stop(now + 0.022);
-
-      const noiseGain = ctx.createGain();
-      noiseGain.gain.setValueAtTime(0.005, now);
-      noiseGain.gain.linearRampToValueAtTime((phase === 'END' ? 0.09 : 0.055) * this.volume, now + 0.012);
-      noiseGain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
-
-      noiseNode.connect(bandpass);
-      bandpass.connect(noiseGain);
-      noiseGain.connect(ctx.destination);
-
-      noiseNode.start(now);
-      noiseNode.stop(now + durationSec);
-    } catch {
-      // Audio fallback
-    }
+    playVhfPttTransient(
+      ctx,
+      phase,
+      settingsOverride || this.vhfSettings,
+      this.volume,
+      clickFreqHz
+    );
   }
 
   public playRogerBeep(freqHz: number = 920) {
@@ -1090,14 +1397,11 @@ export class RadioAudioEngine {
     }
   }
 
-  public formatCallsignForSpeech(callsign: string, isHeavy?: boolean): string {
-    const clean = callsign.trim().toUpperCase();
-    const prefix = clean.slice(0, 3);
-    const numbers = clean.slice(3);
-    const telephony = AIRLINE_CALLSIGNS[prefix] || prefix;
-    const spokenDigits = speakDigits(numbers);
-    const heavyTag = isHeavy ? ' heavy' : '';
-    return `${telephony} ${spokenDigits}${heavyTag}`.trim();
+  public formatCallsignForSpeech(
+    callsignOrCtx: string | StructuredFlightContext,
+    isHeavy?: boolean
+  ): string {
+    return grammarFormatCallsign(callsignOrCtx, isHeavy);
   }
 
   public speakRadioExchange(
@@ -1106,48 +1410,102 @@ export class RadioAudioEngine {
     pilotText: string,
     onPilotStart?: () => void,
     options?: RadioExchangeOptions
-  ) {
+  ): string | null {
     if (this.isMuted) {
       if (onPilotStart) onPilotStart();
-      return;
+      return null;
     }
 
-    if (this.exchangeQueue.length >= 4) {
-      this.exchangeQueue = this.exchangeQueue.slice(-2);
-    }
+    const atcRole: AtcStationRole =
+      options?.atcRole || (atcText ? inferAtcSubRole(atcText) : 'TOWER');
+    const priority: CommsPriority =
+      options?.priority ||
+      (options?.isEmergency ? 'EMERGENCY' : atcText ? 'ATC_CLEARANCE' : 'PILOT_READBACK');
+    const direction: CommsDirection =
+      options?.direction || (pilotText.trim().length > 0 ? 'controller_to_pilot' : 'atc_only');
 
-    this.exchangeQueue.push({
-      atcText,
+    return this.commsManager.enqueue({
+      direction,
+      priority,
+      frequency: options?.frequency,
       callsign,
+      aircraftId: options?.aircraftId,
+      atcRole,
+      atcText,
+      atcSpokenText: options?.atcSpokenText,
       pilotText,
+      pilotSpokenText: options?.pilotSpokenText,
+      onAtcStart: options?.onAtcStart,
       onPilotStart,
+      onCancelled: options?.onCancelled,
       options,
     });
+  }
 
-    void this.processQueue();
+  public speakPilotToController(params: {
+    callsign: string;
+    aircraftId?: string;
+    pilotText: string;
+    pilotSpokenText?: string;
+    atcReplyText: string;
+    atcReplySpokenText?: string;
+    onAtcReplyStart?: () => void;
+    options?: RadioExchangeOptions;
+  }): string | null {
+    if (this.isMuted) {
+      params.onAtcReplyStart?.();
+      return null;
+    }
+    const opts = params.options;
+    const atcRole: AtcStationRole =
+      opts?.atcRole || inferAtcSubRole(params.atcReplyText);
+    const priority: CommsPriority =
+      opts?.priority || (opts?.isEmergency ? 'EMERGENCY' : 'PILOT_CALLIN');
+
+    return this.commsManager.enqueue({
+      direction: 'pilot_to_controller',
+      priority,
+      frequency: opts?.frequency,
+      callsign: params.callsign,
+      aircraftId: params.aircraftId || opts?.aircraftId,
+      atcRole,
+      atcText: params.atcReplyText,
+      atcSpokenText: params.atcReplySpokenText,
+      pilotText: params.pilotText,
+      pilotSpokenText: params.pilotSpokenText,
+      onAtcStart: params.onAtcReplyStart,
+      options: {
+        pilotHasCallsign: true,
+        ...opts,
+      },
+    });
   }
 
   public speakPilotReadback(
     callsign: string,
     message: string,
     options?: RadioExchangeOptions
-  ) {
-    if (this.isMuted) return;
+  ): string | null {
+    if (this.isMuted) return null;
 
-    if (this.exchangeQueue.length >= 4 && !options?.isEmergency) {
-      return;
-    }
+    const priority: CommsPriority =
+      options?.priority || (options?.isEmergency ? 'EMERGENCY' : 'PILOT_READBACK');
 
-    this.exchangeQueue.push({
+    return this.commsManager.enqueue({
+      direction: 'pilot_only',
+      priority,
+      frequency: options?.frequency,
       callsign,
+      aircraftId: options?.aircraftId,
+      atcRole: options?.atcRole || 'TOWER',
       pilotText: message,
+      pilotSpokenText: options?.pilotSpokenText,
+      onCancelled: options?.onCancelled,
       options: {
         pilotHasCallsign: true,
         ...options,
       },
     });
-
-    void this.processQueue();
   }
 
   private estimateTimeoutMs(text: string): number {
@@ -1212,11 +1570,11 @@ export class RadioAudioEngine {
     });
   }
 
-  private buildRawPilotTextForPack(item: RadioExchangeQueueItem): string {
-    const body = item.pilotText.trim();
+  private buildRawPilotTextForPack(item: CommsQueuePayload<RadioExchangeOptions>): string {
+    const body = (item.pilotSpokenText || item.pilotText).trim();
     const upperCallsign = item.callsign.trim().toUpperCase();
     const prefix = upperCallsign.slice(0, 3);
-    const telephony = AIRLINE_CALLSIGNS[prefix] || prefix;
+    const telephony = item.options?.telephony || AIRLINE_CALLSIGNS[prefix] || prefix;
     const alreadyHasCallsign =
       item.options?.pilotHasCallsign ||
       body.toUpperCase().includes(upperCallsign) ||
@@ -1226,232 +1584,406 @@ export class RadioAudioEngine {
     return `${body}, ${item.callsign}${item.options?.isHeavy ? ' heavy' : ''}`;
   }
 
-  private async processQueue() {
-    if (this.isBusy || this.exchangeQueue.length === 0 || this.isMuted) return;
+  private async transmitControllerTurn(params: {
+    item: CommsQueuePayload<RadioExchangeOptions>;
+    atcDisplayText: string;
+    atcSpeechInput: string;
+    towerResolved: ReturnType<RadioAudioEngine['resolveStationControllerVoice']>;
+    txVhfSettings?: VhfRadioSettings;
+    ctx: AudioContext | null;
+    isAborted: () => boolean;
+    pttTiming: PttTimingConfig;
+  }): Promise<void> {
+    const {
+      item,
+      atcDisplayText,
+      atcSpeechInput,
+      towerResolved,
+      txVhfSettings,
+      ctx,
+      isAborted,
+      pttTiming,
+    } = params;
 
-    const item = this.exchangeQueue.shift();
-    if (!item) return;
+    if (this.isMuted || isAborted()) return;
 
-    this.isBusy = true;
-    const generation = this.queueGeneration;
+    item.onAtcStart?.();
+
+    const pttHz = towerResolved.localProfile.voiceConfig.pttClickHz || 920;
+    this.setTransmission({
+      txId: item.id,
+      callsign: item.callsign,
+      speaker: 'ATC',
+      voiceLabel: towerResolved.label,
+      frequency: item.frequency,
+      stationRole: item.atcRole,
+      priority: item.priority,
+    });
+    this.playRadioSquelch(
+      this.vhfSettings.pttDurationMs / 1000,
+      'START',
+      pttHz,
+      txVhfSettings
+    );
+    this.startCarrierBed(
+      'ATC',
+      {
+        carrierCenterHz: towerResolved.localProfile.voiceConfig.carrierCenterHz || 1260,
+        avionicsHumHz: towerResolved.localProfile.voiceConfig.avionicsHumHz || 110,
+      },
+      txVhfSettings
+    );
+
+    if (pttTiming.keyUpLeadMs > 0) {
+      await this.waitMs(pttTiming.keyUpLeadMs);
+    }
+    if (this.isMuted || isAborted()) {
+      this.stopCarrierBed();
+      return;
+    }
+
+    let playedAtc = false;
+    const canUseSpriteFallback =
+      Boolean(towerResolved.packSpeakerId) &&
+      this.canTokenizeForOfflinePack(atcDisplayText, 'TOWER');
+
+    // Tier 1: Local Kokoro-82M Neural TTS (Library / IndexedDB / Worker synthesized WAV)
+    if (ctx && !this.towerVoiceId.startsWith('voice:')) {
+      const kokoroRes = await localTtsClient.synthesizeWav({
+        rawText: atcSpeechInput,
+        voiceId: towerResolved.localProfile.id,
+        voiceType: towerResolved.localProfile.voiceType,
+        speed: item.options?.isEmergency
+          ? Math.min(1.3, towerResolved.localProfile.speed + 0.06)
+          : towerResolved.localProfile.speed,
+        priority: item.priority === 'EMERGENCY' ? 'critical' : 'high',
+        timeoutMs: canUseSpriteFallback ? 1100 : 4800,
+      });
+      if (kokoroRes && !this.isMuted && !isAborted()) {
+        playedAtc = await audioEngine.playWavBytes({
+          ctx,
+          wavBytes: kokoroRes.wavBytes,
+          role: 'TOWER',
+          volume: this.volume,
+          playbackRate: towerResolved.localProfile.pitch || 1.0,
+          bandpassHz: towerResolved.localProfile.voiceConfig.bandpassHz || 1360,
+          settingsOverride: txVhfSettings,
+          shouldAbort: () => this.isMuted || isAborted(),
+        });
+      }
+    }
+
+    // Tier 2: Zero-Latency Bundled Offline Sprite Pack Fallback
+    if (!playedAtc && ctx && towerResolved.packSpeakerId && !this.isMuted && !isAborted()) {
+      playedAtc = await voicePackPlayer.playTransmission({
+        ctx,
+        speakerId: towerResolved.packSpeakerId,
+        role: 'TOWER',
+        rawText: atcDisplayText,
+        volume: this.volume,
+        playbackRate: item.options?.isEmergency ? 1.05 : 1.01,
+        bandpassHz: 1360,
+        shouldAbort: () => this.isMuted || isAborted(),
+      });
+    }
+
+    // Tier 3: Installed Local OS Speech Fallback
+    if (!playedAtc && !this.isMuted && !isAborted()) {
+      const spokenAtc = formatPhraseForSpeech(atcSpeechInput);
+      await this.speakViaOsFallback(spokenAtc, {
+        voice: towerResolved.voice,
+        pitch: towerResolved.pitch,
+        rate: item.options?.isEmergency
+          ? Math.min(1.22, towerResolved.rate + 0.05)
+          : towerResolved.rate,
+        volumeScale: 0.96,
+      });
+    }
+
+    if (pttTiming.unkeyTailMs > 0 && !this.isMuted && !isAborted()) {
+      await this.waitMs(pttTiming.unkeyTailMs);
+    }
+    this.stopCarrierBed();
+    if (!this.isMuted && !isAborted()) {
+      this.playRadioSquelch(
+        this.vhfSettings.pttDurationMs / 1000,
+        'END',
+        pttHz,
+        txVhfSettings
+      );
+    }
+    this.setTransmission(null);
+  }
+
+  private async transmitPilotTurn(params: {
+    item: CommsQueuePayload<RadioExchangeOptions>;
+    pilotDisplayText: string;
+    pilotSpeechInput: string;
+    pilotProfile: PilotVoiceProfile;
+    txVhfSettings?: VhfRadioSettings;
+    ctx: AudioContext | null;
+    isAborted: () => boolean;
+    pttTiming: PttTimingConfig;
+  }): Promise<void> {
+    const {
+      item,
+      pilotDisplayText,
+      pilotSpeechInput,
+      pilotProfile,
+      txVhfSettings,
+      ctx,
+      isAborted,
+      pttTiming,
+    } = params;
+
+    if (this.isMuted || isAborted()) return;
+
+    item.onPilotStart?.();
+
+    this.setTransmission({
+      txId: item.id,
+      callsign: item.callsign,
+      speaker: 'PILOT',
+      voiceLabel: pilotProfile.personaLabel,
+      frequency: item.frequency,
+      stationRole: item.atcRole,
+      priority: item.priority,
+    });
+    this.playRadioSquelch(
+      this.vhfSettings.pttDurationMs / 1000,
+      'START',
+      pilotProfile.pttClickHz,
+      txVhfSettings
+    );
+    this.startCarrierBed(
+      'PILOT',
+      {
+        carrierCenterHz: pilotProfile.carrierCenterHz,
+        avionicsHumHz: pilotProfile.avionicsHumHz,
+      },
+      txVhfSettings
+    );
+
+    if (pttTiming.keyUpLeadMs > 0) {
+      await this.waitMs(pttTiming.keyUpLeadMs);
+    }
+    if (this.isMuted || isAborted()) {
+      this.stopCarrierBed();
+      return;
+    }
+
+    let playedPilot = false;
+    const canUsePilotSprite = this.canTokenizeForOfflinePack(pilotDisplayText, 'PILOT');
+
+    // Tier 1: Local Kokoro-82M Neural TTS (Library / IndexedDB / Worker synthesized WAV)
+    if (ctx) {
+      const kokoroPilotRes = await localTtsClient.synthesizeWav({
+        rawText: pilotSpeechInput,
+        voiceId: pilotProfile.localProfileId,
+        voiceType: 'PILOT',
+        speed: pilotProfile.speed,
+        priority: item.priority === 'EMERGENCY' ? 'critical' : 'high',
+        timeoutMs: canUsePilotSprite ? 1100 : 4800,
+      });
+      if (kokoroPilotRes && !this.isMuted && !isAborted()) {
+        playedPilot = await audioEngine.playWavBytes({
+          ctx,
+          wavBytes: kokoroPilotRes.wavBytes,
+          role: 'PILOT',
+          volume: this.volume,
+          playbackRate: 1.0,
+          bandpassHz: pilotProfile.carrierCenterHz,
+          settingsOverride: txVhfSettings,
+          shouldAbort: () => this.isMuted || isAborted(),
+        });
+      }
+    }
+
+    // Tier 2: Zero-Latency Bundled Offline Sprite Pack Fallback
+    if (!playedPilot && ctx && !this.isMuted && !isAborted()) {
+      playedPilot = await voicePackPlayer.playTransmission({
+        ctx,
+        speakerId: pilotProfile.packSpeakerId,
+        role: 'PILOT',
+        rawText: pilotDisplayText,
+        volume: this.volume,
+        playbackRate: pilotProfile.packPlaybackRate,
+        bandpassHz: pilotProfile.carrierCenterHz,
+        shouldAbort: () => this.isMuted || isAborted(),
+      });
+    }
+
+    // Tier 3: Installed Local OS Speech Fallback
+    if (!playedPilot && !this.isMuted && !isAborted()) {
+      const spokenPilot = formatPhraseForSpeech(pilotSpeechInput);
+      let fallbackVoice: SpeechSynthesisVoice | null = null;
+      if (pilotProfile.voiceURI) {
+        fallbackVoice =
+          this.cachedVoices.find(v => v.voiceURI === pilotProfile.voiceURI) || null;
+      }
+      const ok = await this.speakViaOsFallback(spokenPilot, {
+        voice: fallbackVoice,
+        pitch: pilotProfile.pitch,
+        rate: pilotProfile.rate,
+        volumeScale: 0.92,
+      });
+      if (!ok) {
+        this.playRogerBeep(pilotProfile.pttClickHz);
+      }
+    }
+
+    if (pttTiming.unkeyTailMs > 0 && !this.isMuted && !isAborted()) {
+      await this.waitMs(pttTiming.unkeyTailMs);
+    }
+    this.stopCarrierBed();
+    if (!this.isMuted && !isAborted()) {
+      this.playRadioSquelch(
+        this.vhfSettings.pttDurationMs / 1000,
+        'END',
+        pilotProfile.pttClickHz,
+        txVhfSettings
+      );
+    }
+    this.setTransmission(null);
+  }
+
+  private async executeQueuedTransmission(
+    item: CommsQueuePayload<RadioExchangeOptions>,
+    execCtx: { isAborted: () => boolean; generation: number; pttTiming: PttTimingConfig }
+  ): Promise<void> {
+    if (this.isMuted || execCtx.isAborted()) return;
 
     try {
       if (this.cachedVoices.length === 0) this.loadVoices();
 
-      const localProfiles = localTtsClient.getProfilesSync();
       const airportIcao = item.options?.airportIcao || this.currentAirportIcao;
-      const atcSubRole =
-        item.options?.atcRole || (item.atcText ? inferAtcSubRole(item.atcText) : 'TOWER');
-
-      const towerResolved = resolveTowerOfflineVoice(
-        this.cachedVoices,
-        this.towerVoiceId,
+      const towerResolved = this.resolveStationControllerVoice({
         airportIcao,
-        atcSubRole,
-        localProfiles
-      );
-      const pilotProfile = resolveOfflinePilotProfile(
-        item.callsign,
-        this.cachedVoices,
-        towerResolved.voice,
-        item.options,
-        localProfiles
-      );
+        stationRole: item.atcRole,
+        frequency: item.frequency,
+      });
+
+      const pilotProfile = this.getPilotVoiceForCallsign(item.callsign, {
+        ...item.options,
+        airportIcao,
+        atcRole: item.atcRole,
+      });
 
       const ctx = this.initAudioContext();
-      const rawPilot = item.pilotText.trim().length > 0 ? this.buildRawPilotTextForPack(item) : '';
+      const hasPilot = item.pilotText.trim().length > 0;
+      const rawPilotDisplay = hasPilot
+        ? (() => {
+            const body = item.pilotText.trim();
+            const upperCs = item.callsign.trim().toUpperCase();
+            const prefix = upperCs.slice(0, 3);
+            const telephony = item.options?.telephony || AIRLINE_CALLSIGNS[prefix] || prefix;
+            const already =
+              item.options?.pilotHasCallsign ||
+              body.toUpperCase().includes(upperCs) ||
+              body.toLowerCase().includes(telephony.toLowerCase());
+            return already ? body : `${body}, ${item.callsign}${item.options?.isHeavy ? ' heavy' : ''}`;
+          })()
+        : '';
+      const rawPilotSpeech = hasPilot ? this.buildRawPilotTextForPack(item) : '';
+      const rawAtcDisplay = item.atcText?.trim() || '';
+      const rawAtcSpeech = (item.atcSpokenText || item.atcText || '').trim();
 
-      // Preload offline sprite buffers AND trigger non-blocking background Kokoro pre-synthesis
-      // for Pilot readback while ATC is speaking!
+      // Preload offline sprite buffers AND trigger lookahead Kokoro pre-synthesis for responding turn!
       if (ctx) {
         if (towerResolved.packSpeakerId) {
           void voicePackPlayer.loadSpeakerBuffer(towerResolved.packSpeakerId, ctx);
         }
         void voicePackPlayer.loadSpeakerBuffer(pilotProfile.packSpeakerId, ctx);
       }
-      if (rawPilot) {
+
+      if (item.direction === 'pilot_to_controller' && rawAtcSpeech) {
         localTtsClient.prewarmPhrase({
-          rawText: rawPilot,
+          rawText: rawAtcSpeech,
+          voiceId: towerResolved.localProfile.id,
+          voiceType: towerResolved.localProfile.voiceType,
+          speed: towerResolved.localProfile.speed,
+        });
+      } else if (rawPilotSpeech && rawAtcSpeech) {
+        localTtsClient.prewarmPhrase({
+          rawText: rawPilotSpeech,
           voiceId: pilotProfile.localProfileId,
           voiceType: 'PILOT',
           speed: pilotProfile.speed,
         });
       }
 
-      // === 1. ATC CONTROLLER TRANSMISSION ===
-      if (item.atcText) {
-        this.setTransmission({
-          callsign: item.callsign,
-          speaker: 'ATC',
-          voiceLabel: towerResolved.label,
-        });
-        this.playRadioSquelch(0.055, 'START', towerResolved.localProfile.voiceConfig.pttClickHz || 920);
-        this.startCarrierBed('ATC', {
-          carrierCenterHz: towerResolved.localProfile.voiceConfig.carrierCenterHz || 1260,
-          avionicsHumHz: towerResolved.localProfile.voiceConfig.avionicsHumHz || 110,
-        });
+      // Use Emergency Transmission profile automatically on Mayday/Pan-Pan calls unless custom tuned
+      const txVhfSettings: VhfRadioSettings | undefined =
+        (item.priority === 'EMERGENCY' || item.options?.isEmergency) &&
+        this.vhfSettings.preset !== 'custom' &&
+        this.vhfSettings.enabled
+          ? {
+              ...this.vhfSettings,
+              ...VHF_RADIO_PRESETS.emergency_transmission.settings,
+              preset: 'emergency_transmission',
+            }
+          : undefined;
 
-        let playedAtc = false;
-        const canUseSpriteFallback =
-          Boolean(towerResolved.packSpeakerId) &&
-          this.canTokenizeForOfflinePack(item.atcText, 'TOWER');
-
-        // Tier 1: Local Kokoro-82M Neural TTS (IndexedDB cached or Worker synthesized WAV)
-        if (ctx && !this.towerVoiceId.startsWith('voice:')) {
-          const kokoroRes = await localTtsClient.synthesizeWav({
-            rawText: item.atcText,
-            voiceId: towerResolved.localProfile.id,
-            voiceType: towerResolved.localProfile.voiceType,
-            speed: item.options?.isEmergency
-              ? Math.min(1.3, towerResolved.localProfile.speed + 0.06)
-              : towerResolved.localProfile.speed,
-            priority: item.options?.isEmergency ? 'critical' : 'high',
-            timeoutMs: canUseSpriteFallback ? 1100 : 4800,
-          });
-          if (kokoroRes && !this.isMuted && generation === this.queueGeneration) {
-            playedAtc = await audioEngine.playWavBytes({
-              ctx,
-              wavBytes: kokoroRes.wavBytes,
-              role: 'TOWER',
-              volume: this.volume,
-              playbackRate: towerResolved.localProfile.pitch || 1.0,
-              bandpassHz: towerResolved.localProfile.voiceConfig.bandpassHz || 1360,
-              shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
-            });
-          }
-        }
-
-        // Tier 2: Zero-Latency Bundled Offline Sprite Pack Fallback
-        if (!playedAtc && ctx && towerResolved.packSpeakerId && !this.isMuted && generation === this.queueGeneration) {
-          playedAtc = await voicePackPlayer.playTransmission({
+      if (item.direction === 'pilot_to_controller') {
+        if (hasPilot) {
+          await this.transmitPilotTurn({
+            item,
+            pilotDisplayText: rawPilotDisplay,
+            pilotSpeechInput: rawPilotSpeech,
+            pilotProfile,
+            txVhfSettings,
             ctx,
-            speakerId: towerResolved.packSpeakerId,
-            role: 'TOWER',
-            rawText: item.atcText,
-            volume: this.volume,
-            playbackRate: item.options?.isEmergency ? 1.05 : 1.01,
-            bandpassHz: 1360,
-            shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+            isAborted: execCtx.isAborted,
+            pttTiming: execCtx.pttTiming,
           });
         }
-
-        // Tier 3: Installed Local OS Speech Fallback
-        if (!playedAtc && !this.isMuted && generation === this.queueGeneration) {
-          const spokenAtc = formatPhraseForSpeech(item.atcText);
-          await this.speakViaOsFallback(spokenAtc, {
-            voice: towerResolved.voice,
-            pitch: towerResolved.pitch,
-            rate: item.options?.isEmergency
-              ? Math.min(1.22, towerResolved.rate + 0.05)
-              : towerResolved.rate,
-            volumeScale: 0.96,
-          });
-        }
-
-        this.stopCarrierBed();
-        if (!this.isMuted && generation === this.queueGeneration) {
-          this.playRadioSquelch(0.055, 'END', towerResolved.localProfile.voiceConfig.pttClickHz || 920);
-        }
-        this.setTransmission(null);
-
-        if (this.isMuted || generation !== this.queueGeneration) return;
-        if (rawPilot.length > 0) {
-          await this.waitMs(210);
-        }
-      }
-
-      if (item.onPilotStart) {
-        item.onPilotStart();
-      }
-      if (this.isMuted || generation !== this.queueGeneration) return;
-
-      // === 2. PILOT READBACK / CALL-IN TRANSMISSION ===
-      if (rawPilot.length > 0) {
-        this.setTransmission({
-          callsign: item.callsign,
-          speaker: 'PILOT',
-          voiceLabel: pilotProfile.personaLabel,
-        });
-        this.playRadioSquelch(0.06, 'START', pilotProfile.pttClickHz);
-        this.startCarrierBed('PILOT', {
-          carrierCenterHz: pilotProfile.carrierCenterHz,
-          avionicsHumHz: pilotProfile.avionicsHumHz,
-        });
-
-        let playedPilot = false;
-        const canUsePilotSprite = this.canTokenizeForOfflinePack(rawPilot, 'PILOT');
-
-        // Tier 1: Local Kokoro-82M Neural TTS (likely already cached from lookahead!)
-        if (ctx) {
-          const kokoroPilotRes = await localTtsClient.synthesizeWav({
-            rawText: rawPilot,
-            voiceId: pilotProfile.localProfileId,
-            voiceType: 'PILOT',
-            speed: pilotProfile.speed,
-            priority: item.options?.isEmergency ? 'critical' : 'high',
-            timeoutMs: canUsePilotSprite ? 1100 : 4800,
-          });
-          if (kokoroPilotRes && !this.isMuted && generation === this.queueGeneration) {
-            playedPilot = await audioEngine.playWavBytes({
-              ctx,
-              wavBytes: kokoroPilotRes.wavBytes,
-              role: 'PILOT',
-              volume: this.volume,
-              playbackRate: 1.0,
-              bandpassHz: pilotProfile.carrierCenterHz,
-              shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
-            });
-          }
-        }
-
-        // Tier 2: Zero-Latency Bundled Offline Sprite Pack Fallback
-        if (!playedPilot && ctx && !this.isMuted && generation === this.queueGeneration) {
-          playedPilot = await voicePackPlayer.playTransmission({
+        if (this.isMuted || execCtx.isAborted()) return;
+        if (rawAtcDisplay) {
+          await this.waitMs(execCtx.pttTiming.interTurnGapMs);
+          await this.transmitControllerTurn({
+            item,
+            atcDisplayText: rawAtcDisplay,
+            atcSpeechInput: rawAtcSpeech,
+            towerResolved,
+            txVhfSettings,
             ctx,
-            speakerId: pilotProfile.packSpeakerId,
-            role: 'PILOT',
-            rawText: rawPilot,
-            volume: this.volume,
-            playbackRate: pilotProfile.packPlaybackRate,
-            bandpassHz: pilotProfile.carrierCenterHz,
-            shouldAbort: () => this.isMuted || generation !== this.queueGeneration,
+            isAborted: execCtx.isAborted,
+            pttTiming: execCtx.pttTiming,
           });
         }
-
-        // Tier 3: Installed Local OS Speech Fallback
-        if (!playedPilot && !this.isMuted && generation === this.queueGeneration) {
-          const spokenPilot = formatPhraseForSpeech(rawPilot);
-          let fallbackVoice: SpeechSynthesisVoice | null = null;
-          if (pilotProfile.voiceURI) {
-            fallbackVoice =
-              this.cachedVoices.find(v => v.voiceURI === pilotProfile.voiceURI) || null;
-          }
-          const ok = await this.speakViaOsFallback(spokenPilot, {
-            voice: fallbackVoice,
-            pitch: pilotProfile.pitch,
-            rate: pilotProfile.rate,
-            volumeScale: 0.92,
+      } else {
+        if (rawAtcDisplay) {
+          await this.transmitControllerTurn({
+            item,
+            atcDisplayText: rawAtcDisplay,
+            atcSpeechInput: rawAtcSpeech,
+            towerResolved,
+            txVhfSettings,
+            ctx,
+            isAborted: execCtx.isAborted,
+            pttTiming: execCtx.pttTiming,
           });
-          if (!ok) {
-            this.playRogerBeep(pilotProfile.pttClickHz);
+        }
+        if (this.isMuted || execCtx.isAborted()) return;
+        if (hasPilot) {
+          if (rawAtcDisplay) {
+            await this.waitMs(execCtx.pttTiming.interTurnGapMs);
           }
+          await this.transmitPilotTurn({
+            item,
+            pilotDisplayText: rawPilotDisplay,
+            pilotSpeechInput: rawPilotSpeech,
+            pilotProfile,
+            txVhfSettings,
+            ctx,
+            isAborted: execCtx.isAborted,
+            pttTiming: execCtx.pttTiming,
+          });
         }
-
-        this.stopCarrierBed();
-        if (!this.isMuted && generation === this.queueGeneration) {
-          this.playRadioSquelch(0.075, 'END', pilotProfile.pttClickHz);
-        }
-        this.setTransmission(null);
       }
     } finally {
       this.stopCarrierBed();
       this.setTransmission(null);
-      if (generation === this.queueGeneration) {
-        this.isBusy = false;
-        setTimeout(() => {
-          void this.processQueue();
-        }, 130);
-      }
     }
   }
 }
