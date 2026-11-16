@@ -95,6 +95,33 @@ export class VoiceAssignmentRegistry {
   private pilotAssignments = new Map<string, AssignedPilotIdentity>();
   private callsignToFlightKey = new Map<string, string>();
   private stationAssignments = new Map<string, AssignedStationController>();
+  private pilotStrategy: 'airline_matched' | 'round_robin' = 'airline_matched';
+  private stationDefaultProfiles: Record<AtcStationRole, string> = {
+    TOWER: 'tower_charon',
+    APPROACH: 'approach_zephyr',
+    GROUND: 'ground_puck',
+  };
+
+  public setPilotStrategy(strategy: 'airline_matched' | 'round_robin'): void {
+    this.pilotStrategy = strategy;
+  }
+
+  public getPilotStrategy(): 'airline_matched' | 'round_robin' {
+    return this.pilotStrategy;
+  }
+
+  public setStationDefaultProfile(role: AtcStationRole, profileId: string): void {
+    this.stationDefaultProfiles[role] = profileId;
+    for (const [key, entry] of this.stationAssignments.entries()) {
+      if (entry.stationRole === role) {
+        this.stationAssignments.delete(key);
+      }
+    }
+  }
+
+  public getStationDefaults(): Record<AtcStationRole, string> {
+    return { ...this.stationDefaultProfiles };
+  }
 
   /**
    * Resolves a stable pilot voice for a flight, pinning it by `aircraftId || callsign` so that
@@ -155,7 +182,10 @@ export class VoiceAssignmentRegistry {
 
     const enabledPilotIds = pilotPool.map(p => p.id);
     const prefix = (params.airline || cleanCallsign.slice(0, 3)).toUpperCase();
-    const basePreferred = AIRLINE_PREFERRED_PROFILE_ORDER[prefix] || enabledPilotIds;
+    const basePreferred =
+      this.pilotStrategy === 'round_robin'
+        ? enabledPilotIds
+        : AIRLINE_PREFERRED_PROFILE_ORDER[prefix] || enabledPilotIds;
     const filteredPreferred = basePreferred.filter(id => enabledPilotIds.includes(id));
     const candidateOrder = [
       ...filteredPreferred,
@@ -277,7 +307,9 @@ export class VoiceAssignmentRegistry {
     const icao = (params.airportIcao || 'EGLL').trim().toUpperCase();
     const role: AtcStationRole = params.stationRole || 'TOWER';
     const freq = (params.frequency || 'PRIMARY').trim();
-    const stationKey = `${icao}::${role}::${params.preferredProfileId || 'DEFAULT'}::${freq}`;
+    const defaultForRole = this.stationDefaultProfiles[role];
+    const requestedProfileId = params.preferredProfileId || defaultForRole;
+    const stationKey = `${icao}::${role}::${requestedProfileId || 'DEFAULT'}::${freq}`;
 
     const profilesPool = params.availableProfiles?.length
       ? params.availableProfiles
@@ -293,9 +325,9 @@ export class VoiceAssignmentRegistry {
 
     let chosenProfile: VoiceProfile | undefined;
 
-    if (params.preferredProfileId) {
+    if (requestedProfileId) {
       chosenProfile = profilesPool.find(
-        p => p.id === params.preferredProfileId && p.enabled && p.voiceType !== 'PILOT'
+        p => p.id === requestedProfileId && p.enabled && p.voiceType !== 'PILOT'
       );
     }
 
@@ -330,6 +362,75 @@ export class VoiceAssignmentRegistry {
 
     this.stationAssignments.set(stationKey, assignment);
     return assignment;
+  }
+
+  /**
+   * Manually pins or reassigns a specific active flight's pilot voice profile.
+   */
+  public setPilotAssignmentOverride(params: {
+    aircraftId?: string;
+    callsign: string;
+    airline?: string;
+    isHeavy?: boolean;
+    profileId: string;
+    availableProfiles?: VoiceProfile[];
+    osVoices?: RegistryVoiceLike[];
+    excludedOsVoiceURI?: string | null;
+  }): AssignedPilotIdentity {
+    const cleanCallsign = params.callsign.trim().toUpperCase();
+    const flightKey = (params.aircraftId || cleanCallsign).trim().toUpperCase();
+    const profilesPool = params.availableProfiles?.length
+      ? params.availableProfiles
+      : DEFAULT_VOICE_PROFILES;
+
+    const existing =
+      this.pilotAssignments.get(flightKey) ||
+      (this.callsignToFlightKey.has(cleanCallsign)
+        ? this.pilotAssignments.get(this.callsignToFlightKey.get(cleanCallsign)!)
+        : undefined);
+
+    const matchedProfile =
+      profilesPool.find(p => p.id === params.profileId && p.voiceType === 'PILOT') ||
+      profilesPool.find(p => p.id === params.profileId) ||
+      DEFAULT_VOICE_PROFILES.find(p => p.id === params.profileId) ||
+      DEFAULT_VOICE_PROFILES.find(p => p.voiceType === 'PILOT')!;
+
+    const hash = hashString(flightKey);
+    const prefix = (params.airline || cleanCallsign.slice(0, 3)).toUpperCase();
+    const airlineName = AIRLINE_CALLSIGNS[prefix] || params.airline || prefix;
+    const packLabel = matchedProfile.displayName.split('·')[0].trim();
+
+    const updated: AssignedPilotIdentity = {
+      flightKey,
+      callsign: cleanCallsign,
+      aircraftId: params.aircraftId || existing?.aircraftId,
+      localProfileId: matchedProfile.id,
+      packSpeakerId:
+        matchedProfile.voiceConfig.legacyPackId ||
+        existing?.packSpeakerId ||
+        PILOT_PACK_IDS[hash % PILOT_PACK_IDS.length],
+      packLabel,
+      osVoiceURI: existing?.osVoiceURI || null,
+      voiceName: existing?.voiceName || matchedProfile.shortLabel,
+      personaLabel: `${packLabel} · ${airlineName}`,
+      basePitch: matchedProfile.pitch || existing?.basePitch || 1.0,
+      baseRate: existing?.baseRate || 1.06,
+      basePackPlaybackRate: existing?.basePackPlaybackRate || 1.0,
+      baseSpeed: matchedProfile.speed,
+      carrierCenterHz: matchedProfile.voiceConfig.carrierCenterHz || 1320,
+      pttClickHz: matchedProfile.voiceConfig.pttClickHz || 780,
+      avionicsHumHz: params.isHeavy
+        ? 395
+        : matchedProfile.voiceConfig.avionicsHumHz || 440,
+      assignedAt: Date.now(),
+    };
+
+    if (existing && existing.flightKey !== flightKey) {
+      this.pilotAssignments.delete(existing.flightKey);
+    }
+    this.pilotAssignments.set(flightKey, updated);
+    this.callsignToFlightKey.set(cleanCallsign, flightKey);
+    return updated;
   }
 
   /**

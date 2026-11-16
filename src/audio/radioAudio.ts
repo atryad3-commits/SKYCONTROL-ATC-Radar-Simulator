@@ -70,6 +70,7 @@ import {
   RadioCommsManager,
 } from './commsManager';
 import { DEFAULT_VOICE_PROFILES, VoiceProfile, VoiceType } from '../../shared/ttsTypes';
+import { GlobalAudioSettings } from '../../shared/audioStudioTypes';
 
 export {
   AIRLINE_CALLSIGNS,
@@ -238,6 +239,7 @@ const PILOT_VOCAL_REGISTERS = [
 
 const TOWER_VOICE_STORAGE_KEY = 'skycontrol_tower_voice_offline_v3';
 const VHF_DSP_STORAGE_KEY = 'skycontrol_vhf_dsp_settings_v1';
+const PTT_TIMING_STORAGE_KEY = 'skycontrol_ptt_timing_v1';
 
 export interface ActiveTransmission {
   txId?: string;
@@ -631,6 +633,11 @@ export class RadioAudioEngine {
           const parsed = JSON.parse(rawDsp) as Partial<VhfRadioSettings>;
           this.vhfSettings = sanitizeVhfSettings(parsed);
         }
+        const rawPtt = window.localStorage.getItem(PTT_TIMING_STORAGE_KEY);
+        if (rawPtt) {
+          const parsedPtt = JSON.parse(rawPtt) as Partial<PttTimingConfig>;
+          this.commsManager.setPttTiming(parsedPtt);
+        }
       } catch {
         // Ignore storage errors
       }
@@ -731,6 +738,31 @@ export class RadioAudioEngine {
     return id.startsWith('voice:') || TOWER_VOICE_PROFILES.some(p => p.id === id);
   }
 
+  private mapPresetOrIdToProfileId(val: string, role: AtcStationRole): string {
+    if (val === 'charon') return 'tower_charon';
+    if (val === 'fenrir') return 'tower_fenrir';
+    if (val === 'kore') return 'tower_kore';
+    if (val === 'zephyr') return 'approach_zephyr';
+    if (val === 'puck') return 'ground_puck';
+    if (val.startsWith('voice:')) {
+      return role === 'APPROACH'
+        ? 'approach_zephyr'
+        : role === 'GROUND'
+          ? 'ground_puck'
+          : 'tower_charon';
+    }
+    return val;
+  }
+
+  private mapProfileIdToPresetId(profileId: string): TowerPresetId | null {
+    if (profileId === 'tower_charon' || profileId === 'charon') return 'charon';
+    if (profileId === 'tower_fenrir' || profileId === 'fenrir') return 'fenrir';
+    if (profileId === 'tower_kore' || profileId === 'kore') return 'kore';
+    if (profileId === 'approach_zephyr' || profileId === 'zephyr') return 'zephyr';
+    if (profileId === 'ground_puck' || profileId === 'puck') return 'puck';
+    return null;
+  }
+
   public getTowerVoiceId(): TowerVoiceId {
     return this.towerVoiceId;
   }
@@ -738,6 +770,12 @@ export class RadioAudioEngine {
   public setTowerVoiceId(voiceId: TowerVoiceId) {
     if (!this.isValidTowerSelection(voiceId)) return;
     this.towerVoiceId = voiceId;
+    if (!voiceId.startsWith('voice:')) {
+      this.voiceRegistry.setStationDefaultProfile(
+        'TOWER',
+        this.mapPresetOrIdToProfileId(voiceId, 'TOWER')
+      );
+    }
     this.voiceRegistry.clearStations();
     if (typeof window !== 'undefined') {
       try {
@@ -750,6 +788,64 @@ export class RadioAudioEngine {
     const packId = TOWER_PACK_ID_MAP[voiceId];
     if (ctx && packId) {
       void voicePackPlayer.loadSpeakerBuffer(packId, ctx);
+    }
+  }
+
+  public getDefaultStationVoices(): Record<AtcStationRole, string> {
+    return this.voiceRegistry.getStationDefaults();
+  }
+
+  public assignStationDefaultVoice(role: AtcStationRole, profileId: string): void {
+    const resolvedId = this.mapPresetOrIdToProfileId(profileId, role);
+    this.voiceRegistry.setStationDefaultProfile(role, resolvedId);
+    if (role === 'TOWER') {
+      const preset = this.mapProfileIdToPresetId(resolvedId);
+      if (preset) {
+        this.towerVoiceId = preset;
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(TOWER_VOICE_STORAGE_KEY, preset);
+          } catch {
+            // Ignore storage errors
+          }
+        }
+      } else if (this.towerVoiceId.startsWith('voice:')) {
+        this.towerVoiceId = 'charon';
+      }
+    }
+  }
+
+  public assignFlightPilotVoice(
+    flight: { aircraftId?: string; callsign: string; airline?: string; isHeavy?: boolean },
+    profileId: string
+  ): AssignedPilotIdentity {
+    if (this.cachedVoices.length === 0) this.loadVoices();
+    const localProfiles = localTtsClient.getProfilesSync();
+    return this.voiceRegistry.setPilotAssignmentOverride({
+      aircraftId: flight.aircraftId,
+      callsign: flight.callsign,
+      airline: flight.airline,
+      isHeavy: flight.isHeavy,
+      profileId,
+      availableProfiles: localProfiles,
+      osVoices: rankOfflineEnglishVoices(this.cachedVoices),
+    });
+  }
+
+  public applyGlobalAudioSettings(
+    settings: GlobalAudioSettings,
+    options?: { applyPreset?: boolean }
+  ): void {
+    this.setMuted(!settings.audioEnabled);
+    this.setVolume(settings.masterVolume);
+    localTtsClient.setTtsEnabled(settings.ttsEnabled);
+    localTtsClient.setPrewarmEnabled(settings.prewarmReadbacksEnabled);
+    this.voiceRegistry.setPilotStrategy(settings.defaultVoices.pilotStrategy);
+    this.assignStationDefaultVoice('TOWER', settings.defaultVoices.tower);
+    this.assignStationDefaultVoice('APPROACH', settings.defaultVoices.approach);
+    this.assignStationDefaultVoice('GROUND', settings.defaultVoices.ground);
+    if (options?.applyPreset) {
+      this.setVhfPreset(settings.defaultRadioPreset);
     }
   }
 
@@ -870,7 +966,15 @@ export class RadioAudioEngine {
   }
 
   public setPttTiming(patch: Partial<PttTimingConfig>): PttTimingConfig {
-    return this.commsManager.setPttTiming(patch);
+    const next = this.commsManager.setPttTiming(patch);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(PTT_TIMING_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage errors
+      }
+    }
+    return next;
   }
 
   public getVoiceAssignmentSnapshot() {
@@ -929,32 +1033,25 @@ export class RadioAudioEngine {
     // - TOWER honors user's selected preset (e.g. charon, fenrir, kore)
     // - APPROACH keeps dedicated approach_zephyr (unless user selected custom OS override)
     // - GROUND keeps dedicated ground_puck
-    const towerPreset = TOWER_VOICE_PROFILES.find(p => p.id === this.towerVoiceId);
     const osCustomUri = this.towerVoiceId.startsWith('voice:')
       ? this.towerVoiceId.slice('voice:'.length)
       : null;
+    const stationDefaults = this.voiceRegistry.getStationDefaults();
+    const preferredProfileId: string = osCustomUri
+      ? this.mapPresetOrIdToProfileId('charon', role)
+      : stationDefaults[role] || this.mapPresetOrIdToProfileId(this.towerVoiceId, role);
 
-    let preferredProfileId: string | undefined;
-    if (role === 'TOWER') {
-      preferredProfileId = towerPreset?.localProfileId;
-    } else if (role === 'APPROACH') {
-      preferredProfileId =
-        this.towerVoiceId === 'zephyr'
-          ? 'approach_zephyr'
-          : towerPreset?.localProfileId && towerPreset.voiceType === 'APPROACH'
-            ? towerPreset.localProfileId
-            : 'approach_zephyr';
-    } else {
-      preferredProfileId = 'ground_puck';
-    }
-
-    const baseResolved = resolveTowerOfflineVoice(
-      this.cachedVoices,
-      role === 'TOWER'
+    const presetForRole: TowerVoiceId =
+      this.mapProfileIdToPresetId(preferredProfileId) ||
+      (role === 'TOWER'
         ? this.towerVoiceId
         : role === 'APPROACH'
           ? (osCustomUri ? this.towerVoiceId : 'zephyr')
-          : (osCustomUri ? this.towerVoiceId : 'puck'),
+          : (osCustomUri ? this.towerVoiceId : 'puck'));
+
+    const baseResolved = resolveTowerOfflineVoice(
+      this.cachedVoices,
+      presetForRole,
       airportIcao,
       role,
       localProfiles
@@ -966,7 +1063,7 @@ export class RadioAudioEngine {
       frequency: params.frequency,
       preferredProfileId,
       osVoiceURI: osCustomUri || baseResolved.voice?.voiceURI || null,
-      labelOverride: baseResolved.label,
+      labelOverride: osCustomUri ? baseResolved.label : undefined,
       availableProfiles: localProfiles,
     });
 
@@ -1092,6 +1189,12 @@ export class RadioAudioEngine {
       playbackRate: profile.pitch || 1.0,
       bandpassHz: profile.voiceConfig.bandpassHz || 1400,
       shouldAbort: () => this.isMuted,
+      onError: err => {
+        localTtsClient.recordPlaybackError(
+          'audition',
+          err instanceof Error ? err.message : `Failed decoding sample WAV for ${profile.id}`
+        );
+      },
     });
 
     this.stopCarrierBed();
@@ -1113,7 +1216,16 @@ export class RadioAudioEngine {
 
     this.clearQueue();
     const generation = this.commsManager.getGeneration();
-    const wavBytes = await audioLibraryClient.fetchAssetAudioBytes(entry.assetId);
+    let wavBytes: ArrayBuffer;
+    try {
+      wavBytes = await audioLibraryClient.fetchAssetAudioBytes(entry.assetId);
+    } catch (err) {
+      localTtsClient.recordPlaybackError(
+        'library-preview',
+        err instanceof Error ? err.message : `Failed fetching ${entry.assetId}`
+      );
+      return false;
+    }
     if (generation !== this.commsManager.getGeneration() || wavBytes.byteLength <= 44) return false;
 
     const profiles = localTtsClient.getProfilesSync();
@@ -1123,25 +1235,33 @@ export class RadioAudioEngine {
     const role: 'TOWER' | 'PILOT' = entry.voiceType === 'PILOT' ? 'PILOT' : 'TOWER';
 
     if (mode === 'dry') {
-      const decoded = await ctx.decodeAudioData(wavBytes.slice(0));
-      if (generation !== this.commsManager.getGeneration()) return false;
-      return new Promise<boolean>(resolve => {
-        const src = ctx.createBufferSource();
-        src.buffer = decoded;
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(Math.max(0.05, this.volume), ctx.currentTime);
-        src.connect(gain);
-        gain.connect(ctx.destination);
-        let settled = false;
-        const finish = (ok: boolean) => {
-          if (settled) return;
-          settled = true;
-          resolve(ok);
-        };
-        src.onended = () => finish(true);
-        src.start();
-        setTimeout(() => finish(true), decoded.duration * 1000 + 200);
-      });
+      try {
+        const decoded = await ctx.decodeAudioData(wavBytes.slice(0));
+        if (generation !== this.commsManager.getGeneration()) return false;
+        return new Promise<boolean>(resolve => {
+          const src = ctx.createBufferSource();
+          src.buffer = decoded;
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(Math.max(0.05, this.volume), ctx.currentTime);
+          src.connect(gain);
+          gain.connect(ctx.destination);
+          let settled = false;
+          const finish = (ok: boolean) => {
+            if (settled) return;
+            settled = true;
+            resolve(ok);
+          };
+          src.onended = () => finish(true);
+          src.start();
+          setTimeout(() => finish(true), decoded.duration * 1000 + 200);
+        });
+      } catch (err) {
+        localTtsClient.recordPlaybackError(
+          'library-dry-preview',
+          err instanceof Error ? err.message : `WAV decode failed for ${entry.assetId}`
+        );
+        return false;
+      }
     }
 
     this.setTransmission({
@@ -1163,6 +1283,12 @@ export class RadioAudioEngine {
       playbackRate: profile?.pitch || 1.0,
       bandpassHz: profile?.voiceConfig.bandpassHz || 1400,
       shouldAbort: () => this.isMuted || generation !== this.commsManager.getGeneration(),
+      onError: err => {
+        localTtsClient.recordPlaybackError(
+          'library-vhf-preview',
+          err instanceof Error ? err.message : `VHF playback failed for ${entry.assetId}`
+        );
+      },
     });
 
     this.stopCarrierBed();
@@ -1669,6 +1795,12 @@ export class RadioAudioEngine {
           bandpassHz: towerResolved.localProfile.voiceConfig.bandpassHz || 1360,
           settingsOverride: txVhfSettings,
           shouldAbort: () => this.isMuted || isAborted(),
+          onError: err => {
+            localTtsClient.recordPlaybackError(
+              'atc-playback',
+              err instanceof Error ? err.message : `ATC WAV decode error (${towerResolved.localProfile.id})`
+            );
+          },
         });
       }
     }
@@ -1795,6 +1927,12 @@ export class RadioAudioEngine {
           bandpassHz: pilotProfile.carrierCenterHz,
           settingsOverride: txVhfSettings,
           shouldAbort: () => this.isMuted || isAborted(),
+          onError: err => {
+            localTtsClient.recordPlaybackError(
+              'pilot-playback',
+              err instanceof Error ? err.message : `Pilot WAV decode error (${pilotProfile.localProfileId})`
+            );
+          },
         });
       }
     }

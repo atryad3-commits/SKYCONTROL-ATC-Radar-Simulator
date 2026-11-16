@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 3,
+  "updatedAt": "2026-11-16T09:56:04.209Z",
+  "migrations": [
+    {
+      "version": 1,
+      "id": "001_init_voice_profiles",
+      "description": "Initialize & enforce 15-profile schema bounds on voice-profiles.json",
+      "appliedAt": "2026-11-16T09:56:04.163Z"
+    },
+    {
+      "version": 2,
+      "id": "002_upgrade_audio_library_manifest",
+      "description": "Upgrade audio-library-manifest.json metadata envelope to schema v2 without discarding WAVs",
+      "appliedAt": "2026-11-16T09:56:04.209Z"
+    },
+    {
+      "version": 3,
+      "id": "003_init_global_audio_settings",
+      "description": "Create persistent global Audio Studio settings (default voices, radio quality preset, cache limit, background gen)",
+      "appliedAt": "2026-11-16T09:56:04.209Z"
+    }
+  ]
+}

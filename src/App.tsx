@@ -18,7 +18,10 @@ import { AuthGateModal } from './components/AuthGateModal';
 import { OperationsHubModal, OperationsHubTab } from './components/OperationsHubModal';
 import { MissionHudOverlay } from './components/MissionHudOverlay';
 import { CertificateModal } from './components/CertificateModal';
+import { AudioStudioModal, AudioStudioTab } from './components/AudioStudioModal';
 import { testConnection } from './firebase/config';
+import { localTtsClient } from './services/localTtsClient';
+import { radioAudio } from './audio/radioAudio';
 import {
   loadGuestProfile,
   loadOrCreateCloudProfile,
@@ -54,11 +57,20 @@ export default function App() {
   const [hubInitialTab, setHubInitialTab] = useState<OperationsHubTab>('academy');
   const [isLayersOpen, setIsLayersOpen] = useState(false);
   const [isCertOpen, setIsCertOpen] = useState(false);
+  const [isAudioStudioOpen, setIsAudioStudioOpen] = useState(false);
+  const [audioStudioTab, setAudioStudioTab] = useState<AudioStudioTab>('voices');
 
   // Bottom rack tab: 'strips' or 'radio'
   const [bottomTab, setBottomTab] = useState<'strips' | 'radio'>('strips');
 
   const persistedPassRef = useRef<boolean>(false);
+
+  // Hydrate persisted offline Audio Studio settings on boot
+  useEffect(() => {
+    void localTtsClient.fetchGlobalSettings().then(settings => {
+      useSimulationStore.getState().syncGlobalAudioSettings(settings, false);
+    });
+  }, []);
 
   // 1. Verify Firestore connection & subscribe to Auth state on boot
   useEffect(() => {
@@ -174,6 +186,12 @@ export default function App() {
     setIsHubOpen(true);
   };
 
+  const handleOpenAudioStudio = (tab: AudioStudioTab = 'voices') => {
+    radioAudio.initAudioContext();
+    setAudioStudioTab(tab);
+    setIsAudioStudioOpen(true);
+  };
+
   const handleGuestProfileReady = async (profile: UserProfileData) => {
     setUserProfile(profile);
     const list = await loadUserScenarios(profile);
@@ -195,6 +213,7 @@ export default function App() {
         onOpenOperationsHub={() => handleOpenHub('academy')}
         onOpenAccount={() => setIsAuthModalOpen(true)}
         onToggleLayerMenu={() => setIsLayersOpen(true)}
+        onOpenAudioStudio={() => handleOpenAudioStudio('voices')}
       />
 
       {/* 2. Main Workstation Tri-Pane Center Stage */}
@@ -251,10 +270,19 @@ export default function App() {
         </div>
 
         {/* Active Deck View */}
-        {bottomTab === 'strips' ? <FlightStrips /> : <RadioTranscript />}
+        {bottomTab === 'strips' ? (
+          <FlightStrips />
+        ) : (
+          <RadioTranscript onOpenAudioStudio={handleOpenAudioStudio} />
+        )}
       </div>
 
       {/* Modals & Dialogs */}
+      <AudioStudioModal
+        isOpen={isAudioStudioOpen}
+        initialTab={audioStudioTab}
+        onClose={() => setIsAudioStudioOpen(false)}
+      />
       <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
       <LayersMenu isOpen={isLayersOpen} onClose={() => setIsLayersOpen(false)} />
 

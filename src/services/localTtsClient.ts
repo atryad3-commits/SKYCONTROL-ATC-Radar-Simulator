@@ -150,13 +150,30 @@ export class LocalTtsClient {
     id: string,
     patch: VoiceProfileUpdatePatch
   ): Promise<VoiceProfile | null> {
-    if (typeof fetch !== 'function') return null;
+    const previous = this.profiles.find(p => p.id === id);
+    if (previous) {
+      const optimistic: VoiceProfile = {
+        ...previous,
+        ...patch,
+        voiceConfig: patch.voiceConfig
+          ? { ...previous.voiceConfig, ...patch.voiceConfig }
+          : previous.voiceConfig,
+      };
+      this.profiles = this.profiles.map(p => (p.id === id ? optimistic : p));
+      this.notifyProfiles();
+    }
+
+    if (typeof fetch !== 'function') return previous || null;
     const res = await fetch(`/api/tts/voices/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
     if (!res.ok) {
+      if (previous) {
+        this.profiles = this.profiles.map(p => (p.id === id ? previous : p));
+        this.notifyProfiles();
+      }
       const err = await res.json().catch(() => ({}));
       throw new Error(err?.error || `Failed updating profile (${res.status})`);
     }
@@ -167,6 +184,78 @@ export class LocalTtsClient {
       return data.profile as VoiceProfile;
     }
     return null;
+  }
+
+  public async createProfile(payload: {
+    id?: string;
+    displayName: string;
+    shortLabel?: string;
+    voiceType: VoiceType;
+    language?: string;
+    accent?: string;
+    gender: 'M' | 'F';
+    kokoroVoiceId: string;
+    speed?: number;
+    pitch?: number;
+    stability?: number;
+    sampleText?: string;
+  }): Promise<VoiceProfile> {
+    if (typeof fetch !== 'function') {
+      throw new Error('Fetch unavailable in non-browser environment');
+    }
+    const res = await fetch('/api/tts/voices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: payload.id,
+        displayName: payload.displayName,
+        shortLabel: payload.shortLabel || payload.displayName,
+        voiceType: payload.voiceType,
+        language: payload.language || 'en',
+        accent: payload.accent || 'en-US',
+        gender: payload.gender,
+        modelRef: 'Kokoro-82M-v1.0-ONNX',
+        voiceConfig: {
+          kokoroVoiceId: payload.kokoroVoiceId,
+          timbreDescription: 'Custom configured local speaker profile',
+          qualityGrade: 'Custom',
+          legacyPackId: payload.voiceType === 'PILOT' ? 'pilot_thomas' : 'tower_charon',
+          bandpassHz: payload.voiceType === 'PILOT' ? 1500 : 1380,
+          carrierCenterHz: payload.voiceType === 'PILOT' ? 1360 : 1270,
+          pttClickHz: payload.voiceType === 'PILOT' ? 790 : 920,
+          avionicsHumHz: payload.voiceType === 'PILOT' ? 410 : 112,
+        },
+        speed: payload.speed ?? 1.14,
+        pitch: payload.pitch ?? 1.0,
+        stability: payload.stability ?? 0.85,
+        sampleAudioUrl: '',
+        sampleText:
+          payload.sampleText ||
+          'Speedbird four five two, cleared I L S approach runway two seven right.',
+        enabled: true,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || `Failed creating profile (${res.status})`);
+    }
+    const created = data.profile as VoiceProfile;
+    this.profiles = [...this.profiles, created];
+    this.notifyProfiles();
+    return created;
+  }
+
+  public async deleteProfile(id: string): Promise<void> {
+    if (typeof fetch !== 'function') return;
+    const res = await fetch(`/api/tts/voices/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || `Failed deleting profile (${res.status})`);
+    }
+    this.profiles = this.profiles.filter(p => p.id !== id);
+    this.notifyProfiles();
   }
 
   public async resetProfiles(): Promise<VoiceProfile[]> {

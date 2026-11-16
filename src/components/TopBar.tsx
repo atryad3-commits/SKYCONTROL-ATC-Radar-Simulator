@@ -21,6 +21,7 @@ import {
   Award,
   UserCheck,
   AlertTriangle,
+  Sliders,
 } from 'lucide-react';
 
 interface TopBarProps {
@@ -29,6 +30,7 @@ interface TopBarProps {
   onOpenOperationsHub: () => void;
   onOpenAccount: () => void;
   onToggleLayerMenu: () => void;
+  onOpenAudioStudio?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -37,6 +39,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenOperationsHub,
   onOpenAccount,
   onToggleLayerMenu,
+  onOpenAudioStudio,
 }) => {
   const airport = useSimulationStore(state => state.airport);
   const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
@@ -212,6 +215,18 @@ export const TopBar: React.FC<TopBarProps> = ({
         >
           {audioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
         </button>
+
+        {/* Audio Studio */}
+        {onOpenAudioStudio && (
+          <button
+            onClick={onOpenAudioStudio}
+            className="flex items-center gap-1 px-2 py-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#00e5ff] border border-[#1e4a31] rounded transition-colors whitespace-nowrap shrink-0"
+            title="استودیوی مدیریت صدای آفلاین، کتابخانه و افکت VHF"
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">Audio Studio</span>
+          </button>
+        )}
 
         {/* Layers */}
         <button

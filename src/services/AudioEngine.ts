@@ -535,6 +535,7 @@ export class AudioEngine {
     bypassDsp?: boolean;
     settingsOverride?: VhfRadioSettings;
     shouldAbort?: () => boolean;
+    onError?: (err: unknown) => void;
   }): Promise<boolean> {
     const shouldAbort = params.shouldAbort ?? (() => false);
     if (shouldAbort() || params.wavBytes.byteLength <= 44) return false;
@@ -556,7 +557,8 @@ export class AudioEngine {
         settingsOverride: params.settingsOverride,
         shouldAbort,
       });
-    } catch {
+    } catch (err) {
+      params.onError?.(err);
       return false;
     }
   }

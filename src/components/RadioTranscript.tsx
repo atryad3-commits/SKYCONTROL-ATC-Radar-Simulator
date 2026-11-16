@@ -6,7 +6,7 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
-import { Radio, Volume2, VolumeX, Mic, Headset, CloudSun, Sliders, Database, Waves } from 'lucide-react';
+import { Radio, Volume2, VolumeX, Mic, Headset, CloudSun, Sliders, Database, Waves, Activity } from 'lucide-react';
 import {
   radioAudio,
   TOWER_VOICE_PROFILES,
@@ -14,11 +14,13 @@ import {
   OfflineVoiceOption,
 } from '../audio/radioAudio';
 import { VHF_RADIO_PRESETS, VhfRadioSettings } from '../audio/vhfRadioDsp';
-import { VoiceEngineModal } from './VoiceEngineModal';
-import { VoiceLibraryModal } from './VoiceLibraryModal';
-import { VhfRadioSettingsModal } from './VhfRadioSettingsModal';
+import { AudioStudioModal, AudioStudioTab } from './AudioStudioModal';
 
-export const RadioTranscript: React.FC = () => {
+interface RadioTranscriptProps {
+  onOpenAudioStudio?: (tab: AudioStudioTab) => void;
+}
+
+export const RadioTranscript: React.FC<RadioTranscriptProps> = ({ onOpenAudioStudio }) => {
   const radioMessages = useSimulationStore(state => state.radioMessages);
   const airportProfile = useSimulationStore(state => state.airportProfile);
   const aircraft = useSimulationStore(state => state.aircraft);
@@ -32,11 +34,20 @@ export const RadioTranscript: React.FC = () => {
   const broadcastWeatherAdvisory = useSimulationStore(state => state.broadcastWeatherAdvisory);
 
   const [offlineVoices, setOfflineVoices] = useState<OfflineVoiceOption[]>([]);
-  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
-  const [isLibraryModalOpen, setIsLibraryModalOpen] = useState(false);
-  const [isVhfModalOpen, setIsVhfModalOpen] = useState(false);
+  const [localStudioOpen, setLocalStudioOpen] = useState(false);
+  const [localStudioTab, setLocalStudioTab] = useState<AudioStudioTab>('voices');
   const [vhfSettings, setVhfSettings] = useState<VhfRadioSettings>(radioAudio.getVhfSettings());
   const listTopRef = useRef<HTMLDivElement | null>(null);
+
+  const openStudioTab = (tab: AudioStudioTab) => {
+    radioAudio.initAudioContext();
+    if (onOpenAudioStudio) {
+      onOpenAudioStudio(tab);
+    } else {
+      setLocalStudioTab(tab);
+      setLocalStudioOpen(true);
+    }
+  };
 
   useEffect(() => {
     const unsubVoices = radioAudio.onVoicesChange(voices => setOfflineVoices(voices));
@@ -182,36 +193,27 @@ export const RadioTranscript: React.FC = () => {
           </label>
 
           <button
-            onClick={() => {
-              radioAudio.initAudioContext();
-              setIsVoiceModalOpen(true);
-            }}
+            onClick={() => openStudioTab('voices')}
             className="px-2 py-0.5 bg-[#0d1f15] hover:bg-[#163625] text-[#00e5ff] border border-[#1e4d35] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
-            title="مدیریت مدل آفلاین Kokoro-82M و ۱۵ پروفایل صوتی"
+            title="Audio Studio · Voice Profiles & Engine (Kokoro-82M)"
           >
             <Sliders className="w-3 h-3" />
             <span>Voices · 15</span>
           </button>
 
           <button
-            onClick={() => {
-              radioAudio.initAudioContext();
-              setIsLibraryModalOpen(true);
-            }}
+            onClick={() => openStudioTab('library')}
             className="px-2 py-0.5 bg-[#0d1f15] hover:bg-[#163625] text-[#00ff66] border border-[#1e4d35] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
-            title="مدیریت کتابخانه صوتی آفلاین (Pre-generated Audio Library)"
+            title="Audio Studio · Pre-generated Offline Audio Library"
           >
             <Database className="w-3 h-3" />
             <span>Library</span>
           </button>
 
           <button
-            onClick={() => {
-              radioAudio.initAudioContext();
-              setIsVhfModalOpen(true);
-            }}
+            onClick={() => openStudioTab('effects')}
             className="px-2 py-0.5 bg-[#0d1f15] hover:bg-[#163625] text-[#ffd166] border border-[#1e4d35] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
-            title="تنظیمات پردازشگر رادیویی VHF، پریست‌ها و پیش‌نمایش Clean در مقابل VHF"
+            title="Audio Studio · VHF Radio Effects & A/B Preview"
           >
             <Waves className="w-3 h-3" />
             <span>
@@ -222,6 +224,15 @@ export const RadioTranscript: React.FC = () => {
                   ? 'Custom'
                   : VHF_RADIO_PRESETS[vhfSettings.preset]?.shortName || vhfSettings.preset}
             </span>
+          </button>
+
+          <button
+            onClick={() => openStudioTab('diagnostics')}
+            className="px-2 py-0.5 bg-[#0d1f15] hover:bg-[#163625] text-[#a2f5bf] border border-[#1e4d35] rounded text-[10px] flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Audio Studio · Diagnostics & Telemetry"
+          >
+            <Activity className="w-3 h-3" />
+            <span>Diagnostics</span>
           </button>
 
           <button
@@ -285,18 +296,13 @@ export const RadioTranscript: React.FC = () => {
         ))}
       </div>
 
-      <VoiceEngineModal
-        isOpen={isVoiceModalOpen}
-        onClose={() => setIsVoiceModalOpen(false)}
-      />
-      <VoiceLibraryModal
-        isOpen={isLibraryModalOpen}
-        onClose={() => setIsLibraryModalOpen(false)}
-      />
-      <VhfRadioSettingsModal
-        isOpen={isVhfModalOpen}
-        onClose={() => setIsVhfModalOpen(false)}
-      />
+      {!onOpenAudioStudio && (
+        <AudioStudioModal
+          isOpen={localStudioOpen}
+          initialTab={localStudioTab}
+          onClose={() => setLocalStudioOpen(false)}
+        />
+      )}
     </div>
   );
 };

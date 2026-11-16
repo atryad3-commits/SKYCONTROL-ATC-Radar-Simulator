@@ -41,6 +41,7 @@ import {
   formatPhraseForSpeech,
   buildPilotInitialContact,
 } from '../audio/radioAudio';
+import { GlobalAudioSettings } from '../../shared/audioStudioTypes';
 import { RunwayOccupancyManager } from '../engine/runwayOccupancy';
 import {
   stepTakeoffSequence,
@@ -167,6 +168,7 @@ export interface SimulationStore {
   setAudioMuted: (muted: boolean) => void;
   setAudioVolume: (vol: number) => void;
   setTowerVoice: (voiceId: TowerVoiceId) => void;
+  syncGlobalAudioSettings: (settings: GlobalAudioSettings, applyPreset?: boolean) => void;
   toggleLayer: (layer: keyof RadarLayers) => void;
   spawnInbound: () => void;
   spawnDeparture: () => void;
@@ -1207,6 +1209,15 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   setTowerVoice: voiceId => {
     radioAudio.setTowerVoiceId(voiceId);
     set({ towerVoiceId: voiceId });
+  },
+
+  syncGlobalAudioSettings: (settings, applyPreset = false) => {
+    radioAudio.applyGlobalAudioSettings(settings, { applyPreset });
+    set({
+      audioMuted: !settings.audioEnabled,
+      audioVolume: settings.masterVolume,
+      towerVoiceId: radioAudio.getTowerVoiceId(),
+    });
   },
 
   toggleLayer: layer => {

@@ -1,0 +1,16 @@
+{
+  "audioEnabled": true,
+  "masterVolume": 0.85,
+  "ttsEnabled": true,
+  "backgroundGenerationEnabled": true,
+  "prewarmReadbacksEnabled": true,
+  "defaultVoices": {
+    "tower": "charon",
+    "approach": "approach_zephyr",
+    "ground": "ground_puck",
+    "pilotStrategy": "airline_matched"
+  },
+  "defaultRadioPreset": "normal_aviation",
+  "maxCacheSizeMb": 250,
+  "updatedAt": "2026-11-16T09:56:04.209Z"
+}
