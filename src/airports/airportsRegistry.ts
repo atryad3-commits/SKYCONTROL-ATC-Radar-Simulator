@@ -7,6 +7,8 @@
 import { Airport, AirportProfile, Runway, Waypoint } from '../types';
 import { RunwayGeometry } from '../engine/runwayGeometry';
 import { HEATHROW_AIRPORT, HEATHROW_RUNWAY_GEOMETRIES } from './heathrow';
+import { attachProceduresToAirport } from './procedures';
+import { attachTerrainToAirport } from './terrain';
 
 const FEET_PER_NM = 6076.12;
 
@@ -135,7 +137,7 @@ const EGLL_PROFILE: AirportProfile = {
   category: 'International',
   runwayLayoutLabel: 'Parallel E/W (27R/27L · 09L/09R)',
   difficultyLabel: 'Standard',
-  summaryFa: 'فرودگاه بین‌المللی هیترو لندن با دو باند موازی شرق به غرب، ترافیک تجاری متنوع و الگوهای هولدینگ استاندارد.',
+  summary: 'London Heathrow International featuring dual parallel East/West runways (27R/27L & 09L/09R), dense commercial traffic, and standard holding stacks.',
   defaultWeather: {
     windDirection: 260,
     windSpeed: 12,
@@ -188,7 +190,7 @@ const OIII_WAYPOINTS: Waypoint[] = [
   { name: 'RUS', description: 'Rustam 8 NM Final 29R', position: { x: 8.5, y: -2.8 } },
 ];
 
-const OIII_AIRPORT: Airport = {
+const OIII_AIRPORT: Airport = attachTerrainToAirport(attachProceduresToAirport({
   icao: 'OIII',
   iata: 'THR',
   name: 'Tehran Mehrabad',
@@ -208,7 +210,7 @@ const OIII_AIRPORT: Airport = {
   },
   runways: [...oiiiNorth.runways, ...oiiiSouth.runways],
   waypoints: OIII_WAYPOINTS,
-};
+}));
 
 const OIII_PROFILE: AirportProfile = {
   airport: OIII_AIRPORT,
@@ -217,7 +219,7 @@ const OIII_PROFILE: AirportProfile = {
   category: 'International',
   runwayLayoutLabel: 'Parallel 290°/110° (29R/29L · 11L/11R)',
   difficultyLabel: 'Moderate',
-  summaryFa: 'فرودگاه بین‌المللی مهرآباد تهران با ارتفاع ۳۹۶۲ پا، باندهای موازی ۲۹ و ۱۱ و تقرب زاویه‌دار ۲۹۰ درجه.',
+  summary: 'Tehran Mehrabad High-Elevation International (3,962 ft AMSL) with parallel 290°/110° runways, high Alborz northern terrain, and high-energy approaches.',
   defaultWeather: {
     windDirection: 285,
     windSpeed: 14,
@@ -269,7 +271,7 @@ const KJFK_WAYPOINTS: Waypoint[] = [
   { name: 'ZIGGY', description: '04L Initial Fix 10 NM', position: { x: -6.5, y: -7.8 }, isInitialApproachFix: true },
 ];
 
-const KJFK_AIRPORT: Airport = {
+const KJFK_AIRPORT: Airport = attachTerrainToAirport(attachProceduresToAirport({
   icao: 'KJFK',
   iata: 'JFK',
   name: 'New York Kennedy',
@@ -289,7 +291,7 @@ const KJFK_AIRPORT: Airport = {
   },
   runways: [...jfk31.runways, ...jfk04.runways],
   waypoints: KJFK_WAYPOINTS,
-};
+}));
 
 const KJFK_PROFILE: AirportProfile = {
   airport: KJFK_AIRPORT,
@@ -298,7 +300,7 @@ const KJFK_PROFILE: AirportProfile = {
   category: 'International',
   runwayLayoutLabel: 'Intersecting 310° & 040° (31L/04L)',
   difficultyLabel: 'Challenging',
-  summaryFa: 'فرودگاه جان اف کندی نیویورک با باندهای متقاطع ۳۱ چپ و ۰۴ چپ؛ نیازمند زمان‌بندی دقیق تلاقی پروازها.',
+  summary: 'New York John F. Kennedy International with intersecting runways 31L and 04L, coastal airspace, and complex crossing-runway sequencing.',
   defaultWeather: {
     windDirection: 330,
     windSpeed: 16,
@@ -350,7 +352,7 @@ const TRN1_WAYPOINTS: Waypoint[] = [
   { name: 'APX24', description: '10 NM NE Final 24', position: { x: 9.4, y: 5.4 }, isInitialApproachFix: true },
 ];
 
-const TRN1_AIRPORT: Airport = {
+const TRN1_AIRPORT: Airport = attachTerrainToAirport(attachProceduresToAirport({
   icao: 'TRN1',
   iata: 'XWA',
   name: 'Crosswind Ridge Academy',
@@ -370,7 +372,7 @@ const TRN1_AIRPORT: Airport = {
   },
   runways: [...trn1NS.runways, ...trn1SW.runways],
   waypoints: TRN1_WAYPOINTS,
-};
+}));
 
 const TRN1_PROFILE: AirportProfile = {
   airport: TRN1_AIRPORT,
@@ -379,7 +381,7 @@ const TRN1_PROFILE: AirportProfile = {
   category: 'Training',
   runwayLayoutLabel: 'X-Crossing 360° & 240° (36/24)',
   difficultyLabel: 'High Crosswind',
-  summaryFa: 'پایگاه تمرینی تخصصی با باندهای متقاطع X و باد جانبی شدید ۲۵ تا ۳۶ نات برای مهارت زاویه خرچنگی و انتخاب باند.',
+  summary: 'Specialized Alpine training airfield with intersecting X-runways and 25–36 kt crosswinds for drift correction and runway conflict practice.',
   defaultWeather: {
     windDirection: 275,
     windSpeed: 26,
@@ -431,7 +433,7 @@ const TRN2_WAYPOINTS: Waypoint[] = [
   { name: 'ILS20', description: '10 NM Final 20', position: { x: 4.5, y: 10.6 }, isInitialApproachFix: true },
 ];
 
-const TRN2_AIRPORT: Airport = {
+const TRN2_AIRPORT: Airport = attachTerrainToAirport(attachProceduresToAirport({
   icao: 'TRN2',
   iata: 'DLT',
   name: 'Converging Delta Base',
@@ -451,7 +453,7 @@ const TRN2_AIRPORT: Airport = {
   },
   runways: [...trn2A.runways, ...trn2B.runways],
   waypoints: TRN2_WAYPOINTS,
-};
+}));
 
 const TRN2_PROFILE: AirportProfile = {
   airport: TRN2_AIRPORT,
@@ -460,7 +462,7 @@ const TRN2_PROFILE: AirportProfile = {
   category: 'Training',
   runwayLayoutLabel: 'Converging V (15/33 · 20/02)',
   difficultyLabel: 'Challenging',
-  summaryFa: 'پایگاه تمرینی دلتا با باندهای همگرا (۱۵ و ۲۰ درجه) برای تمرین ترافیک فشرده و جلوگیری از تداخل Go-Around.',
+  summary: 'Delta training sector featuring converging 150°/200° runways designed for high-density sequencing and missed-approach go-around coordination.',
   defaultWeather: {
     windDirection: 175,
     windSpeed: 16,

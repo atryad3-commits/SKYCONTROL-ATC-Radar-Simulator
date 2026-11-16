@@ -156,7 +156,7 @@ export const RadioTranscript: React.FC<RadioTranscriptProps> = ({ onOpenAudioStu
           {/* User-Selectable Offline Tower / ATC Controller Voice */}
           <label
             className="flex items-center gap-1 text-[10px] text-[#7cc99c] bg-[#0d1f15] border border-[#1e4d35] rounded px-1.5 py-0.5 max-w-[230px]"
-            title="انتخاب صدای کنترلر برج مراقبت (آفلاین · از صداهای سیستم)"
+            title="Select offline Tower ATC voice profile"
           >
             <Headset className="w-3 h-3 text-[#00e5ff] shrink-0" />
             <span className="text-[#558a6a] hidden sm:inline">TOWER:</span>
@@ -166,7 +166,7 @@ export const RadioTranscript: React.FC<RadioTranscriptProps> = ({ onOpenAudioStu
               aria-label="Tower ATC Voice"
               className="bg-transparent text-[#00e5ff] font-semibold focus:outline-none cursor-pointer text-[10px] truncate max-w-[175px]"
             >
-              <optgroup label="پک صداهای واقعی برج (آفلاین داخلی)" className="bg-[#07100b] text-[#7cc99c]">
+              <optgroup label="Built-in Offline Tower Voices" className="bg-[#07100b] text-[#7cc99c]">
                 {TOWER_VOICE_PROFILES.map(profile => (
                   <option key={profile.id} value={profile.id} className="bg-[#07100b] text-[#d1e7dd]">
                     {profile.shortLabel}
@@ -175,7 +175,7 @@ export const RadioTranscript: React.FC<RadioTranscriptProps> = ({ onOpenAudioStu
               </optgroup>
               {offlineVoices.length > 0 && (
                 <optgroup
-                  label={`صداهای نصب‌شده دستگاه (${offlineVoices.length})`}
+                  label={`Device Installed Voices (${offlineVoices.length})`}
                   className="bg-[#07100b] text-[#7cc99c]"
                 >
                   {offlineVoices.map(v => (

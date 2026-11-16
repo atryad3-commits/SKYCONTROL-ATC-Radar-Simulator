@@ -13,6 +13,7 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
+import { computeDefaultAirportVisibility } from '../airports/procedures';
 import { calculateBearing, calculateDistance, normalizeHeading } from '../engine/physics';
 import { TrackStatus, RadarTrack } from '../engine/radarTracker';
 import { getAltitudeColor, getAltitudeRgba, ALTITUDE_BANDS } from '../utils/altitudeColor';
@@ -24,10 +25,14 @@ import {
   ZoomIn, 
   ZoomOut, 
   Crosshair, 
-  RotateCcw,
   Plane,
-  Radio
+  Radio,
+  Eye,
+  EyeOff,
+  Layers,
+  Mountain
 } from 'lucide-react';
+import type { RadarLayers } from '../store/simulationStore';
 
 // Active holding pattern geometry computed dynamically from airport waypoints
 interface HoldingStackDef {
@@ -50,10 +55,31 @@ export const RadarCanvas: React.FC = () => {
   const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
   const activeDepartureRunwayId = useSimulationStore(state => state.activeDepartureRunwayId);
   const radarLayers = useSimulationStore(state => state.radarLayers);
+  const perAirportVisibility = useSimulationStore(state => state.perAirportVisibility);
   const conflicts = useSimulationStore(state => state.conflicts);
   const radarTracks = useSimulationStore(state => state.radarTracks);
   const antennaAzimuth = useSimulationStore(state => state.antennaAzimuth);
   const activeTransmission = useSimulationStore(state => state.activeTransmission);
+
+  const airportVisibility = useMemo(
+    () => perAirportVisibility[airport.icao] || computeDefaultAirportVisibility(airport),
+    [perAirportVisibility, airport]
+  );
+
+  const visibleWaypointSet = useMemo(
+    () => new Set(airportVisibility.visibleWaypoints),
+    [airportVisibility]
+  );
+
+  const visibleStarSet = useMemo(
+    () => new Set(airportVisibility.visibleStarIds),
+    [airportVisibility]
+  );
+
+  const visibleSidSet = useMemo(
+    () => new Set(airportVisibility.visibleSidIds),
+    [airportVisibility]
+  );
 
   const selectedAircraft = useMemo(
     () => aircraft.find(a => a.id === selectedAircraftId) || null,
@@ -78,10 +104,26 @@ export const RadarCanvas: React.FC = () => {
   const appendWaypointRoute = useSimulationStore(state => state.appendWaypointRoute);
   const vectorToIntercept = useSimulationStore(state => state.vectorToIntercept);
   const repositionTag = useSimulationStore(state => state.repositionTag);
+  const toggleLayer = useSimulationStore(state => state.toggleLayer);
+  const setAllRadarLayers = useSimulationStore(state => state.setAllRadarLayers);
+  const applyRadarDeclutter = useSimulationStore(state => state.applyRadarDeclutter);
 
-  // Radar Viewport Transformation State
+  // Radar Viewport Transformation State (wide zoom: 2.5 NM approach close-up to 140 NM enroute)
+  const MIN_RANGE_NM = 2.5;
+  const MAX_RANGE_NM = 140;
   const [rangeNM, setRangeNM] = useState<number>(35);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [showScopeControls, setShowScopeControls] = useState<boolean>(false);
+
+  const zoomInStep = useCallback((prev: number) => {
+    const step = prev <= 6 ? 0.5 : prev <= 15 ? 2.5 : prev <= 45 ? 5 : 15;
+    return Math.max(MIN_RANGE_NM, Number((prev - step).toFixed(1)));
+  }, []);
+
+  const zoomOutStep = useCallback((prev: number) => {
+    const step = prev < 6 ? 0.5 : prev < 15 ? 2.5 : prev < 45 ? 5 : 15;
+    return Math.min(MAX_RANGE_NM, Number((prev + step).toFixed(1)));
+  }, []);
 
   // Active radar tool & route chain mode
   const [activeTool, setActiveTool] = useState<RadarTool>('SELECT');
@@ -178,11 +220,11 @@ export const RadarCanvas: React.FC = () => {
           break;
         case '+':
         case '=':
-          setRangeNM(prev => Math.max(12, prev - 5));
+          setRangeNM(zoomInStep);
           break;
         case '-':
         case '_':
-          setRangeNM(prev => Math.min(65, prev + 5));
+          setRangeNM(zoomOutStep);
           break;
         case 'c':
         case 'C':
@@ -193,7 +235,7 @@ export const RadarCanvas: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [zoomInStep, zoomOutStep]);
 
   // Main Canvas Render Loop
   useEffect(() => {
@@ -224,6 +266,166 @@ export const RadarCanvas: React.FC = () => {
     // 1. Dark CRT Phosphor Scope Background
     ctx.fillStyle = '#030805';
     ctx.fillRect(0, 0, width, height);
+
+    // 1b. Topographical Terrain, Elevation Contours, Rivers/Water & Peaks Backdrop
+    if (radarLayers.terrain && airport.terrainFeatures && airport.terrainFeatures.length > 0) {
+      ctx.save();
+      for (const feat of airport.terrainFeatures) {
+        if (feat.kind === 'water' && feat.points.length >= 3) {
+          ctx.beginPath();
+          const p0 = worldToScreen(feat.points[0].x, feat.points[0].y);
+          ctx.moveTo(p0.sx, p0.sy);
+          let sumX = p0.sx;
+          let sumY = p0.sy;
+          let minX = p0.sx;
+          let maxX = p0.sx;
+          for (let i = 1; i < feat.points.length; i++) {
+            const p = worldToScreen(feat.points[i].x, feat.points[i].y);
+            ctx.lineTo(p.sx, p.sy);
+            sumX += p.sx;
+            sumY += p.sy;
+            if (p.sx < minX) minX = p.sx;
+            if (p.sx > maxX) maxX = p.sx;
+          }
+          ctx.closePath();
+          ctx.fillStyle = 'rgba(8, 44, 66, 0.52)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(42, 146, 185, 0.44)';
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+
+          if (feat.label && maxX - minX > 36) {
+            ctx.fillStyle = 'rgba(84, 186, 224, 0.58)';
+            ctx.font = 'italic 9px "IBM Plex Mono", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(feat.label, sumX / feat.points.length, sumY / feat.points.length);
+            ctx.textAlign = 'start';
+          }
+        } else if ((feat.kind === 'river' || feat.kind === 'coastline') && feat.points.length >= 2) {
+          ctx.beginPath();
+          const p0 = worldToScreen(feat.points[0].x, feat.points[0].y);
+          ctx.moveTo(p0.sx, p0.sy);
+          const screenPts = [p0];
+          for (let i = 1; i < feat.points.length; i++) {
+            const p = worldToScreen(feat.points[i].x, feat.points[i].y);
+            ctx.lineTo(p.sx, p.sy);
+            screenPts.push(p);
+          }
+          if (feat.kind === 'coastline') {
+            ctx.setLineDash([7, 3]);
+            ctx.strokeStyle = 'rgba(56, 174, 206, 0.50)';
+            ctx.lineWidth = 2.0;
+          } else {
+            ctx.setLineDash([]);
+            ctx.strokeStyle = 'rgba(38, 138, 178, 0.48)';
+            ctx.lineWidth = 1.8;
+          }
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          if (feat.label && screenPts.length >= 2) {
+            const midPt = screenPts[Math.floor(screenPts.length / 2)];
+            ctx.fillStyle = 'rgba(86, 188, 224, 0.55)';
+            ctx.font = 'italic 8px "IBM Plex Mono", monospace';
+            ctx.fillText(feat.label, midPt.sx + 6, midPt.sy - 4);
+          }
+        } else if (feat.kind === 'contour' && feat.points.length >= 3) {
+          const elev = feat.elevationFt ?? 1500;
+          let fillCol = 'rgba(20, 68, 42, 0.17)';
+          let strokeCol = 'rgba(56, 142, 88, 0.28)';
+          let textCol = 'rgba(92, 176, 122, 0.58)';
+          if (elev >= 10000) {
+            fillCol = 'rgba(138, 86, 26, 0.17)';
+            strokeCol = 'rgba(222, 152, 58, 0.36)';
+            textCol = 'rgba(232, 178, 88, 0.68)';
+          } else if (elev >= 6000) {
+            fillCol = 'rgba(108, 96, 30, 0.14)';
+            strokeCol = 'rgba(182, 162, 58, 0.32)';
+            textCol = 'rgba(198, 182, 90, 0.65)';
+          } else if (elev >= 2000) {
+            fillCol = 'rgba(42, 92, 48, 0.16)';
+            strokeCol = 'rgba(88, 168, 98, 0.30)';
+            textCol = 'rgba(116, 194, 128, 0.62)';
+          }
+
+          ctx.beginPath();
+          const p0 = worldToScreen(feat.points[0].x, feat.points[0].y);
+          ctx.moveTo(p0.sx, p0.sy);
+          let sumX = p0.sx;
+          let sumY = p0.sy;
+          let minX = p0.sx;
+          let maxX = p0.sx;
+          for (let i = 1; i < feat.points.length; i++) {
+            const p = worldToScreen(feat.points[i].x, feat.points[i].y);
+            ctx.lineTo(p.sx, p.sy);
+            sumX += p.sx;
+            sumY += p.sy;
+            if (p.sx < minX) minX = p.sx;
+            if (p.sx > maxX) maxX = p.sx;
+          }
+          ctx.closePath();
+          ctx.fillStyle = fillCol;
+          ctx.fill();
+          ctx.strokeStyle = strokeCol;
+          ctx.lineWidth = 1.0;
+          ctx.stroke();
+
+          if (maxX - minX > 32) {
+            const cx = sumX / feat.points.length;
+            const cy = sumY / feat.points.length;
+            const elevTag = feat.label || `${elev.toLocaleString()}'`;
+            ctx.fillStyle = textCol;
+            ctx.font = '8px "IBM Plex Mono", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(elevTag, cx, cy);
+            ctx.textAlign = 'start';
+          }
+        } else if (feat.kind === 'peak' && feat.points.length >= 1) {
+          const p = worldToScreen(feat.points[0].x, feat.points[0].y);
+          ctx.strokeStyle = 'rgba(232, 180, 74, 0.72)';
+          ctx.fillStyle = 'rgba(232, 180, 74, 0.28)';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(p.sx, p.sy - 5);
+          ctx.lineTo(p.sx + 5, p.sy + 4);
+          ctx.lineTo(p.sx - 5, p.sy + 4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+
+          const tag = feat.label
+            ? `${feat.label}${feat.elevationFt ? ` ${feat.elevationFt.toLocaleString()}'` : ''}`
+            : `${feat.elevationFt?.toLocaleString() || ''}'`;
+          ctx.fillStyle = 'rgba(238, 190, 92, 0.76)';
+          ctx.font = 'bold 8px "IBM Plex Mono", monospace';
+          ctx.fillText(tag, p.sx + 7, p.sy + 3);
+        } else if (feat.kind === 'obstacle' && feat.points.length >= 1) {
+          const p = worldToScreen(feat.points[0].x, feat.points[0].y);
+          ctx.strokeStyle = 'rgba(240, 138, 72, 0.78)';
+          ctx.lineWidth = 1.3;
+          ctx.beginPath();
+          ctx.moveTo(p.sx, p.sy - 6);
+          ctx.lineTo(p.sx - 4, p.sy + 3);
+          ctx.moveTo(p.sx, p.sy - 6);
+          ctx.lineTo(p.sx + 4, p.sy + 3);
+          ctx.moveTo(p.sx - 4, p.sy + 3);
+          ctx.lineTo(p.sx + 4, p.sy + 3);
+          ctx.stroke();
+
+          ctx.fillStyle = 'rgba(245, 162, 96, 0.85)';
+          ctx.beginPath();
+          ctx.arc(p.sx, p.sy - 7, 1.8, 0, Math.PI * 2);
+          ctx.fill();
+
+          const tag = feat.label
+            ? `${feat.label}${feat.elevationFt ? ` ${feat.elevationFt.toLocaleString()}'` : ''}`
+            : `OBST ${feat.elevationFt?.toLocaleString() || ''}'`;
+          ctx.font = '8px "IBM Plex Mono", monospace';
+          ctx.fillText(tag, p.sx + 7, p.sy + 2);
+        }
+      }
+      ctx.restore();
+    }
 
     // 2. Rotating Plan Position Indicator (PPI) Sweep Beam & Phosphor Tail
     if (radarLayers.radarSweep) {
@@ -261,42 +463,82 @@ export const RadarCanvas: React.FC = () => {
       ctx.restore();
     }
 
-    // 3. Calibrated Range Rings (5, 10, 15, 20, 30, 40 NM)
+    // 3. Adaptive Multi-Tier Concentric Range Rings, 30° Radials & Scaling Compass Rose
     if (radarLayers.rangeRings) {
-      const rings = [5, 10, 15, 20, 30, 40];
-      ctx.strokeStyle = '#0e2b1b';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 6]);
+      let minorStep = 5;
+      let majorStep = 10;
+      if (rangeNM <= 6) {
+        minorStep = 0.5;
+        majorStep = 1;
+      } else if (rangeNM <= 14) {
+        minorStep = 1;
+        majorStep = 2;
+      } else if (rangeNM <= 30) {
+        minorStep = 2.5;
+        majorStep = 5;
+      } else if (rangeNM <= 65) {
+        minorStep = 5;
+        majorStep = 10;
+      } else {
+        minorStep = 10;
+        majorStep = 20;
+      }
 
-      for (const r of rings) {
+      const maxVisibleNM = Math.min(
+        220,
+        Math.ceil((Math.hypot(width, height) + Math.hypot(panOffset.x, panOffset.y)) / Math.max(0.1, pxPerNM)) + majorStep
+      );
+
+      // Subtle 30-degree radial azimuth spokes
+      for (let deg = 0; deg < 360; deg += 30) {
+        const rad = (deg * Math.PI) / 180;
+        const isCardinal = deg % 90 === 0;
+        const spokeLenPx = maxVisibleNM * pxPerNM;
+        ctx.strokeStyle = isCardinal ? '#0e2d1d' : '#081e12';
+        ctx.lineWidth = isCardinal ? 1.0 : 0.7;
+        ctx.beginPath();
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(centerX + spokeLenPx * Math.sin(rad), centerY - spokeLenPx * Math.cos(rad));
+        ctx.stroke();
+      }
+
+      // Concentric Minor & Major Range Rings
+      const totalSteps = Math.floor(maxVisibleNM / minorStep);
+      for (let idx = 1; idx <= totalSteps; idx++) {
+        const r = Number((idx * minorStep).toFixed(2));
         const radiusPx = r * pxPerNM;
-        if (radiusPx > 0 && radiusPx < Math.max(width, height)) {
-          ctx.beginPath();
-          ctx.arc(centerX, centerY, radiusPx, 0, Math.PI * 2);
-          ctx.stroke();
+        if (radiusPx < 14 || radiusPx > Math.max(width, height) * 1.5) continue;
 
-          // Range ring text tag
-          ctx.fillStyle = '#1c5e3a';
+        const isMajor = Math.abs(r / majorStep - Math.round(r / majorStep)) < 0.001;
+        ctx.strokeStyle = isMajor ? '#123a24' : '#092214';
+        ctx.lineWidth = isMajor ? 1.05 : 0.7;
+        ctx.setLineDash(isMajor ? [5, 5] : [2, 6]);
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radiusPx, 0, Math.PI * 2);
+        ctx.stroke();
+
+        if (isMajor) {
+          const rLabel = Number.isInteger(r) ? `${r} NM` : `${r.toFixed(1)} NM`;
+          ctx.fillStyle = '#257347';
           ctx.font = '10px "IBM Plex Mono", monospace';
-          ctx.fillText(`${r} NM`, centerX + 8, centerY - radiusPx + 12);
+          ctx.fillText(rLabel, centerX + 7, centerY - radiusPx + 11);
+          if (radiusPx > 140) {
+            ctx.fillText(rLabel, centerX + 7, centerY + radiusPx - 4);
+          }
         }
       }
       ctx.setLineDash([]);
 
-      // Cardinal axis crosshairs through airport center
-      ctx.strokeStyle = '#0c2618';
-      ctx.beginPath();
-      ctx.moveTo(centerX - 45 * pxPerNM, centerY);
-      ctx.lineTo(centerX + 45 * pxPerNM, centerY);
-      ctx.moveTo(centerX, centerY - 45 * pxPerNM);
-      ctx.lineTo(centerX, centerY + 45 * pxPerNM);
-      ctx.stroke();
-
-      // Outer 360-degree Compass Rose Azimuth Dial
-      const compassRadius = 32 * pxPerNM;
-      if (compassRadius > 80 && compassRadius < Math.max(width, height)) {
-        ctx.strokeStyle = '#143d26';
-        ctx.lineWidth = 1;
+      // Adaptive Outer 360-degree Compass Rose Azimuth Dial (scales cleanly to active zoom)
+      const roseCandidates = [2.5, 5, 10, 15, 25, 35, 50, 75, 100, 130];
+      const targetRoseNM = rangeNM * 0.88;
+      const compassNM = roseCandidates.reduce((best, cand) =>
+        Math.abs(cand - targetRoseNM) < Math.abs(best - targetRoseNM) ? cand : best
+      );
+      const compassRadius = compassNM * pxPerNM;
+      if (compassRadius > 90 && compassRadius < Math.max(width, height) * 1.15) {
+        ctx.strokeStyle = '#16452b';
+        ctx.lineWidth = 1.1;
         ctx.beginPath();
         ctx.arc(centerX, centerY, compassRadius, 0, Math.PI * 2);
         ctx.stroke();
@@ -312,15 +554,15 @@ export const RadarCanvas: React.FC = () => {
           const innerX = centerX + (compassRadius - tickLen) * Math.sin(rad);
           const innerY = centerY - (compassRadius - tickLen) * Math.cos(rad);
 
-          ctx.strokeStyle = isMajor ? '#246b43' : '#143d26';
+          ctx.strokeStyle = isMajor ? '#2b8252' : '#143d26';
           ctx.beginPath();
           ctx.moveTo(innerX, innerY);
           ctx.lineTo(outerX, outerY);
           ctx.stroke();
 
           if (isMajor) {
-            ctx.fillStyle = '#2d8553';
-            ctx.font = '9px "IBM Plex Mono", monospace';
+            ctx.fillStyle = '#339860';
+            ctx.font = 'bold 9px "IBM Plex Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             const labelRadius = compassRadius - 16;
@@ -344,21 +586,23 @@ export const RadarCanvas: React.FC = () => {
       const isArr = rwy.id === activeLandingRunwayId;
       const isDep = rwy.id === activeDepartureRunwayId;
 
-      // Runway surface concrete bar (draw once per physical pair unless highlighted)
-      const pairKey = [
-        `${rwy.threshold.x.toFixed(1)},${rwy.threshold.y.toFixed(1)}`,
-        `${rwy.endPosition.x.toFixed(1)},${rwy.endPosition.y.toFixed(1)}`,
-      ]
-        .sort()
-        .join('|');
-      if (!drawnPhysicalRunways.has(pairKey) || isArr || isDep) {
-        drawnPhysicalRunways.add(pairKey);
-        ctx.strokeStyle = isArr ? '#00ff66' : isDep ? '#00e5ff' : '#1b5e38';
-        ctx.lineWidth = isArr || isDep ? 4 : 2.5;
-        ctx.beginPath();
-        ctx.moveTo(thPos.sx, thPos.sy);
-        ctx.lineTo(endPos.sx, endPos.sy);
-        ctx.stroke();
+      if (radarLayers.runways) {
+        // Runway surface concrete bar (draw once per physical pair unless highlighted)
+        const pairKey = [
+          `${rwy.threshold.x.toFixed(1)},${rwy.threshold.y.toFixed(1)}`,
+          `${rwy.endPosition.x.toFixed(1)},${rwy.endPosition.y.toFixed(1)}`,
+        ]
+          .sort()
+          .join('|');
+        if (!drawnPhysicalRunways.has(pairKey) || isArr || isDep) {
+          drawnPhysicalRunways.add(pairKey);
+          ctx.strokeStyle = isArr ? '#00ff66' : isDep ? '#00e5ff' : '#1b5e38';
+          ctx.lineWidth = isArr || isDep ? 4 : 2.5;
+          ctx.beginPath();
+          ctx.moveTo(thPos.sx, thPos.sy);
+          ctx.lineTo(endPos.sx, endPos.sy);
+          ctx.stroke();
+        }
       }
 
       // Extended ILS Centerline Localizer Feather (15 NM) for active or primary runways
@@ -399,7 +643,9 @@ export const RadarCanvas: React.FC = () => {
             ctx.stroke();
           }
         }
+      }
 
+      if (radarLayers.runways || radarLayers.extendedCenterlines) {
         // Runway Designator Label
         ctx.fillStyle = isArr ? '#00ff88' : isDep ? '#00e5ff' : '#3a8458';
         ctx.font = isArr || isDep ? 'bold 10px "IBM Plex Mono", monospace' : '9px "IBM Plex Mono", monospace';
@@ -407,57 +653,287 @@ export const RadarCanvas: React.FC = () => {
       }
     }
 
-    // 5. Dynamic Holding Patterns for active airport
-    for (const stack of holdingStacks) {
-      const fixPos = worldToScreen(stack.x, stack.y);
-      const rad = (stack.inboundCourse * Math.PI) / 180;
-      const turnSign = stack.turnDirection === 'Right' ? 1 : -1;
-      const perpRad = rad + (turnSign * Math.PI) / 2;
-      const legNM = 3.5;
-      const offsetNM = 1.6;
-
-      const outX = stack.x - legNM * Math.sin(rad);
-      const outY = stack.y - legNM * Math.cos(rad);
-      const abX = stack.x + offsetNM * Math.sin(perpRad);
-      const abY = stack.y + offsetNM * Math.cos(perpRad);
-      const outAbX = outX + offsetNM * Math.sin(perpRad);
-      const outAbY = outY + offsetNM * Math.cos(perpRad);
-
-      const outPos = worldToScreen(outX, outY);
-      const abPos = worldToScreen(abX, abY);
-      const outAbPos = worldToScreen(outAbX, outAbY);
-
-      ctx.strokeStyle = 'rgba(0, 160, 200, 0.35)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 4]);
+    // 4b. TMA Sector Airspace Boundary & Altitude Envelope
+    if (radarLayers.tmaBoundary && airport.tmaBoundary && airport.tmaBoundary.polygon.length >= 3) {
+      const poly = airport.tmaBoundary.polygon;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0, 229, 255, 0.28)';
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([10, 6]);
       ctx.beginPath();
-      ctx.moveTo(fixPos.sx, fixPos.sy);
-      ctx.lineTo(outPos.sx, outPos.sy);
-      ctx.lineTo(outAbPos.sx, outAbPos.sy);
-      ctx.lineTo(abPos.sx, abPos.sy);
+      const firstPt = worldToScreen(poly[0].x, poly[0].y);
+      ctx.moveTo(firstPt.sx, firstPt.sy);
+      for (let i = 1; i < poly.length; i++) {
+        const pt = worldToScreen(poly[i].x, poly[i].y);
+        ctx.lineTo(pt.sx, pt.sy);
+      }
       ctx.closePath();
       ctx.stroke();
       ctx.setLineDash([]);
+
+      // TMA Sector Top Label
+      const topPt = poly.reduce((best, p) => (p.y > best.y ? p : best), poly[0]);
+      const topScr = worldToScreen(topPt.x, topPt.y);
+      const tmaTag = `${airport.tmaBoundary.sectorLabel} · ${airport.tmaBoundary.floorLabel}–${airport.tmaBoundary.ceilingLabel} · TA ${airport.tmaBoundary.transitionAltitudeFt}ft`;
+      ctx.font = 'bold 9px "IBM Plex Mono", monospace';
+      const tw = ctx.measureText(tmaTag).width + 10;
+      ctx.fillStyle = 'rgba(3, 16, 20, 0.84)';
+      ctx.fillRect(topScr.sx - tw / 2, topScr.sy - 18, tw, 14);
+      ctx.fillStyle = 'rgba(0, 229, 255, 0.85)';
+      ctx.textAlign = 'center';
+      ctx.fillText(tmaTag, topScr.sx, topScr.sy - 8);
+      ctx.textAlign = 'start';
+      ctx.restore();
     }
 
-    // 6. Navigation Fixes & TMA Waypoints
-    if (radarLayers.waypointLabels) {
-      for (const wp of airport.waypoints) {
-        const pos = worldToScreen(wp.position.x, wp.position.y);
+    // Helper for drawing a small directional arrowhead at leg midpoint
+    const drawLegArrow = (x1: number, y1: number, x2: number, y2: number, color: string) => {
+      const mx = (x1 + x2) / 2;
+      const my = (y1 + y2) / 2;
+      const ang = Math.atan2(y2 - y1, x2 - x1);
+      const size = 6;
+      ctx.save();
+      ctx.translate(mx, my);
+      ctx.rotate(ang);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(size, 0);
+      ctx.lineTo(-size * 0.7, -size * 0.55);
+      ctx.lineTo(-size * 0.7, size * 0.55);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    };
 
-        ctx.strokeStyle = wp.isHoldingFix ? '#00e5ff' : '#338855';
-        ctx.lineWidth = 1.5;
+    const wpMap = new Map(airport.waypoints.map(w => [w.name, w]));
+
+    // 4c. Published STAR Arrival Corridors (per-airport toggleable)
+    if (radarLayers.starCorridors && airport.approachRoutes) {
+      for (const star of airport.approachRoutes) {
+        if (!visibleStarSet.has(star.id)) continue;
+        const servesActiveArr = star.runwayIds.includes(activeLandingRunwayId);
+        const lineColor = servesActiveArr
+          ? 'rgba(0, 229, 255, 0.50)'
+          : 'rgba(0, 229, 255, 0.20)';
+        const labelColor = servesActiveArr
+          ? 'rgba(0, 229, 255, 0.92)'
+          : 'rgba(0, 229, 255, 0.52)';
+
+        ctx.save();
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = servesActiveArr ? 1.6 : 1.0;
+
+        for (let lIdx = 0; lIdx < star.legs.length; lIdx++) {
+          const leg = star.legs[lIdx];
+          const fromWp = wpMap.get(leg.fromFix);
+          const toWp = wpMap.get(leg.toFix);
+          if (!fromWp || !toWp) continue;
+
+          const p1 = worldToScreen(fromWp.position.x, fromWp.position.y);
+          const p2 = worldToScreen(toWp.position.x, toWp.position.y);
+
+          ctx.beginPath();
+          ctx.moveTo(p1.sx, p1.sy);
+          ctx.lineTo(p2.sx, p2.sy);
+          ctx.stroke();
+
+          drawLegArrow(p1.sx, p1.sy, p2.sx, p2.sy, lineColor);
+
+          if (radarLayers.procedureRestrictions && Math.hypot(p2.sx - p1.sx, p2.sy - p1.sy) > 36) {
+            const mx = (p1.sx + p2.sx) / 2;
+            const my = (p1.sy + p2.sy) / 2;
+            const parts = [
+              lIdx === 0 ? star.name : null,
+              `${leg.courseDeg.toString().padStart(3, '0')}°`,
+              `${leg.distanceNM.toFixed(1)}NM`,
+              leg.altitudeConstraint || null,
+              leg.speedLimitKt ? `${leg.speedLimitKt}KT` : null,
+            ].filter(Boolean);
+            const tag = parts.join(' · ');
+            ctx.font = '9px "IBM Plex Mono", monospace';
+            const tw = ctx.measureText(tag).width + 8;
+            ctx.fillStyle = 'rgba(3, 16, 20, 0.82)';
+            ctx.fillRect(mx - tw / 2, my - 16, tw, 13);
+            ctx.fillStyle = labelColor;
+            ctx.textAlign = 'center';
+            ctx.fillText(tag, mx, my - 6);
+            ctx.textAlign = 'start';
+          }
+        }
+        ctx.restore();
+      }
+    }
+
+    // 4d. Published SID Departure Corridors (per-airport toggleable)
+    if (radarLayers.sidCorridors && airport.departureRoutes) {
+      for (const sid of airport.departureRoutes) {
+        if (!visibleSidSet.has(sid.id)) continue;
+        const servesActiveDep = sid.runwayIds.includes(activeDepartureRunwayId);
+        const lineColor = servesActiveDep
+          ? 'rgba(255, 209, 102, 0.52)'
+          : 'rgba(255, 209, 102, 0.20)';
+        const labelColor = servesActiveDep
+          ? 'rgba(255, 209, 102, 0.92)'
+          : 'rgba(255, 209, 102, 0.50)';
+
+        ctx.save();
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = servesActiveDep ? 1.5 : 1.0;
+        ctx.setLineDash([7, 4]);
+
+        for (let lIdx = 0; lIdx < sid.legs.length; lIdx++) {
+          const leg = sid.legs[lIdx];
+          const fromWp = wpMap.get(leg.fromFix);
+          const toWp = wpMap.get(leg.toFix);
+          if (!fromWp || !toWp) continue;
+
+          const p1 = worldToScreen(fromWp.position.x, fromWp.position.y);
+          const p2 = worldToScreen(toWp.position.x, toWp.position.y);
+
+          ctx.beginPath();
+          ctx.moveTo(p1.sx, p1.sy);
+          ctx.lineTo(p2.sx, p2.sy);
+          ctx.stroke();
+
+          drawLegArrow(p1.sx, p1.sy, p2.sx, p2.sy, lineColor);
+
+          if (radarLayers.procedureRestrictions && Math.hypot(p2.sx - p1.sx, p2.sy - p1.sy) > 36) {
+            const mx = (p1.sx + p2.sx) / 2;
+            const my = (p1.sy + p2.sy) / 2;
+            const parts = [
+              lIdx === 0 ? sid.name : null,
+              `${leg.courseDeg.toString().padStart(3, '0')}°`,
+              `${leg.distanceNM.toFixed(1)}NM`,
+              leg.altitudeConstraint || null,
+              leg.speedLimitKt ? `${leg.speedLimitKt}KT` : null,
+            ].filter(Boolean);
+            const tag = parts.join(' · ');
+            ctx.font = '9px "IBM Plex Mono", monospace';
+            const tw = ctx.measureText(tag).width + 8;
+            ctx.fillStyle = 'rgba(20, 17, 5, 0.82)';
+            ctx.fillRect(mx - tw / 2, my + 4, tw, 13);
+            ctx.fillStyle = labelColor;
+            ctx.textAlign = 'center';
+            ctx.fillText(tag, mx, my + 14);
+            ctx.textAlign = 'start';
+          }
+        }
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+
+    // 5. Dynamic Holding Patterns for visible holding fixes
+    if (radarLayers.holdingStacks) {
+      for (const stack of holdingStacks) {
+        if (!visibleWaypointSet.has(stack.name)) continue;
+        const fixPos = worldToScreen(stack.x, stack.y);
+        const rad = (stack.inboundCourse * Math.PI) / 180;
+        const turnSign = stack.turnDirection === 'Right' ? 1 : -1;
+        const perpRad = rad + (turnSign * Math.PI) / 2;
+        const legNM = 3.5;
+        const offsetNM = 1.6;
+
+        const outX = stack.x - legNM * Math.sin(rad);
+        const outY = stack.y - legNM * Math.cos(rad);
+        const abX = stack.x + offsetNM * Math.sin(perpRad);
+        const abY = stack.y + offsetNM * Math.cos(perpRad);
+        const outAbX = outX + offsetNM * Math.sin(perpRad);
+        const outAbY = outY + offsetNM * Math.cos(perpRad);
+
+        const outPos = worldToScreen(outX, outY);
+        const abPos = worldToScreen(abX, abY);
+        const outAbPos = worldToScreen(outAbX, outAbY);
+
+        ctx.strokeStyle = 'rgba(0, 160, 200, 0.35)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
         ctx.beginPath();
-        const triSize = wp.isHoldingFix ? 6 : 4.5;
-        ctx.moveTo(pos.sx, pos.sy - triSize);
-        ctx.lineTo(pos.sx + triSize, pos.sy + triSize);
-        ctx.lineTo(pos.sx - triSize, pos.sy + triSize);
+        ctx.moveTo(fixPos.sx, fixPos.sy);
+        ctx.lineTo(outPos.sx, outPos.sy);
+        ctx.lineTo(outAbPos.sx, outAbPos.sy);
+        ctx.lineTo(abPos.sx, abPos.sy);
         ctx.closePath();
         ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
 
-        ctx.fillStyle = wp.isHoldingFix ? '#00e5ff' : '#55aa77';
-        ctx.font = wp.isHoldingFix ? 'bold 11px "IBM Plex Mono", monospace' : '10px "IBM Plex Mono", monospace';
-        ctx.fillText(wp.name, pos.sx + 7, pos.sy + 4);
+    // 6. Navigation Fixes & TMA Waypoints (Role-specific IAF/FAF/EXIT/HOLD symbology)
+    if (radarLayers.waypointLabels) {
+      for (const wp of airport.waypoints) {
+        if (!visibleWaypointSet.has(wp.name)) continue;
+        const pos = worldToScreen(wp.position.x, wp.position.y);
+        const role =
+          wp.role ||
+          (wp.isFinalApproachFix
+            ? 'FAF'
+            : wp.isInitialApproachFix
+            ? 'IAF'
+            : wp.isDepartureExit
+            ? 'EXIT'
+            : wp.isHoldingFix
+            ? 'HOLD'
+            : 'FIX');
+
+        if (role === 'EXIT') {
+          // Radar Exit Gate: Amber Square/Diamond
+          ctx.strokeStyle = '#ffd166';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(pos.sx, pos.sy - 6);
+          ctx.lineTo(pos.sx + 6, pos.sy);
+          ctx.lineTo(pos.sx, pos.sy + 6);
+          ctx.lineTo(pos.sx - 6, pos.sy);
+          ctx.closePath();
+          ctx.stroke();
+        } else if (role === 'FAF') {
+          // Final Approach Fix: Green Maltese Cross Marker
+          ctx.strokeStyle = '#00ff66';
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(pos.sx - 5, pos.sy - 5);
+          ctx.lineTo(pos.sx + 5, pos.sy + 5);
+          ctx.moveTo(pos.sx + 5, pos.sy - 5);
+          ctx.lineTo(pos.sx - 5, pos.sy + 5);
+          ctx.stroke();
+        } else {
+          // IAF / HOLD / VOR Triangle
+          ctx.strokeStyle = wp.isHoldingFix ? '#00e5ff' : role === 'IAF' ? '#38bdf8' : '#338855';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          const triSize = wp.isHoldingFix || role === 'IAF' ? 6 : 4.5;
+          ctx.moveTo(pos.sx, pos.sy - triSize);
+          ctx.lineTo(pos.sx + triSize, pos.sy + triSize);
+          ctx.lineTo(pos.sx - triSize, pos.sy + triSize);
+          ctx.closePath();
+          ctx.stroke();
+        }
+
+        const nameColor =
+          role === 'EXIT'
+            ? '#ffd166'
+            : role === 'FAF'
+            ? '#00ff66'
+            : wp.isHoldingFix || role === 'IAF'
+            ? '#00e5ff'
+            : '#55aa77';
+        ctx.fillStyle = nameColor;
+        ctx.font =
+          wp.isHoldingFix || role === 'IAF' || role === 'FAF' || role === 'EXIT'
+            ? 'bold 10px "IBM Plex Mono", monospace'
+            : '10px "IBM Plex Mono", monospace';
+        const roleTag = role === 'IAF' || role === 'FAF' || role === 'EXIT' ? ` [${role}]` : '';
+        ctx.fillText(`${wp.name}${roleTag}`, pos.sx + 8, pos.sy + 3);
+
+        if (radarLayers.procedureRestrictions && (wp.altitudeConstraint || wp.speedConstraintKt)) {
+          const cText = [wp.altitudeConstraint, wp.speedConstraintKt ? `${wp.speedConstraintKt}KT` : null]
+            .filter(Boolean)
+            .join(' · ');
+          ctx.font = '8px "IBM Plex Mono", monospace';
+          ctx.fillStyle = 'rgba(162, 245, 191, 0.72)';
+          ctx.fillText(cText, pos.sx + 8, pos.sy + 13);
+        }
       }
     }
 
@@ -601,7 +1077,7 @@ export const RadarCanvas: React.FC = () => {
           ctx.fill();
         }
 
-        // 7b-3. Entry Point Marker - "از کجا آمده" (Origin badge)
+        // 7b-3. Entry Point Marker (Origin badge)
         const entryPoint = ac.history[0];
         const entryPos = worldToScreen(entryPoint.x, entryPoint.y);
         const originLabel = `FROM: ${ac.origin} (${ac.airline})`;
@@ -947,7 +1423,7 @@ export const RadarCanvas: React.FC = () => {
       }
       ctx.restore();
 
-      // Active VHF Radio Transmission Animation on Target Blip ("صحبت کردن هر پرواز روی راهدار")
+      // Active VHF Radio Transmission Animation on Target Blip
       const isTransmitting = Boolean(activeTransmission && activeTransmission.callsign === ac.callsign);
       const speakerRole = isTransmitting ? activeTransmission?.speaker : null;
 
@@ -1129,8 +1605,9 @@ export const RadarCanvas: React.FC = () => {
       ctx.stroke();
 
       // Data Block Box Background
-      const boxWidth = isSelected ? 122 : 98;
-      const boxHeight = isSelected ? 49 : 38;
+      const extTag = radarLayers.extendedTargetTags;
+      const boxWidth = isSelected ? (extTag ? 152 : 122) : (extTag ? 124 : 98);
+      const boxHeight = isSelected ? (extTag ? 58 : 49) : (extTag ? 47 : 38);
       ctx.fillStyle = isSelected ? 'rgba(5, 28, 18, 0.95)' : 'rgba(7, 16, 12, 0.90)';
       ctx.strokeStyle = isTransmitting 
         ? (speakerRole === 'PILOT' ? '#00ff66' : '#00e5ff') 
@@ -1164,36 +1641,60 @@ export const RadarCanvas: React.FC = () => {
         ctx.restore();
       }
 
-      // Line 1: CALLSIGN / AIRCRAFT TYPE (+7700 Emergency tag)
+      // Line 1: CALLSIGN / AIRCRAFT TYPE (+Wake Category & 7700 Emergency tag)
+      const wakeCode = ac.category === 'Heavy' ? 'H' : ac.category === 'Large' ? 'M' : 'L';
       ctx.fillStyle = isEmergency ? '#ff4d4d' : isSelected ? '#ffffff' : primaryColor;
       ctx.font = 'bold 11px "IBM Plex Mono", monospace';
       ctx.fillText(
-        isEmergency ? `${ac.callsign} 7700` : `${ac.callsign} ${ac.aircraftType}`,
+        isEmergency
+          ? `${ac.callsign} 7700`
+          : extTag
+          ? `${ac.callsign} ${ac.aircraftType}/${wakeCode}`
+          : `${ac.callsign} ${ac.aircraftType}`,
         tagX + 4,
         tagY + 2
       );
 
-      // Line 2: ALTITUDE / CLEARED ALTITUDE (colored by altitude band for selected aircraft)
+      // Line 2: ALTITUDE / CLEARED ALTITUDE / VERTICAL SPEED RATE
       const curAlt100 = Math.round(ac.altitude / 100).toString().padStart(3, '0');
       const tgtAlt100 = Math.round(ac.targetAltitude / 100).toString().padStart(3, '0');
-      const vertSymbol = ac.verticalSpeed > 200 ? '↑' : ac.verticalSpeed < -200 ? '↓' : '=';
+      const vsHundreds = Math.round(Math.abs(ac.verticalSpeed) / 100);
+      const vertSymbol = ac.verticalSpeed > 200 ? `↑${vsHundreds}` : ac.verticalSpeed < -200 ? `↓${vsHundreds}` : '=';
       ctx.font = '10px "IBM Plex Mono", monospace';
       ctx.fillStyle = isSelected ? getAltitudeColor(ac.altitude) : isEmergency || isCritical ? '#ff3344' : isWarning ? '#ffb703' : '#a2f5bf';
       ctx.fillText(`${curAlt100} c${tgtAlt100} ${vertSymbol}`, tagX + 4, tagY + 14);
 
-      // Line 3: GROUND SPEED / HEADING / FLIGHT PHASE
+      // Line 3: GROUND SPEED / HEADING (+TRACK WHEN EXTENDED) / FLIGHT PHASE
       const gs = Math.round(ac.groundSpeed || ac.indicatedAirspeed);
       const hdg = Math.round(ac.heading).toString().padStart(3, '0');
+      const trkDeg = Math.round(ac.groundTrack ?? ac.heading).toString().padStart(3, '0');
       const phaseTag = isEmergency ? 'EMER' : ac.ilsGlideslopeCaptured ? 'GS' : ac.ilsLocalizerCaptured ? 'LOC' : ac.status.slice(0, 3).toUpperCase();
+      const hdgStr = extTag && trkDeg !== hdg ? `${hdg}/${trkDeg}°` : `${hdg}°`;
       ctx.font = '9px "IBM Plex Mono", monospace';
       ctx.fillStyle = isEmergency ? '#ff6b6b' : ac.ilsGlideslopeCaptured ? '#00e5ff' : '#73b890';
-      ctx.fillText(`${gs}kt ${hdg}° ${phaseTag}`, tagX + 4, tagY + 25);
+      ctx.fillText(`${gs}kt ${hdgStr} ${phaseTag}`, tagX + 4, tagY + 25);
 
-      // Line 4: ORIGIN -> DESTINATION ("از کجا آمده و به سمت کجا میرود")
+      // Line 4: Tactical Route / Runway / Distance Readout
+      const distStr =
+        typeof ac.distanceToThreshold === 'number'
+          ? `${ac.distanceToThreshold.toFixed(1)}NM`
+          : `${Math.hypot(ac.x, ac.y).toFixed(1)}NM`;
       if (isSelected) {
         ctx.font = 'bold 9px "IBM Plex Mono", monospace';
         ctx.fillStyle = '#00e5ff';
-        ctx.fillText(`FROM ${ac.origin} ➔ ${ac.destination} [${ac.assignedRunway}]`, tagX + 4, tagY + 36);
+        const routeChip = ac.assignedWaypoint ? `→${ac.assignedWaypoint}` : `R${ac.assignedRunway}`;
+        ctx.fillText(
+          extTag
+            ? `${ac.origin}→${ac.destination} [${routeChip} ${distStr}]`
+            : `FROM ${ac.origin} ➔ ${ac.destination} [${ac.assignedRunway}]`,
+          tagX + 4,
+          tagY + 36
+        );
+      } else if (extTag) {
+        ctx.font = '9px "IBM Plex Mono", monospace';
+        ctx.fillStyle = ac.status === 'Departing' ? '#ffd166' : '#58b384';
+        const navHint = ac.assignedWaypoint ? `→${ac.assignedWaypoint}` : `RWY ${ac.assignedRunway}`;
+        ctx.fillText(`${navHint} · ${distStr}`, tagX + 4, tagY + 35);
       }
     }
 
@@ -1246,6 +1747,10 @@ export const RadarCanvas: React.FC = () => {
     activeDepartureRunwayId,
     holdingStacks,
     radarLayers,
+    airportVisibility,
+    visibleWaypointSet,
+    visibleStarSet,
+    visibleSidSet,
     conflicts,
     antennaAzimuth,
     panOffset,
@@ -1302,8 +1807,9 @@ export const RadarCanvas: React.FC = () => {
         const tagX = blipPos.sx + tagOff.x;
         const tagY = blipPos.sy + tagOff.y;
         const isSel = ac.id === selectedAircraftId;
-        const boxWidth = isSel ? 125 : 100;
-        const boxHeight = isSel ? 50 : 40;
+        const extTag = radarLayers.extendedTargetTags;
+        const boxWidth = isSel ? (extTag ? 155 : 125) : (extTag ? 127 : 100);
+        const boxHeight = isSel ? (extTag ? 60 : 50) : (extTag ? 49 : 40);
 
         if (sx >= tagX - 4 && sx <= tagX + boxWidth + 4 && sy >= tagY - 12 && sy <= tagY + boxHeight + 4) {
           selectAircraft(ac.id);
@@ -1320,6 +1826,7 @@ export const RadarCanvas: React.FC = () => {
         const selAc = aircraft.find(a => a.id === selectedAircraftId);
         if (selAc) {
           for (const wp of airport.waypoints) {
+            if (!radarLayers.waypointLabels || !visibleWaypointSet.has(wp.name)) continue;
             const wpPos = worldToScreen(wp.position.x, wp.position.y);
             if (Math.hypot(sx - wpPos.sx, sy - wpPos.sy) <= 18) {
               if (e.shiftKey || chainRouteMode) {
@@ -1383,6 +1890,7 @@ export const RadarCanvas: React.FC = () => {
     if (activeTool === 'DIRECT_TO' && selectedAircraft) {
       let foundWp: string | null = null;
       for (const wp of airport.waypoints) {
+        if (!radarLayers.waypointLabels || !visibleWaypointSet.has(wp.name)) continue;
         const wpPos = worldToScreen(wp.position.x, wp.position.y);
         if (Math.hypot(sx - wpPos.sx, sy - wpPos.sy) <= 18) {
           foundWp = wp.name;
@@ -1469,8 +1977,10 @@ export const RadarCanvas: React.FC = () => {
 
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
-    setRangeNM(prev => Math.max(12, Math.min(65, prev * zoomFactor)));
+    const zoomFactor = e.deltaY > 0 ? 1.14 : 0.87;
+    setRangeNM(prev =>
+      Number(Math.max(MIN_RANGE_NM, Math.min(MAX_RANGE_NM, prev * zoomFactor)).toFixed(1))
+    );
   };
 
   const handleResetView = () => {
@@ -1569,37 +2079,42 @@ export const RadarCanvas: React.FC = () => {
 
         <span className="text-[#204a32]">|</span>
 
-        {/* Range preset buttons */}
-        <div className="flex items-center gap-1">
-          {[15, 25, 35, 50].map(r => (
+        {/* Range preset buttons (Approach close-up to Enroute wide area) */}
+        <div className="flex items-center gap-0.5">
+          {[5, 15, 35, 60, 100, 140].map(r => (
             <button
               key={r}
               onClick={() => setRangeNM(r)}
               className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-                Math.round(rangeNM) === r
-                  ? 'bg-[#1b442d] text-[#00ff66]'
+                Math.abs(rangeNM - r) < 0.6
+                  ? 'bg-[#1b442d] text-[#00ff66] border border-[#00ff66]/40'
                   : 'hover:bg-[#12281b] text-[#5da87d]'
               }`}
+              title={`Set radar scope range to ${r} NM`}
             >
-              {r}NM
+              {r}
             </button>
           ))}
         </div>
 
+        <span className="text-[10px] font-bold text-[#00e5ff] px-1 tabular-nums">
+          {rangeNM < 10 ? rangeNM.toFixed(1) : Math.round(rangeNM)}NM
+        </span>
+
         <span className="text-[#204a32]">|</span>
 
-        {/* Zoom controls */}
+        {/* Zoom controls (2.5 NM - 140 NM) */}
         <button
-          onClick={() => setRangeNM(prev => Math.max(12, prev - 5))}
+          onClick={() => setRangeNM(zoomInStep)}
           className="p-1 hover:bg-[#12281b] text-[#00ff66] rounded transition-colors"
-          title="Zoom In [+]"
+          title="Zoom In [+] (Down to 2.5 NM)"
         >
           <ZoomIn className="w-3.5 h-3.5" />
         </button>
         <button
-          onClick={() => setRangeNM(prev => Math.min(65, prev + 5))}
+          onClick={() => setRangeNM(zoomOutStep)}
           className="p-1 hover:bg-[#12281b] text-[#00ff66] rounded transition-colors"
-          title="Zoom Out [-]"
+          title="Zoom Out [-] (Up to 140 NM)"
         >
           <ZoomOut className="w-3.5 h-3.5" />
         </button>
@@ -1614,9 +2129,127 @@ export const RadarCanvas: React.FC = () => {
         </button>
       </div>
 
+      {/* On-Screen Quick Show / Hide Scope Items & Declutter Control */}
+      <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-1.5 font-mono pointer-events-auto select-none">
+        <div className="flex items-center gap-1 bg-[#08150f]/95 backdrop-blur-md px-2 py-1 border border-[#163826] rounded-md shadow-xl">
+          <button
+            onClick={() => toggleLayer('terrain')}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border transition-colors ${
+              radarLayers.terrain
+                ? 'bg-[#123822] text-[#00ff66] border-[#00ff66]/40'
+                : 'bg-[#07110c] text-[#527d63] border-[#143322] hover:text-[#9ce8be]'
+            }`}
+            title="Show/Hide Topographical Terrain"
+          >
+            <Mountain className="w-3 h-3" />
+            <span>TERRAIN</span>
+          </button>
+
+          <button
+            onClick={() => applyRadarDeclutter('full')}
+            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#0b2015] hover:bg-[#133524] text-[#8be0ad] border border-[#19422b] transition-colors"
+            title="Show all radar items"
+          >
+            Full
+          </button>
+          <button
+            onClick={() => applyRadarDeclutter('tactical')}
+            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#0b2015] hover:bg-[#133524] text-[#00e5ff] border border-[#19422b] transition-colors"
+            title="Tactical vectoring declutter"
+          >
+            Tactical
+          </button>
+          <button
+            onClick={() => applyRadarDeclutter('minimal')}
+            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#0b2015] hover:bg-[#133524] text-[#ffd166] border border-[#19422b] transition-colors"
+            title="Minimal clean scope"
+          >
+            Min
+          </button>
+
+          <button
+            onClick={() => setShowScopeControls(prev => !prev)}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border transition-colors ${
+              showScopeControls
+                ? 'bg-[#16422b] text-[#00ff66] border-[#00ff66]'
+                : 'bg-[#0c2317] text-[#a2f5bf] border-[#1f5135] hover:bg-[#133422]'
+            }`}
+            title="Toggle individual radar display items"
+          >
+            <Layers className="w-3 h-3" />
+            <span>
+              Items ({Object.values(radarLayers).filter(Boolean).length}/{Object.keys(radarLayers).length})
+            </span>
+          </button>
+        </div>
+
+        {showScopeControls && (
+          <div className="w-72 bg-[#07140d]/96 backdrop-blur-md border border-[#1e5035] rounded-md p-2.5 shadow-2xl">
+            <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#143724]">
+              <span className="text-[11px] font-bold text-[#00ff66]">RADAR DISPLAY ITEMS</span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setAllRadarLayers(true)}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#113522] text-[#00ff66] border border-[#1d5a39] hover:bg-[#18482f]"
+                >
+                  Show All
+                </button>
+                <button
+                  onClick={() => setAllRadarLayers(false)}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#281214] text-[#ff7b7b] border border-[#592429] hover:bg-[#3a191c]"
+                >
+                  Hide All
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              {(
+                [
+                  { key: 'terrain', label: 'Terrain Relief' },
+                  { key: 'rangeRings', label: 'Range Rings' },
+                  { key: 'runways', label: 'Runways' },
+                  { key: 'extendedCenterlines', label: 'ILS Centerlines' },
+                  { key: 'tmaBoundary', label: 'TMA Sector' },
+                  { key: 'starCorridors', label: 'STAR Routes' },
+                  { key: 'sidCorridors', label: 'SID Routes' },
+                  { key: 'waypointLabels', label: 'Fixes / Names' },
+                  { key: 'procedureRestrictions', label: 'Alt/Spd Limits' },
+                  { key: 'holdingStacks', label: 'Holding Stacks' },
+                  { key: 'trails', label: 'History Trails' },
+                  { key: 'speedVectors', label: 'Speed Vectors' },
+                  { key: 'extendedTargetTags', label: 'Ext Target Tags' },
+                  { key: 'radarSweep', label: 'PPI Sweep' },
+                ] as Array<{ key: keyof RadarLayers; label: string }>
+              ).map(item => {
+                const active = radarLayers[item.key];
+                return (
+                  <button
+                    key={item.key}
+                    onClick={() => toggleLayer(item.key)}
+                    className={`flex items-center justify-between px-2 py-1 rounded text-[10px] border transition-colors ${
+                      active
+                        ? 'bg-[#0e2c1c] text-[#a2f5bf] border-[#1f5c3a]'
+                        : 'bg-[#050e09] text-[#4e735d] border-[#11281b] hover:text-[#86b89b]'
+                    }`}
+                  >
+                    <span className="truncate">{item.label}</span>
+                    {active ? (
+                      <Eye className="w-3 h-3 text-[#00ff66] shrink-0" />
+                    ) : (
+                      <EyeOff className="w-3 h-3 text-[#557763] shrink-0" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Selected Aircraft Tactical Route HUD Banner */}
       {selectedAircraft && (
-        <div className="hidden xl:flex absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-[#06140d]/92 backdrop-blur border border-[#163826] hover:border-[#00ff66]/50 rounded-md px-3.5 py-1.5 shadow-[0_4px_24px_rgba(0,0,0,0.65)] font-mono text-xs items-center gap-3 text-white pointer-events-auto transition-all select-none whitespace-nowrap">
+        <div className="hidden lg:flex absolute top-12 left-3 z-10 bg-[#06140d]/92 backdrop-blur border border-[#163826] hover:border-[#00ff66]/50 rounded-md px-3 py-1 shadow-[0_4px_24px_rgba(0,0,0,0.65)] font-mono text-xs items-center gap-2.5 text-white pointer-events-auto transition-all select-none whitespace-nowrap">
           <div className="flex items-center gap-1.5 font-bold text-[#00ff66]">
             <Plane className="w-3.5 h-3.5 text-[#00e5ff]" />
             <span>{selectedAircraft.callsign}</span>
@@ -1654,7 +2287,7 @@ export const RadarCanvas: React.FC = () => {
 
       {/* Active Radio Transmission Live Indicator */}
       {activeTransmission && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-20 bg-[#031d12]/95 border border-[#00ff66] shadow-[0_0_16px_rgba(0,255,102,0.35)] rounded px-3 py-1 font-mono text-[11px] flex items-center gap-2 text-white pointer-events-none select-none whitespace-nowrap">
+        <div className="absolute bottom-12 left-1/2 -translate-x-1/2 z-20 bg-[#031d12]/95 border border-[#00ff66] shadow-[0_0_16px_rgba(0,255,102,0.35)] rounded px-3 py-1 font-mono text-[11px] flex items-center gap-2 text-white pointer-events-none select-none whitespace-nowrap">
           <Radio className="w-3.5 h-3.5 text-[#00ff66]" />
           <span className="font-bold text-[#00ff66]">
             {activeTransmission.speaker === 'PILOT' ? 'PILOT TX:' : 'ATC TX:'}

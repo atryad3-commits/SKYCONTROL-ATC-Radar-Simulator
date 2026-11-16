@@ -22,12 +22,14 @@ import {
   UserCheck,
   AlertTriangle,
   Sliders,
+  Settings2,
 } from 'lucide-react';
 
 interface TopBarProps {
   userProfile: UserProfileData | null;
   onOpenHelp: () => void;
   onOpenOperationsHub: () => void;
+  onOpenPreFlightSetup?: () => void;
   onOpenAccount: () => void;
   onToggleLayerMenu: () => void;
   onOpenAudioStudio?: () => void;
@@ -37,6 +39,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   userProfile,
   onOpenHelp,
   onOpenOperationsHub,
+  onOpenPreFlightSetup,
   onOpenAccount,
   onToggleLayerMenu,
   onOpenAudioStudio,
@@ -81,7 +84,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={onOpenOperationsHub}
           className="hidden sm:flex items-center gap-1.5 text-[#a2f5bf] hover:text-white transition-colors whitespace-nowrap shrink-0"
-          title="تغییر فرودگاه، مأموریت‌های آموزشی و سناریوهای شخصی"
+          title="Switch Airport, Flight Academy Missions & Custom Scenarios"
         >
           <span className="font-semibold text-white">{airport.icao}</span>
           <span className="text-[#4e8b69] hidden xl:inline">{airport.name}</span>
@@ -134,21 +137,33 @@ export const TopBar: React.FC<TopBarProps> = ({
 
       {/* Zone 3: Tactical Sim Controls, Operations Hub & Account */}
       <div className="flex items-center gap-1.5 shrink-0">
+        {/* Pre-Flight Airport, Route, Traffic & Weather Config */}
+        {onOpenPreFlightSetup && (
+          <button
+            onClick={onOpenPreFlightSetup}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#0f2b22] hover:bg-[#173f32] text-[#00e5ff] border border-[#1d5444] rounded font-semibold transition-colors whitespace-nowrap shrink-0"
+            title="Configure Airport, Approach/Departure Procedures, Traffic, Weather & Audio"
+          >
+            <Settings2 className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Pre-Flight Setup</span>
+          </button>
+        )}
+
         {/* Operations Hub (Academy + Airports + Scenario Studio) */}
         <button
           onClick={onOpenOperationsHub}
           className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#123321] hover:bg-[#19472f] text-[#00ff66] border border-[#246340] rounded font-semibold transition-colors whitespace-nowrap shrink-0"
-          title="آکادمی گواهینامه، انتخاب فرودگاه و استودیوی سناریو"
+          title="Flight Academy, Airport Selector & Scenario Studio"
         >
           <Compass className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">آکادمی و سناریوها</span>
+          <span className="hidden sm:inline">Academy &amp; Ops</span>
         </button>
 
         {/* Spawn Controls */}
         <button
           onClick={spawnInbound}
           className="hidden md:flex items-center gap-1 px-2 py-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#00ff66] border border-[#1e4a31] rounded transition-colors whitespace-nowrap shrink-0"
-          title="ورود پرواز جدید به رادار"
+          title="Spawn New Inbound Arrival"
         >
           <Plus className="w-3 h-3" />
           <span>Inbound</span>
@@ -157,7 +172,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={spawnDeparture}
           className="hidden md:flex items-center gap-1 px-2 py-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#00e5ff] border border-[#1e4a31] rounded transition-colors whitespace-nowrap shrink-0"
-          title={`پرواز خروجی از باند ${activeDepartureRunwayId}`}
+          title={`Spawn Departure on RWY ${activeDepartureRunwayId}`}
         >
           <Plus className="w-3 h-3" />
           <span>Dep</span>
@@ -166,7 +181,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={() => triggerEmergency('ENGINE_FAILURE')}
           className="hidden xl:flex items-center gap-1 px-2 py-1.5 bg-[#2a1214] hover:bg-[#3d191c] text-[#ff6b6b] border border-[#5e2226] rounded transition-colors whitespace-nowrap shrink-0 tabular-nums"
-          title="اعلام وضعیت اضطراری Squawk 7700"
+          title="Trigger Squawk 7700 Emergency"
         >
           <AlertTriangle className="w-3 h-3" />
           <span>7700</span>
@@ -197,7 +212,7 @@ export const TopBar: React.FC<TopBarProps> = ({
               ? 'bg-[#d97706] text-black border-[#f59e0b] font-bold'
               : 'bg-[#0f281a] hover:bg-[#183d29] text-[#00ff66] border-[#1e4a31]'
           }`}
-          title={isPaused ? 'ادامه شبیه‌سازی' : 'توقف موقت'}
+          title={isPaused ? 'Resume Simulation' : 'Pause Simulation'}
         >
           {isPaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
           <span className="hidden sm:inline">{isPaused ? 'RESUME' : 'PAUSE'}</span>
@@ -211,7 +226,7 @@ export const TopBar: React.FC<TopBarProps> = ({
               ? 'bg-[#2b1616] text-[#ff6b6b] border-[#5e2222]'
               : 'bg-[#0f281a] hover:bg-[#183d29] text-[#00ff66] border-[#1e4a31]'
           }`}
-          title={audioMuted ? 'فعال‌سازی صدای رادیو' : 'قطع صدای رادیو'}
+          title={audioMuted ? 'Enable Radio Audio' : 'Mute Radio Audio'}
         >
           {audioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
         </button>
@@ -221,7 +236,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           <button
             onClick={onOpenAudioStudio}
             className="flex items-center gap-1 px-2 py-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#00e5ff] border border-[#1e4a31] rounded transition-colors whitespace-nowrap shrink-0"
-            title="استودیوی مدیریت صدای آفلاین، کتابخانه و افکت VHF"
+            title="Offline Audio Studio, Phrase Library & VHF Radio FX"
           >
             <Sliders className="w-3.5 h-3.5" />
             <span className="hidden xl:inline">Audio Studio</span>
@@ -232,7 +247,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={onToggleLayerMenu}
           className="p-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#a2f5bf] border border-[#1e4a31] rounded transition-colors shrink-0"
-          title="لایه‌های رادار"
+          title="Radar Layers & Procedures"
         >
           <Layers className="w-3.5 h-3.5" />
         </button>
@@ -241,7 +256,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={() => resetSimulation()}
           className="p-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#a2f5bf] border border-[#1e4a31] rounded transition-colors shrink-0"
-          title="شروع مجدد رادار"
+          title="Reset Radar Simulation"
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>
@@ -250,7 +265,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={onOpenAccount}
           className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#0c2017] hover:bg-[#153526] text-[#d1e7dd] border border-[#1e4a31] rounded transition-colors whitespace-nowrap shrink-0"
-          title="حساب کنترلر و گواهینامه"
+          title="Controller Account & Certification"
         >
           {userProfile?.certified ? (
             <Award className="w-3.5 h-3.5 text-[#ffd166]" />
@@ -258,7 +273,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             <UserCheck className="w-3.5 h-3.5 text-[#00e5ff]" />
           )}
           <span className="max-w-[96px] truncate font-semibold">
-            {userProfile ? userProfile.callsign : 'ورود کنترلر'}
+            {userProfile ? userProfile.callsign : 'Sign In'}
           </span>
         </button>
 
@@ -266,7 +281,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           onClick={onOpenHelp}
           className="p-1.5 bg-[#0f281a] hover:bg-[#183d29] text-[#00ff66] border border-[#1e4a31] rounded transition-colors shrink-0"
-          title="راهنمای عملیاتی"
+          title="Operational Manual & Guide"
         >
           <HelpCircle className="w-3.5 h-3.5" />
         </button>

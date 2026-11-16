@@ -180,7 +180,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'tower_charon',
     displayName: 'Capt/ATC Ryan · London Tower',
-    shortLabel: 'برج: Ryan (UK · بم)',
+    shortLabel: 'TWR: Ryan (UK · Deep)',
     voiceType: 'TOWER',
     language: 'en',
     accent: 'en-GB',
@@ -207,7 +207,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'tower_fenrir',
     displayName: 'ATC Guy · Kennedy Tower',
-    shortLabel: 'برج: Guy (US · جدی)',
+    shortLabel: 'TWR: Guy (US · Firm)',
     voiceType: 'TOWER',
     language: 'en',
     accent: 'en-US',
@@ -234,7 +234,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'tower_kore',
     displayName: 'ATC Sonia · Clear Female Tower',
-    shortLabel: 'برج: Sonia (US/UK · شفاف)',
+    shortLabel: 'TWR: Sonia (US · Clear)',
     voiceType: 'TOWER',
     language: 'en',
     accent: 'en-US',
@@ -263,7 +263,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'approach_zephyr',
     displayName: 'ATC Isabella · Terminal Approach',
-    shortLabel: 'اپروچ: Isabella (UK · رادار)',
+    shortLabel: 'APP: Isabella (UK · Radar)',
     voiceType: 'APPROACH',
     language: 'en',
     accent: 'en-GB',
@@ -292,7 +292,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'ground_puck',
     displayName: 'ATC Puck · Apron & Ground',
-    shortLabel: 'گراند: Puck (US · تاکسی)',
+    shortLabel: 'GND: Puck (US · Taxi)',
     voiceType: 'GROUND',
     language: 'en',
     accent: 'en-US',
@@ -321,7 +321,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_thomas',
     displayName: 'Capt Thomas · UK Senior Line',
-    shortLabel: 'خلبان: Thomas (UK)',
+    shortLabel: 'Pilot: Thomas (UK)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-GB',
@@ -348,7 +348,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_libby',
     displayName: 'FO Emma · UK Regional Crew',
-    shortLabel: 'خلبان: Emma (UK)',
+    shortLabel: 'Pilot: Emma (UK)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-GB',
@@ -375,7 +375,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_brian',
     displayName: 'Capt Michael · US Transatlantic',
-    shortLabel: 'خلبان: Michael (US)',
+    shortLabel: 'Pilot: Michael (US)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-US',
@@ -402,7 +402,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_clara',
     displayName: 'Capt Bella · North American Jet',
-    shortLabel: 'خلبان: Bella (US)',
+    shortLabel: 'Pilot: Bella (US)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-US',
@@ -429,7 +429,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_prabhat',
     displayName: 'Capt Onyx · International Heavy',
-    shortLabel: 'خلبان: Onyx (Intl)',
+    shortLabel: 'Pilot: Onyx (Intl)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-US',
@@ -456,7 +456,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_connor',
     displayName: 'Capt Fable · Euro-Atlantic Crew',
-    shortLabel: 'خلبان: Fable (EU)',
+    shortLabel: 'Pilot: Fable (EU)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-GB',
@@ -483,7 +483,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_nova',
     displayName: 'Capt Nova · Express Charter',
-    shortLabel: 'خلبان: Nova (US)',
+    shortLabel: 'Pilot: Nova (US)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-US',
@@ -510,7 +510,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_liam',
     displayName: 'FO Liam · Narrowbody Ops',
-    shortLabel: 'خلبان: Liam (US)',
+    shortLabel: 'Pilot: Liam (US)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-US',
@@ -537,7 +537,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_alice',
     displayName: 'Capt Alice · Long-Haul Cargo',
-    shortLabel: 'خلبان: Alice (UK)',
+    shortLabel: 'Pilot: Alice (UK)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-GB',
@@ -564,7 +564,7 @@ export const DEFAULT_VOICE_PROFILES: VoiceProfile[] = [
   {
     id: 'pilot_daniel',
     displayName: 'Capt Daniel · Night Freighter',
-    shortLabel: 'خلبان: Daniel (UK)',
+    shortLabel: 'Pilot: Daniel (UK)',
     voiceType: 'PILOT',
     language: 'en',
     accent: 'en-GB',

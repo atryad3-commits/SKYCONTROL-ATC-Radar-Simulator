@@ -9,18 +9,25 @@ import {
   ActiveMissionState,
   Aircraft,
   Airport,
+  AirportNavVisibility,
   AirportProfile,
   ConflictPair,
   CustomScenarioConfig,
   MissionId,
+  PreFlightSessionConfig,
   RadioMessage,
   SimulationStats,
   WeatherCondition,
 } from '../types';
 import {
+  ALL_AIRPORT_PROFILES,
   getAirportProfile,
   resolveConfiguredAirport,
 } from '../airports/airportsRegistry';
+import {
+  computeDefaultAirportVisibility,
+  computeRunwayMatchedVisibility,
+} from '../airports/procedures';
 import {
   stepAircraftPhysics,
   normalizeHeading,
@@ -84,13 +91,74 @@ function resetCommsTimers() {
   lastWeatherBroadcastSimTime = 0;
 }
 
+const PER_AIRPORT_NAV_STORAGE_KEY = 'skycontrol_per_airport_nav_v1';
+
+function buildInitialPerAirportVisibility(): Record<string, AirportNavVisibility> {
+  const defaults: Record<string, AirportNavVisibility> = {};
+  for (const prof of ALL_AIRPORT_PROFILES) {
+    defaults[prof.airport.icao] = computeDefaultAirportVisibility(prof.airport);
+  }
+
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return defaults;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(PER_AIRPORT_NAV_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Record<string, Partial<AirportNavVisibility>>;
+    const merged: Record<string, AirportNavVisibility> = { ...defaults };
+
+    for (const prof of ALL_AIRPORT_PROFILES) {
+      const icao = prof.airport.icao;
+      const saved = parsed[icao];
+      if (!saved) continue;
+      const validStars = new Set((prof.airport.approachRoutes || []).map(r => r.id));
+      const validSids = new Set((prof.airport.departureRoutes || []).map(r => r.id));
+      const validWps = new Set(prof.airport.waypoints.map(w => w.name));
+
+      merged[icao] = {
+        visibleStarIds: Array.isArray(saved.visibleStarIds)
+          ? saved.visibleStarIds.filter(id => validStars.has(id))
+          : defaults[icao].visibleStarIds,
+        visibleSidIds: Array.isArray(saved.visibleSidIds)
+          ? saved.visibleSidIds.filter(id => validSids.has(id))
+          : defaults[icao].visibleSidIds,
+        visibleWaypoints: Array.isArray(saved.visibleWaypoints)
+          ? saved.visibleWaypoints.filter(name => validWps.has(name))
+          : defaults[icao].visibleWaypoints,
+      };
+    }
+    return merged;
+  } catch {
+    return defaults;
+  }
+}
+
+function persistPerAirportVisibility(map: Record<string, AirportNavVisibility>): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(PER_AIRPORT_NAV_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export interface RadarLayers {
+  terrain: boolean;
   rangeRings: boolean;
+  runways: boolean;
+  holdingStacks: boolean;
   waypointLabels: boolean;
   extendedCenterlines: boolean;
   trails: boolean;
   speedVectors: boolean;
   radarSweep: boolean;
+  starCorridors: boolean;
+  sidCorridors: boolean;
+  procedureRestrictions: boolean;
+  tmaBoundary: boolean;
+  extendedTargetTags: boolean;
 }
 
 export interface SimulationStore {
@@ -126,6 +194,8 @@ export interface SimulationStore {
   audioVolume: number;
   towerVoiceId: TowerVoiceId;
   radarLayers: RadarLayers;
+  perAirportVisibility: Record<string, AirportNavVisibility>;
+  hasCompletedStartupSetup: boolean;
   simulationEvents: SimulationEvent[];
   activeTransmission: { callsign: string; speaker: 'ATC' | 'PILOT'; voiceLabel?: string } | null;
 
@@ -170,6 +240,22 @@ export interface SimulationStore {
   setTowerVoice: (voiceId: TowerVoiceId) => void;
   syncGlobalAudioSettings: (settings: GlobalAudioSettings, applyPreset?: boolean) => void;
   toggleLayer: (layer: keyof RadarLayers) => void;
+  setAllRadarLayers: (visible: boolean) => void;
+  applyRadarDeclutter: (preset: 'full' | 'tactical' | 'minimal') => void;
+  toggleAirportStar: (icao: string, starId: string) => void;
+  toggleAirportSid: (icao: string, sidId: string) => void;
+  toggleAirportWaypoint: (icao: string, waypointName: string) => void;
+  setAirportAllRoutesVisible: (icao: string, visible: boolean) => void;
+  matchAirportRoutesToRunways: (
+    icao: string,
+    landingRunwayId?: string,
+    departureRunwayId?: string
+  ) => void;
+  setPerAirportVisibilityMap: (nextMap: Record<string, AirportNavVisibility>) => void;
+  applyPreFlightSession: (
+    config: PreFlightSessionConfig,
+    customScenario?: CustomScenarioConfig
+  ) => void;
   spawnInbound: () => void;
   spawnDeparture: () => void;
   triggerEmergency: (type?: 'ENGINE_FAILURE' | 'MEDICAL' | 'FUEL_CRITICAL') => void;
@@ -412,7 +498,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   aircraft: initialFleet,
   selectedAircraftId: initialFleet[0]?.id || null,
   weather: initialResolved.profile.defaultWeather,
-  isPaused: false,
+  isPaused: true,
   simSpeed: 1,
   stats: {
     landings: 0,
@@ -437,13 +523,23 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   audioVolume: 0.8,
   towerVoiceId: radioAudio.getTowerVoiceId(),
   radarLayers: {
+    terrain: true,
     rangeRings: true,
+    runways: true,
+    holdingStacks: true,
     waypointLabels: true,
     extendedCenterlines: true,
     trails: true,
     speedVectors: true,
     radarSweep: true,
+    starCorridors: true,
+    sidCorridors: true,
+    procedureRestrictions: true,
+    tmaBoundary: true,
+    extendedTargetTags: true,
   },
+  perAirportVisibility: buildInitialPerAirportVisibility(),
+  hasCompletedStartupSetup: false,
   simulationEvents: [],
   activeTransmission: null,
   radarTracks: globalRadarTracker.getTracks(),
@@ -1229,6 +1325,306 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     }));
   },
 
+  setAllRadarLayers: visible => {
+    set({
+      radarLayers: {
+        terrain: visible,
+        rangeRings: visible,
+        runways: visible,
+        holdingStacks: visible,
+        waypointLabels: visible,
+        extendedCenterlines: visible,
+        trails: visible,
+        speedVectors: visible,
+        radarSweep: visible,
+        starCorridors: visible,
+        sidCorridors: visible,
+        procedureRestrictions: visible,
+        tmaBoundary: visible,
+        extendedTargetTags: visible,
+      },
+    });
+  },
+
+  applyRadarDeclutter: preset => {
+    if (preset === 'full') {
+      set({
+        radarLayers: {
+          terrain: true,
+          rangeRings: true,
+          runways: true,
+          holdingStacks: true,
+          waypointLabels: true,
+          extendedCenterlines: true,
+          trails: true,
+          speedVectors: true,
+          radarSweep: true,
+          starCorridors: true,
+          sidCorridors: true,
+          procedureRestrictions: true,
+          tmaBoundary: true,
+          extendedTargetTags: true,
+        },
+      });
+    } else if (preset === 'tactical') {
+      set({
+        radarLayers: {
+          terrain: true,
+          rangeRings: true,
+          runways: true,
+          holdingStacks: true,
+          waypointLabels: true,
+          extendedCenterlines: true,
+          trails: true,
+          speedVectors: true,
+          radarSweep: true,
+          starCorridors: false,
+          sidCorridors: false,
+          procedureRestrictions: false,
+          tmaBoundary: true,
+          extendedTargetTags: true,
+        },
+      });
+    } else {
+      set({
+        radarLayers: {
+          terrain: false,
+          rangeRings: true,
+          runways: true,
+          holdingStacks: false,
+          waypointLabels: false,
+          extendedCenterlines: false,
+          trails: true,
+          speedVectors: true,
+          radarSweep: false,
+          starCorridors: false,
+          sidCorridors: false,
+          procedureRestrictions: false,
+          tmaBoundary: false,
+          extendedTargetTags: false,
+        },
+      });
+    }
+  },
+
+  toggleAirportStar: (icao, starId) => {
+    set(state => {
+      const prof = getAirportProfile(icao);
+      const current = state.perAirportVisibility[icao] || computeDefaultAirportVisibility(prof.airport);
+      const exists = current.visibleStarIds.includes(starId);
+      const nextStarIds = exists
+        ? current.visibleStarIds.filter(id => id !== starId)
+        : [...current.visibleStarIds, starId];
+      const nextMap: Record<string, AirportNavVisibility> = {
+        ...state.perAirportVisibility,
+        [icao]: {
+          ...current,
+          visibleStarIds: nextStarIds,
+        },
+      };
+      persistPerAirportVisibility(nextMap);
+      return { perAirportVisibility: nextMap };
+    });
+  },
+
+  toggleAirportSid: (icao, sidId) => {
+    set(state => {
+      const prof = getAirportProfile(icao);
+      const current = state.perAirportVisibility[icao] || computeDefaultAirportVisibility(prof.airport);
+      const exists = current.visibleSidIds.includes(sidId);
+      const nextSidIds = exists
+        ? current.visibleSidIds.filter(id => id !== sidId)
+        : [...current.visibleSidIds, sidId];
+      const nextMap: Record<string, AirportNavVisibility> = {
+        ...state.perAirportVisibility,
+        [icao]: {
+          ...current,
+          visibleSidIds: nextSidIds,
+        },
+      };
+      persistPerAirportVisibility(nextMap);
+      return { perAirportVisibility: nextMap };
+    });
+  },
+
+  toggleAirportWaypoint: (icao, waypointName) => {
+    set(state => {
+      const prof = getAirportProfile(icao);
+      const current = state.perAirportVisibility[icao] || computeDefaultAirportVisibility(prof.airport);
+      const exists = current.visibleWaypoints.includes(waypointName);
+      const nextWaypoints = exists
+        ? current.visibleWaypoints.filter(name => name !== waypointName)
+        : [...current.visibleWaypoints, waypointName];
+      const nextMap: Record<string, AirportNavVisibility> = {
+        ...state.perAirportVisibility,
+        [icao]: {
+          ...current,
+          visibleWaypoints: nextWaypoints,
+        },
+      };
+      persistPerAirportVisibility(nextMap);
+      return { perAirportVisibility: nextMap };
+    });
+  },
+
+  setAirportAllRoutesVisible: (icao, visible) => {
+    set(state => {
+      const prof = getAirportProfile(icao);
+      const nextVis: AirportNavVisibility = visible
+        ? computeDefaultAirportVisibility(prof.airport)
+        : { visibleStarIds: [], visibleSidIds: [], visibleWaypoints: [] };
+      const nextMap = {
+        ...state.perAirportVisibility,
+        [icao]: nextVis,
+      };
+      persistPerAirportVisibility(nextMap);
+      return { perAirportVisibility: nextMap };
+    });
+  },
+
+  matchAirportRoutesToRunways: (icao, landingRunwayId, departureRunwayId) => {
+    set(state => {
+      const prof = getAirportProfile(icao);
+      const lRwy = landingRunwayId || state.activeLandingRunwayId || prof.airport.defaultArrivalRunway;
+      const dRwy = departureRunwayId || state.activeDepartureRunwayId || prof.airport.defaultDepartureRunway;
+      const matched = computeRunwayMatchedVisibility(prof.airport, lRwy, dRwy);
+      const nextMap = {
+        ...state.perAirportVisibility,
+        [icao]: matched,
+      };
+      persistPerAirportVisibility(nextMap);
+      return { perAirportVisibility: nextMap };
+    });
+  },
+
+  setPerAirportVisibilityMap: nextMap => {
+    persistPerAirportVisibility(nextMap);
+    set({ perAirportVisibility: nextMap });
+  },
+
+  applyPreFlightSession: (config, customScenario) => {
+    if (config.perAirportVisibility) {
+      persistPerAirportVisibility(config.perAirportVisibility);
+      set({ perAirportVisibility: config.perAirportVisibility });
+    }
+
+    radioAudio.setMuted(config.audioMuted);
+    radioAudio.setVolume(config.audioVolume);
+    radioAudio.setVhfPreset(config.radioPreset);
+    if (config.towerVoiceId) {
+      radioAudio.setTowerVoiceId(config.towerVoiceId as TowerVoiceId);
+    }
+
+    if (config.mode === 'mission' && config.missionId) {
+      get().startMission(config.missionId);
+      set({
+        audioMuted: config.audioMuted,
+        audioVolume: config.audioVolume,
+        towerVoiceId: radioAudio.getTowerVoiceId(),
+        simSpeed: config.simSpeed,
+        hasCompletedStartupSetup: true,
+        isPaused: false,
+      });
+      return;
+    }
+
+    const activeCustom = config.mode === 'custom' ? customScenario : undefined;
+    const targetIcao = activeCustom ? activeCustom.airportIcao : config.airportIcao;
+    const targetArr = activeCustom ? activeCustom.landingRunwayId : config.landingRunwayId;
+    const targetDep = activeCustom ? activeCustom.departureRunwayId : config.departureRunwayId;
+
+    const resolved = resolveConfiguredAirport(targetIcao, targetArr, targetDep);
+    radioAudio.clearQueue();
+    radioAudio.setAirportContext(resolved.airport.icao);
+    globalConflictTracker.clear();
+    resetCommsTimers();
+    globalOccupancyManager.configureAirport(
+      resolved.runwayGeometries,
+      resolved.profile.reciprocalPairs
+    );
+    globalRadarTracker.reset();
+
+    const inbounds = activeCustom ? activeCustom.initialInbounds : config.initialInbounds;
+    const departures = activeCustom ? activeCustom.initialDepartures : config.initialDepartures;
+    const heavy = activeCustom ? activeCustom.heavyRatio : config.heavyRatio;
+    const spawnSec = activeCustom ? activeCustom.spawnIntervalSec : config.spawnIntervalSec;
+    const emergAllow = activeCustom ? activeCustom.allowEmergencies : config.allowEmergencies;
+    const emergDelay = activeCustom ? activeCustom.emergencyDelaySec : config.emergencyDelaySec;
+    const finalWeather: WeatherCondition = activeCustom
+      ? {
+          windDirection: activeCustom.windDirection,
+          windSpeed: activeCustom.windSpeed,
+          gusts: activeCustom.gusts,
+          qnh: activeCustom.qnh,
+          visibilityNM: activeCustom.visibilityNM,
+          ceilingFeet: activeCustom.ceilingFeet,
+          precipitation: activeCustom.precipitation,
+        }
+      : config.weather;
+
+    const freshFleet = createFleetForAirport(
+      resolved.airport,
+      resolved.runwayGeometries,
+      resolved.landingRunwayId,
+      resolved.departureRunwayId,
+      inbounds,
+      departures,
+      heavy
+    );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
+    globalRadarTracker.seedInitialTracks(freshFleet, 0);
+
+    set({
+      airportProfile: resolved.profile,
+      airport: resolved.airport,
+      activeRunwayGeometries: resolved.runwayGeometries,
+      activeLandingRunwayId: resolved.landingRunwayId,
+      activeDepartureRunwayId: resolved.departureRunwayId,
+      activeScenarioName: activeCustom
+        ? activeCustom.name
+        : `Briefed Ops · ${resolved.airport.icao}`,
+      activeMission: IDLE_MISSION_STATE,
+      spawnIntervalSec: spawnSec,
+      maxTraffic: Math.max(config.maxTraffic, inbounds + departures + 2),
+      heavyRatio: heavy,
+      allowEmergencies: emergAllow,
+      emergencyDelaySec: emergDelay,
+      emergencyTriggered: false,
+      aircraft: freshFleet,
+      selectedAircraftId: freshFleet[0]?.id || null,
+      weather: finalWeather,
+      audioMuted: config.audioMuted,
+      audioVolume: config.audioVolume,
+      towerVoiceId: radioAudio.getTowerVoiceId(),
+      isPaused: false,
+      hasCompletedStartupSetup: true,
+      simSpeed: config.simSpeed || 1,
+      stats: {
+        landings: 0,
+        departures: 0,
+        goArounds: 0,
+        separationViolations: 0,
+        score: 100,
+        elapsedSeconds: 0,
+      },
+      conflicts: [],
+      simulationEvents: [],
+      radarTracks: globalRadarTracker.getTracks(),
+      antennaAzimuth: 0,
+      radarScanCount: 0,
+      radioMessages: [
+        {
+          id: `preflight_${Date.now()}`,
+          timestamp: getFormattedUTCTime(),
+          sender: 'ATC',
+          callsign: resolved.profile.directorCallsign,
+          text: `${resolved.airport.icao} Radar open. Active RWY ${resolved.landingRunwayId} ARR / ${resolved.departureRunwayId} DEP · Wind ${finalWeather.windDirection.toString().padStart(3, '0')}°/${finalWeather.windSpeed}kt · QNH ${finalWeather.qnh}.`,
+          frequency: resolved.profile.vhfFrequency,
+        },
+      ],
+    });
+  },
+
   setMeasurePoints: (start, current) => {
     set({ measureStart: start, measureCurrent: current });
   },
@@ -1473,6 +1869,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       selectedAircraftId: freshFleet[0]?.id || null,
       weather: weatherOverride || resolved.profile.defaultWeather,
       isPaused: false,
+      hasCompletedStartupSetup: true,
       simSpeed: 1,
       stats: {
         landings: 0,
@@ -1587,6 +1984,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       selectedAircraftId: freshFleet[0]?.id || null,
       weather: mission.weather,
       isPaused: false,
+      hasCompletedStartupSetup: true,
       simSpeed: 1,
       stats: initialStats,
       conflicts: [],
@@ -1658,6 +2056,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       selectedAircraftId: freshFleet[0]?.id || null,
       weather: customWeather,
       isPaused: false,
+      hasCompletedStartupSetup: true,
       simSpeed: 1,
       stats: {
         landings: 0,

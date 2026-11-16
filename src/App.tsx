@@ -19,6 +19,7 @@ import { OperationsHubModal, OperationsHubTab } from './components/OperationsHub
 import { MissionHudOverlay } from './components/MissionHudOverlay';
 import { CertificateModal } from './components/CertificateModal';
 import { AudioStudioModal, AudioStudioTab } from './components/AudioStudioModal';
+import { PreFlightSetupModal } from './components/PreFlightSetupModal';
 import { testConnection } from './firebase/config';
 import { localTtsClient } from './services/localTtsClient';
 import { radioAudio } from './audio/radioAudio';
@@ -45,6 +46,7 @@ export default function App() {
   const activeScenarioName = useSimulationStore(state => state.activeScenarioName);
   const activeMission = useSimulationStore(state => state.activeMission);
   const stats = useSimulationStore(state => state.stats);
+  const hasCompletedStartupSetup = useSimulationStore(state => state.hasCompletedStartupSetup);
 
   // Auth & User Persistence State
   const [userProfile, setUserProfile] = useState<UserProfileData | null>(null);
@@ -59,6 +61,7 @@ export default function App() {
   const [isCertOpen, setIsCertOpen] = useState(false);
   const [isAudioStudioOpen, setIsAudioStudioOpen] = useState(false);
   const [audioStudioTab, setAudioStudioTab] = useState<AudioStudioTab>('voices');
+  const [isPreFlightOpen, setIsPreFlightOpen] = useState(false);
 
   // Bottom rack tab: 'strips' or 'radio'
   const [bottomTab, setBottomTab] = useState<'strips' | 'radio'>('strips');
@@ -86,6 +89,9 @@ export default function App() {
           setUserProfile(cloudProfile);
           setScenarios(cloudScenarios);
           setIsAuthModalOpen(false);
+          if (!useSimulationStore.getState().hasCompletedStartupSetup) {
+            setIsPreFlightOpen(true);
+          }
         } catch (err) {
           console.error('Auth profile sync failed:', err);
         }
@@ -96,9 +102,13 @@ export default function App() {
           const guestScenarios = await loadUserScenarios(guest);
           setScenarios(guestScenarios);
           setIsAuthModalOpen(false);
+          if (!useSimulationStore.getState().hasCompletedStartupSetup) {
+            setIsPreFlightOpen(true);
+          }
         } else {
           setUserProfile(null);
           setScenarios([]);
+          setIsPreFlightOpen(false);
           setIsAuthModalOpen(true);
         }
       }
@@ -196,11 +206,16 @@ export default function App() {
     setUserProfile(profile);
     const list = await loadUserScenarios(profile);
     setScenarios(list);
+    setIsAuthModalOpen(false);
+    if (!useSimulationStore.getState().hasCompletedStartupSetup) {
+      setIsPreFlightOpen(true);
+    }
   };
 
   const handleSignedOut = () => {
     setUserProfile(null);
     setScenarios([]);
+    setIsPreFlightOpen(false);
     setIsAuthModalOpen(true);
   };
 
@@ -211,6 +226,7 @@ export default function App() {
         userProfile={userProfile}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenOperationsHub={() => handleOpenHub('academy')}
+        onOpenPreFlightSetup={() => setIsPreFlightOpen(true)}
         onOpenAccount={() => setIsAuthModalOpen(true)}
         onToggleLayerMenu={() => setIsLayersOpen(true)}
         onOpenAudioStudio={() => handleOpenAudioStudio('voices')}
@@ -314,6 +330,14 @@ export default function App() {
         isOpen={isCertOpen}
         userProfile={userProfile}
         onClose={() => setIsCertOpen(false)}
+      />
+
+      <PreFlightSetupModal
+        isOpen={isPreFlightOpen}
+        canDismiss={hasCompletedStartupSetup}
+        userProfile={userProfile}
+        scenarios={scenarios}
+        onClose={() => setIsPreFlightOpen(false)}
       />
     </div>
   );

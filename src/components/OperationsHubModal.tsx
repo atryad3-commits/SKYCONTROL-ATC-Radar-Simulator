@@ -51,8 +51,8 @@ function buildDefaultScenarioDraft(ownerId: string): CustomScenarioConfig {
   return {
     id: `scn_${Date.now()}`,
     ownerId,
-    name: 'تمرین ترافیک فشرده',
-    description: 'سناریوی اختصاصی با باد متغیر و ترافیک ترکیبی',
+    name: 'Dense Arrival Sequence',
+    description: 'Custom mixed-fleet scenario with moderate wind and steady inbound flow.',
     difficulty: 'Intermediate',
     airportIcao: 'EGLL',
     landingRunwayId: '27R',
@@ -204,7 +204,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
         onClose();
       }
     } catch (err) {
-      setStudioError(err instanceof Error ? err.message : 'خطا در ذخیره سناریو');
+      setStudioError(err instanceof Error ? err.message : 'Failed to save scenario');
     } finally {
       setStudioBusy(false);
     }
@@ -222,7 +222,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
         setDraft(buildDefaultScenarioDraft(userProfile.uid));
       }
     } catch (err) {
-      setStudioError(err instanceof Error ? err.message : 'خطا در حذف سناریو');
+      setStudioError(err instanceof Error ? err.message : 'Failed to delete scenario');
     } finally {
       setStudioBusy(false);
     }
@@ -237,12 +237,12 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
         <div className="px-5 py-3 bg-[#0c1d14] border-b border-[#163826] flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <Compass className="w-5 h-5 text-[#00ff66]" />
-            <h2 className="text-sm font-bold text-white" dir="rtl">
-              مرکز عملیات، آکادمی گواهینامه و استودیوی سناریو
+            <h2 className="text-sm font-bold text-white">
+              Operations Hub, Flight Academy &amp; Scenario Studio
             </h2>
           </div>
 
-          <div className="flex items-center gap-1 p-1 bg-[#06100b] border border-[#163826] rounded-md" dir="rtl">
+          <div className="flex items-center gap-1 p-1 bg-[#06100b] border border-[#163826] rounded-md">
             <button
               onClick={() => setActiveTab('academy')}
               className={`px-3 py-1.5 rounded text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
@@ -252,7 +252,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               }`}
             >
               <Award className="w-3.5 h-3.5" />
-              <span>آکادمی گواهینامه ({completedSet.size}/5)</span>
+              <span>Flight Academy ({completedSet.size}/5)</span>
             </button>
 
             <button
@@ -264,7 +264,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               }`}
             >
               <Layers className="w-3.5 h-3.5" />
-              <span>عملیات آزاد و فرودگاه‌ها</span>
+              <span>Free Ops &amp; Airports</span>
             </button>
 
             <button
@@ -276,21 +276,21 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               }`}
             >
               <Flame className="w-3.5 h-3.5" />
-              <span>سازنده سناریو ({scenarios.length})</span>
+              <span>Scenario Studio ({scenarios.length})</span>
             </button>
           </div>
 
           <button
             onClick={onClose}
             className="p-1.5 rounded hover:bg-[#163826] text-[#5da87d] hover:text-white transition-colors"
-            title="بستن"
+            title="Close"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Active Tab Body */}
-        <div className="flex-1 overflow-y-auto p-5 text-xs" dir="rtl">
+        <div className="flex-1 overflow-y-auto p-5 text-xs">
           {/* ============================================================== */}
           {/* TAB 1: TRAINING ACADEMY & CERTIFICATION                        */}
           {/* ============================================================== */}
@@ -300,10 +300,10 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               <div className="pb-4 border-b border-[#163826] flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    مسیر دریافت گواهینامه رسمی کنترلر ترافیک هوایی (ATC)
+                    Official Air Traffic Controller (ATC) Qualification Path
                   </h3>
                   <p className="text-[#85cca1] mt-1">
-                    با گذراندن هر ۵ مأموریت زیر، گواهینامه رسمی با شماره سریال اختصاصی صادر می‌شود. هم‌زمان در تب «عملیات آزاد» به تمام فرودگاه‌ها دسترسی دارید.
+                    Complete all 5 operational missions below to earn your serialized ATC Approach Director certificate. All 5 airports remain unlocked in Free Ops at any time.
                   </p>
                 </div>
 
@@ -316,10 +316,10 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                     className="px-4 py-2 bg-[#ffd166] hover:bg-[#ffe08a] text-black font-bold rounded flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
                   >
                     <Award className="w-4 h-4" />
-                    <span>نمایش گواهینامه رسمی</span>
+                    <span>View ATC Certificate</span>
                   </button>
                 ) : (
-                  <div className="text-left font-mono tabular-nums" dir="ltr">
+                  <div className="text-right font-mono tabular-nums">
                     <div className="text-[11px] text-[#5da87d]">CERTIFICATION PROGRESS</div>
                     <div className="text-base font-bold text-[#00ff66]">{completedSet.size} / 5 COMPLETED</div>
                   </div>
@@ -345,23 +345,23 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                             {msn.number}. {msn.title}
                           </span>
                           <span className="text-[#4e8b69]">·</span>
-                          <span className="font-mono text-[#00e5ff]" dir="ltr">
+                          <span className="font-mono text-[#00e5ff]">
                             {msn.airportIcao} · RWY {msn.landingRunwayId}/{msn.departureRunwayId}
                           </span>
                           <span className="text-[#4e8b69]">·</span>
                           {isDone ? (
                             <span className="text-[#00ff66] font-semibold flex items-center gap-1">
                               <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>تکمیل‌شده</span>
+                              <span>Completed</span>
                             </span>
                           ) : (
-                            <span className="text-[#ffd166] font-semibold">آماده اجرا</span>
+                            <span className="text-[#ffd166] font-semibold">Ready</span>
                           )}
                         </div>
 
                         <p className="text-[#a2f5bf] leading-relaxed">{msn.description}</p>
 
-                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-[#70b88d] font-mono tabular-nums" dir="ltr">
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-[#70b88d] font-mono tabular-nums">
                           <span>LND ≥ {msn.targetLandings}</span>
                           {msn.targetDepartures > 0 && (
                             <>
@@ -387,7 +387,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                         className="px-4 py-2 bg-[#143d27] hover:bg-[#00ff66] text-[#00ff66] hover:text-black border border-[#246642] font-bold rounded flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                       >
                         <Play className="w-3.5 h-3.5" />
-                        <span>{isDone ? 'اجرای مجدد' : 'شروع مأموریت'}</span>
+                        <span>{isDone ? 'Replay Mission' : 'Launch Mission'}</span>
                       </button>
                     </div>
                   );
@@ -404,7 +404,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               {/* Left: 5 Airport Cards */}
               <div className="lg:col-span-7 flex flex-col gap-3">
                 <h3 className="text-sm font-bold text-white pb-2 border-b border-[#163826]">
-                  ۱. انتخاب فرودگاه بین‌المللی یا پایگاه تمرینی
+                  1. Select International Airport or Training Sector
                 </h3>
 
                 {ALL_AIRPORT_PROFILES.map(prof => {
@@ -414,25 +414,25 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                       type="button"
                       key={prof.airport.icao}
                       onClick={() => handleSelectAirportCard(prof.airport.icao)}
-                      className={`text-right p-3.5 rounded border transition-colors flex flex-col gap-1.5 ${
+                      className={`text-left p-3.5 rounded border transition-colors flex flex-col gap-1.5 ${
                         isSel
                           ? 'bg-[#0f2b1c] border-[#00ff66]'
                           : 'bg-[#0a1711] hover:bg-[#10241a] border-[#163826]'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2 w-full">
-                        <div className="flex items-center gap-2 font-mono" dir="ltr">
+                        <div className="flex items-center gap-2 font-mono">
                           <span className="text-sm font-bold text-[#00ff66]">{prof.airport.icao}</span>
                           <span className="text-white font-semibold">{prof.airport.name}</span>
                         </div>
                         <span className="text-[11px] text-[#a2f5bf]">
-                          {prof.category === 'International' ? 'بین‌المللی' : 'پایگاه تمرینی'} · {prof.difficultyLabel}
+                          {prof.category} · {prof.difficultyLabel}
                         </span>
                       </div>
 
-                      <p className="text-[#85cca1] leading-relaxed">{prof.summaryFa}</p>
+                      <p className="text-[#85cca1] leading-relaxed">{prof.summary}</p>
 
-                      <div className="text-[11px] text-[#5da87d] font-mono tabular-nums" dir="ltr">
+                      <div className="text-[11px] text-[#5da87d] font-mono tabular-nums">
                         {prof.runwayLayoutLabel} · ELEV {prof.airport.elevationFeet}ft · WIND {prof.defaultWeather.windDirection}°/{prof.defaultWeather.windSpeed}kt
                       </div>
                     </button>
@@ -443,16 +443,16 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               {/* Right: Runway Direction & Wind Configurator */}
               <div className="lg:col-span-5 flex flex-col gap-4 bg-[#0a1610] border border-[#163826] rounded p-4 h-fit">
                 <div className="pb-3 border-b border-[#163826]">
-                  <div className="text-xs text-[#5da87d]">تنظیمات باند و عملیات آزاد</div>
-                  <div className="text-base font-bold text-white font-mono mt-0.5" dir="ltr">
+                  <div className="text-xs text-[#5da87d]">Active Runway &amp; Sector Configuration</div>
+                  <div className="text-base font-bold text-white font-mono mt-0.5">
                     {selectedProfile.airport.icao} · {selectedProfile.airport.name}
                   </div>
                 </div>
 
                 {/* Landing Runway Selector */}
                 <div className="flex flex-col gap-1.5">
-                  <label className="font-semibold text-[#00ff66]">باند فعال فرود (Arrival Runway)</label>
-                  <div className="grid grid-cols-2 gap-2" dir="ltr">
+                  <label className="font-semibold text-[#00ff66]">Active Landing Runway (ILS)</label>
+                  <div className="grid grid-cols-2 gap-2">
                     {selectedProfile.airport.runways.map(rwy => (
                       <button
                         type="button"
@@ -472,8 +472,8 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                 {/* Departure Runway Selector */}
                 <div className="flex flex-col gap-1.5">
-                  <label className="font-semibold text-[#00e5ff]">باند فعال برخاست (Departure Runway)</label>
-                  <div className="grid grid-cols-2 gap-2" dir="ltr">
+                  <label className="font-semibold text-[#00e5ff]">Active Departure Runway (SID)</label>
+                  <div className="grid grid-cols-2 gap-2">
                     {selectedProfile.airport.runways.map(rwy => (
                       <button
                         type="button"
@@ -495,14 +495,14 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                 <div className="flex flex-col gap-1.5">
                   <label className="font-semibold text-[#ffd166] flex items-center gap-1.5">
                     <Wind className="w-3.5 h-3.5" />
-                    <span>شرایط باد و جوی</span>
+                    <span>Wind &amp; Weather Profile</span>
                   </label>
                   <div className="grid grid-cols-3 gap-1.5">
                     {(
                       [
-                        { key: 'calm', label: 'آرام (6kt)' },
-                        { key: 'moderate', label: 'استاندارد فرودگاه' },
-                        { key: 'crosswind', label: 'باد جانبی شدید (28kt)' },
+                        { key: 'calm', label: 'Calm (6kt)' },
+                        { key: 'moderate', label: 'Field Default' },
+                        { key: 'crosswind', label: 'Crosswind (28kt)' },
                       ] as const
                     ).map(opt => (
                       <button
@@ -527,7 +527,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                   className="mt-2 w-full py-2.5 px-4 bg-[#00ff66] hover:bg-[#39ff14] text-black font-bold rounded flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
                 >
                   <Play className="w-4 h-4" />
-                  <span>اجرای رادار در {selectedProfile.airport.icao}</span>
+                  <span>Open Radar at {selectedProfile.airport.icao}</span>
                 </button>
               </div>
             </div>
@@ -541,7 +541,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               {/* Saved User Scenarios List */}
               <div className="lg:col-span-5 flex flex-col gap-3">
                 <div className="flex items-center justify-between pb-2 border-b border-[#163826]">
-                  <h3 className="text-sm font-bold text-white">سناریوهای ذخیره‌شده من</h3>
+                  <h3 className="text-sm font-bold text-white">Saved Custom Scenarios</h3>
                   <button
                     type="button"
                     onClick={() => {
@@ -552,13 +552,13 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                     className="px-2.5 py-1.5 bg-[#123321] hover:bg-[#19472f] text-[#00ff66] border border-[#246340] rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>سناریوی جدید</span>
+                    <span>New Scenario</span>
                   </button>
                 </div>
 
                 {scenarios.length === 0 ? (
                   <div className="p-6 bg-[#0a1711] border border-[#163826] rounded text-center text-[#70b88d] leading-relaxed">
-                    هنوز سناریوی اختصاصی نساخته‌اید. از فرم روبرو فرودگاه، باد، نرخ ترافیک و وضعیت اضطراری را تنظیم و ذخیره کنید.
+                    No custom scenarios saved yet. Configure the airport, wind, traffic density, and emergency parameters on the right to save your own scenario.
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2.5">
@@ -574,7 +574,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <div className="font-bold text-white text-sm">{sc.name}</div>
-                            <div className="text-[11px] text-[#70b88d] font-mono tabular-nums mt-0.5" dir="ltr">
+                            <div className="text-[11px] text-[#70b88d] font-mono tabular-nums mt-0.5">
                               {sc.airportIcao} · RWY {sc.landingRunwayId}/{sc.departureRunwayId} · {sc.windDirection}°/{sc.windSpeed}kt
                               {sc.allowEmergencies ? ' · 7700' : ''}
                             </div>
@@ -596,7 +596,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                             className="px-3 py-1 bg-[#143d27] hover:bg-[#00ff66] text-[#00ff66] hover:text-black rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
                           >
                             <Play className="w-3 h-3" />
-                            <span>اجرا</span>
+                            <span>Launch</span>
                           </button>
 
                           <button
@@ -608,7 +608,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                             className="px-2.5 py-1 bg-[#0d2217] hover:bg-[#163826] text-[#a2f5bf] border border-[#1d4d33] rounded flex items-center gap-1 transition-colors whitespace-nowrap"
                           >
                             <Edit2 className="w-3 h-3" />
-                            <span>ویرایش</span>
+                            <span>Edit</span>
                           </button>
 
                           <button
@@ -618,7 +618,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                             className="px-2.5 py-1 bg-[#2a1214] hover:bg-[#3d191c] text-[#ff6b6b] border border-[#5e2226] rounded flex items-center gap-1 transition-colors whitespace-nowrap"
                           >
                             <Trash2 className="w-3 h-3" />
-                            <span>حذف</span>
+                            <span>Delete</span>
                           </button>
                         </div>
                       </div>
@@ -631,10 +631,10 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
               <div className="lg:col-span-7 bg-[#0a1610] border border-[#163826] rounded p-4 flex flex-col gap-3.5">
                 <div className="flex items-center justify-between pb-2 border-b border-[#163826]">
                   <h3 className="text-sm font-bold text-white">
-                    {editingId ? 'ویرایش سناریوی انتخاب‌شده' : 'طراحی سناریوی جدید'}
+                    {editingId ? 'Edit Selected Scenario' : 'Design New Scenario'}
                   </h3>
                   <span className="text-[11px] text-[#5da87d]">
-                    {userProfile?.mode === 'google' ? 'ذخیره ابری Firestore' : 'ذخیره محلی مرورگر'}
+                    {userProfile?.mode === 'google' ? 'Cloud Firestore Storage' : 'Local Browser Storage'}
                   </span>
                 </div>
 
@@ -647,7 +647,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[#a2f5bf] font-semibold mb-1">نام سناریو</label>
+                    <label className="block text-[#a2f5bf] font-semibold mb-1">Scenario Name</label>
                     <input
                       type="text"
                       maxLength={80}
@@ -658,7 +658,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-[#a2f5bf] font-semibold mb-1">سطح دشواری</label>
+                    <label className="block text-[#a2f5bf] font-semibold mb-1">Difficulty Tier</label>
                     <select
                       value={draft.difficulty}
                       onChange={e =>
@@ -669,16 +669,16 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                       }
                       className="w-full bg-[#050d09] border border-[#1a422d] rounded px-3 py-1.5 text-white outline-none"
                     >
-                      <option value="Beginner">Beginner (مقدماتی)</option>
-                      <option value="Intermediate">Intermediate (متوسط)</option>
-                      <option value="Advanced">Advanced (پیشرفته)</option>
-                      <option value="Master">Master (حرفه‌ای)</option>
+                      <option value="Beginner">Beginner</option>
+                      <option value="Intermediate">Intermediate</option>
+                      <option value="Advanced">Advanced</option>
+                      <option value="Master">Master</option>
                     </select>
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-[#a2f5bf] font-semibold mb-1">توضیحات عملیاتی</label>
+                  <label className="block text-[#a2f5bf] font-semibold mb-1">Operational Briefing Notes</label>
                   <input
                     type="text"
                     maxLength={300}
@@ -689,7 +689,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                 </div>
 
                 {/* Airport & Runways */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3" dir="ltr">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-[#00ff66] font-semibold mb-1">Airport</label>
                     <select
@@ -736,11 +736,11 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                   </div>
                 </div>
 
-                {/* Weather Controls (explicit label + numeric value + unit) */}
+                {/* Weather Controls */}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3 pt-2 border-t border-[#163826] tabular-nums">
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>جهت باد</span>
+                      <span>Wind Direction</span>
                       <span className="font-mono text-white">{draft.windDirection.toString().padStart(3, '0')}°</span>
                     </label>
                     <input
@@ -755,7 +755,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>سرعت باد</span>
+                      <span>Wind Speed</span>
                       <span className="font-mono text-white">{draft.windSpeed} kt</span>
                     </label>
                     <input
@@ -773,7 +773,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>تندباد (Gusts)</span>
+                      <span>Gusts</span>
                       <span className="font-mono text-white">{draft.gusts} kt</span>
                     </label>
                     <input
@@ -788,7 +788,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>فشار QNH</span>
+                      <span>QNH Pressure</span>
                       <span className="font-mono text-white">{draft.qnh} hPa</span>
                     </label>
                     <input
@@ -803,7 +803,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>دید افقی</span>
+                      <span>Visibility</span>
                       <span className="font-mono text-white">{draft.visibilityNM} NM</span>
                     </label>
                     <input
@@ -818,7 +818,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-[11px] text-[#a2f5bf] mb-1">بارش / مه</label>
+                    <label className="block text-[11px] text-[#a2f5bf] mb-1">Precipitation / Fog</label>
                     <select
                       value={draft.precipitation}
                       onChange={e =>
@@ -829,10 +829,10 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                       }
                       className="w-full bg-[#050d09] border border-[#1a422d] rounded px-2 py-1 text-white outline-none"
                     >
-                      <option value="None">صاف (None)</option>
-                      <option value="Light Rain">باران ملایم (Light Rain)</option>
-                      <option value="Rain">بارندگی شدید (Rain)</option>
-                      <option value="Fog">مه غلیظ (Fog)</option>
+                      <option value="None">Clear (None)</option>
+                      <option value="Light Rain">Light Rain</option>
+                      <option value="Rain">Heavy Rain</option>
+                      <option value="Fog">Dense Fog</option>
                     </select>
                   </div>
                 </div>
@@ -841,8 +841,8 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 border-t border-[#163826] tabular-nums">
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>ورودی اولیه</span>
-                      <span className="font-mono text-white">{draft.initialInbounds} فروند</span>
+                      <span>Initial Arrivals</span>
+                      <span className="font-mono text-white">{draft.initialInbounds}</span>
                     </label>
                     <input
                       type="range"
@@ -856,8 +856,8 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>خروجی اولیه</span>
-                      <span className="font-mono text-white">{draft.initialDepartures} فروند</span>
+                      <span>Initial Departures</span>
+                      <span className="font-mono text-white">{draft.initialDepartures}</span>
                     </label>
                     <input
                       type="range"
@@ -871,8 +871,8 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>بازه ورود جدید</span>
-                      <span className="font-mono text-white">{draft.spawnIntervalSec} ثانیه</span>
+                      <span>Spawn Interval</span>
+                      <span className="font-mono text-white">{draft.spawnIntervalSec}s</span>
                     </label>
                     <input
                       type="range"
@@ -887,7 +887,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
                   <div>
                     <label className="flex justify-between text-[11px] text-[#a2f5bf] mb-1">
-                      <span>نسبت پهن‌پیکر</span>
+                      <span>Heavy Aircraft Ratio</span>
                       <span className="font-mono text-white">{Math.round(draft.heavyRatio * 100)}%</span>
                     </label>
                     <input
@@ -912,13 +912,13 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                       className="w-4 h-4 accent-[#ff4d4d]"
                     />
                     <span className="font-semibold text-white">
-                      فعال‌سازی رویداد اضطراری خودکار (Squawk 7700)
+                      Inject Automatic Emergency (Squawk 7700)
                     </span>
                   </label>
 
                   {draft.allowEmergencies && (
                     <div className="flex items-center gap-2 tabular-nums">
-                      <span className="text-[11px] text-[#ffb3b8]">تأخیر اعلام اضطرار:</span>
+                      <span className="text-[11px] text-[#ffb3b8]">Trigger Delay:</span>
                       <input
                         type="range"
                         min={10}
@@ -942,7 +942,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                     className="px-4 py-2 bg-[#123321] hover:bg-[#19472f] text-[#00ff66] border border-[#246340] rounded font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap"
                   >
                     <Save className="w-3.5 h-3.5" />
-                    <span>ذخیره سناریو</span>
+                    <span>Save Scenario</span>
                   </button>
 
                   <button
@@ -952,7 +952,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                     className="px-4 py-2 bg-[#00ff66] hover:bg-[#39ff14] text-black font-bold rounded flex items-center gap-1.5 transition-colors whitespace-nowrap"
                   >
                     <Play className="w-3.5 h-3.5" />
-                    <span>ذخیره و اجرای فوری</span>
+                    <span>Save &amp; Launch</span>
                   </button>
                 </div>
               </div>

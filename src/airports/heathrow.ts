@@ -116,7 +116,11 @@ export const HEATHROW_WAYPOINTS: Waypoint[] = [
   },
 ];
 
-export const HEATHROW_AIRPORT: Airport = {
+import { attachProceduresToAirport } from './procedures';
+import { attachTerrainToAirport } from './terrain';
+import { RunwayGeometry } from '../engine/runwayGeometry';
+
+export const HEATHROW_AIRPORT: Airport = attachTerrainToAirport(attachProceduresToAirport({
   icao: 'EGLL',
   iata: 'LHR',
   name: 'London Heathrow Airport',
@@ -188,9 +192,7 @@ export const HEATHROW_AIRPORT: Airport = {
     },
   ],
   waypoints: HEATHROW_WAYPOINTS,
-};
-
-import { RunwayGeometry } from '../engine/runwayGeometry';
+}));
 
 export const HEATHROW_RUNWAY_GEOMETRIES: RunwayGeometry[] = [
   {

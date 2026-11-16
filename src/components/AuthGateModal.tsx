@@ -44,7 +44,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   onOpenCertificate,
 }) => {
   const [callsignInput, setCallsignInput] = useState(
-    userProfile?.callsign || 'CTR-IRAN01'
+    userProfile?.callsign || 'CTR-ALPHA1'
   );
   const [isBusy, setIsBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -69,9 +69,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('popup-closed-by-user')) {
-        setErrorMsg('پنجره ورود گوگل بسته شد. در صورت تمایل دوباره تلاش کنید یا به صورت مهمان وارد شوید.');
+        setErrorMsg('Google sign-in popup was closed. Please try again or continue as a Guest Controller.');
       } else {
-        setErrorMsg(`خطا در ورود با حساب گوگل: ${msg}`);
+        setErrorMsg(`Google sign-in failed: ${msg}`);
       }
     } finally {
       setIsBusy(false);
@@ -95,9 +95,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
     try {
       const updated = await updateControllerCallsign(userProfile, callsignInput);
       onProfileReady(updated);
-      setStatusMsg('نام تماس کنترلر با موفقیت ذخیره شد.');
+      setStatusMsg('Controller callsign updated successfully.');
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'خطا در بروزرسانی نام تماس');
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to update controller callsign');
     } finally {
       setIsBusy(false);
     }
@@ -112,7 +112,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       }
       onSignedOut();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'خطا در خروج از حساب');
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to sign out');
     } finally {
       setIsBusy(false);
     }
@@ -128,8 +128,8 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
           <div className="flex items-center gap-2.5">
             <ShieldCheck className="w-5 h-5 text-[#00ff66]" />
             <div>
-              <h2 className="text-sm font-bold text-white" dir="rtl">
-                {userProfile ? 'پروفایل کنترلر و وضعیت گواهینامه' : 'ورود به برج مراقبت SKYCONTROL'}
+              <h2 className="text-sm font-bold text-white">
+                {userProfile ? 'Controller Profile & Certification' : 'Sign In to SKYCONTROL ATC'}
               </h2>
             </div>
           </div>
@@ -138,7 +138,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
             <button
               onClick={onClose}
               className="p-1.5 rounded hover:bg-[#163826] text-[#5da87d] hover:text-white transition-colors"
-              title="بستن"
+              title="Close"
             >
               <X className="w-4 h-4" />
             </button>
@@ -146,7 +146,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-5 flex flex-col gap-5 text-xs" dir="rtl">
+        <div className="p-5 flex flex-col gap-5 text-xs">
           {errorMsg && (
             <div className="p-3 bg-[#361114] border border-[#ff3344]/60 rounded flex items-start gap-2 text-[#ffb3b8]">
               <AlertCircle className="w-4 h-4 text-[#ff4d4d] shrink-0 mt-0.5" />
@@ -167,18 +167,18 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               <div className="pb-4 border-b border-[#163826] flex flex-col gap-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-base font-bold text-white font-mono" dir="ltr">
+                    <div className="text-base font-bold text-white font-mono">
                       {userProfile.callsign}
                     </div>
                     <div className="text-[11px] text-[#70b88d] mt-0.5 flex items-center gap-2">
                       <span>
                         {userProfile.mode === 'google'
-                          ? `حساب ابری Google (${userProfile.email || 'متصل'})`
-                          : 'حالت مهمان · ذخیره محلی مرورگر'}
+                          ? `Google Cloud Account (${userProfile.email || 'Connected'})`
+                          : 'Guest Mode · Local Browser Storage'}
                       </span>
                       <span>·</span>
                       <span className={userProfile.certified ? 'text-[#ffd166] font-semibold' : 'text-[#85cca1]'}>
-                        {userProfile.certified ? 'دارای گواهینامه رسمی ATC' : 'در حال آموزش'}
+                        {userProfile.certified ? 'Certified ATC Director' : 'In Training'}
                       </span>
                     </div>
                   </div>
@@ -192,13 +192,13 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                       className="px-3 py-2 bg-[#2b240e] hover:bg-[#3d3313] border border-[#ffd166]/60 text-[#ffd166] rounded font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                     >
                       <Award className="w-4 h-4" />
-                      <span>مشاهده گواهینامه</span>
+                      <span>View Certificate</span>
                     </button>
                   )}
                 </div>
 
                 {/* Telemetry Summary Row */}
-                <div className="grid grid-cols-4 gap-2 pt-2 font-mono tabular-nums text-center" dir="ltr">
+                <div className="grid grid-cols-4 gap-2 pt-2 font-mono tabular-nums text-center">
                   <div className="p-2 bg-[#0b1a12] border border-[#163826] rounded">
                     <div className="text-[10px] text-[#5da87d]">ACADEMY</div>
                     <div className="text-sm font-bold text-[#00ff66]">{completedCount}/5</div>
@@ -222,7 +222,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               <form onSubmit={handleSaveCallsign} className="flex flex-col gap-2">
                 <label className="text-[11px] font-semibold text-[#a2f5bf] flex items-center gap-1.5">
                   <Edit3 className="w-3.5 h-3.5 text-[#00ff66]" />
-                  <span>نام تماس کنترلر (در گواهینامه ثبت می‌شود)</span>
+                  <span>Controller Callsign (Printed on ATC Certificate)</span>
                 </label>
                 <div className="flex gap-2">
                   <input
@@ -231,7 +231,6 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     required
                     value={callsignInput}
                     onChange={e => setCallsignInput(e.target.value)}
-                    dir="ltr"
                     className="flex-1 bg-[#050d09] border border-[#1a422d] focus:border-[#00ff66] rounded px-3 py-2 text-white font-mono outline-none"
                     placeholder="Controller Callsign"
                   />
@@ -240,7 +239,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     disabled={isBusy}
                     className="px-4 py-2 bg-[#143b26] hover:bg-[#1c5235] text-[#00ff66] border border-[#246340] rounded font-semibold transition-colors whitespace-nowrap shrink-0"
                   >
-                    ذخیره نام
+                    Save Callsign
                   </button>
                 </div>
               </form>
@@ -255,11 +254,11 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     className="flex-1 px-4 py-2.5 bg-[#00ff66] hover:bg-[#39ff14] text-black font-bold rounded flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
                   >
                     <ArrowUpRight className="w-4 h-4" />
-                    <span>اتصال به Google و انتقال پیشرفت به ابر</span>
+                    <span>Link Google Account &amp; Sync Cloud</span>
                   </button>
                 ) : (
                   <span className="text-[11px] text-[#5da87d]">
-                    تمامی مأموریت‌ها و سناریوها در Firestore همگام هستند.
+                    All missions and custom scenarios are synced to Cloud Firestore.
                   </span>
                 )}
 
@@ -270,7 +269,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                   className="px-3.5 py-2 bg-[#2a1214] hover:bg-[#3d191c] text-[#ff858d] border border-[#5e2226] rounded font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                 >
                   <LogOut className="w-3.5 h-3.5" />
-                  <span>{userProfile.mode === 'google' ? 'خروج از حساب' : 'تغییر حالت ورود'}</span>
+                  <span>{userProfile.mode === 'google' ? 'Sign Out' : 'Switch Mode'}</span>
                 </button>
               </div>
             </>
@@ -278,15 +277,15 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
             /* Initial Login Gate */
             <>
               <p className="text-[#a2f5bf] leading-relaxed text-[12px]">
-                برای ذخیره پیشرفت مأموریت‌های آموزشی، صدور گواهینامه رسمی کنترل ترافیک هوایی و ساخت سناریوهای شخصی، یکی از روش‌های زیر را انتخاب کنید:
+                Select how to store your Flight Academy mission progress, official ATC certification, and custom scenarios:
               </p>
 
               {/* Option 1: Google Cloud Account */}
               <div className="p-4 bg-[#0b1b13] border border-[#1d4d33] rounded-md flex flex-col gap-3">
                 <div>
-                  <h3 className="text-sm font-bold text-white">حساب کاربری دائمی (Google Cloud)</h3>
+                  <h3 className="text-sm font-bold text-white">Permanent Account (Google Cloud)</h3>
                   <p className="text-[11px] text-[#7ec29a] mt-1">
-                    ذخیره همیشگی گواهینامه و سناریوهای اختصاصی در پایگاه داده ابری با قابلیت دسترسی از هر دستگاه.
+                    Save your certification record and custom scenarios permanently in the cloud across any device.
                   </p>
                 </div>
                 <button
@@ -296,7 +295,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                   className="w-full py-2.5 px-4 bg-[#00ff66] hover:bg-[#39ff14] disabled:opacity-60 text-black font-bold rounded flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  <span>{isBusy ? 'در حال اتصال به Google...' : 'ورود با حساب گوگل'}</span>
+                  <span>{isBusy ? 'Connecting to Google...' : 'Sign In with Google'}</span>
                 </button>
               </div>
 
@@ -306,9 +305,9 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                 className="p-4 bg-[#0a1610] border border-[#163826] rounded-md flex flex-col gap-3"
               >
                 <div>
-                  <h3 className="text-sm font-bold text-[#00e5ff]">ورود سریع مهمان (ذخیره محلی)</h3>
+                  <h3 className="text-sm font-bold text-[#00e5ff]">Quick Guest Access (Local Storage)</h3>
                   <p className="text-[11px] text-[#7ec29a] mt-1">
-                    شروع فوری بدون نیاز به ایمیل؛ پیشرفت و سناریوها در مرورگر شما ذخیره می‌شود و هر زمان بخواهید می‌توانید به حساب گوگل منتقل کنید.
+                    Start immediately without an email address. Progress saves locally in your browser and can be upgraded to Google anytime.
                   </p>
                 </div>
 
@@ -319,9 +318,8 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     required
                     value={callsignInput}
                     onChange={e => setCallsignInput(e.target.value)}
-                    dir="ltr"
                     className="flex-1 bg-[#050d09] border border-[#1a422d] focus:border-[#00e5ff] rounded px-3 py-2 text-white font-mono outline-none"
-                    placeholder="Callsign (e.g. CTR-ALI)"
+                    placeholder="Callsign (e.g. CTR-ALPHA1)"
                   />
                   <button
                     type="submit"
@@ -329,7 +327,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
                     className="px-4 py-2 bg-[#0f2e3b] hover:bg-[#154254] text-[#00e5ff] border border-[#1f627d] rounded font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                   >
                     <UserCheck className="w-4 h-4" />
-                    <span>ورود مهمان</span>
+                    <span>Enter as Guest</span>
                   </button>
                 </div>
               </form>

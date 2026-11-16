@@ -15,10 +15,10 @@ export const ACADEMY_MISSIONS: MissionDefinition[] = [
   {
     id: 'mission_1',
     number: 1,
-    title: 'مبانی وکتورینگ و کاهش ارتفاع',
-    subtitle: 'مرحله ۱ · London Heathrow (EGLL)',
+    title: 'Vectoring & Descent Fundamentals',
+    subtitle: 'Stage 1 · London Heathrow (EGLL)',
     description:
-      'دو پرواز ورودی را از محدوده بیرونی رادار با رعایت جدایی ایمن (۳ مایل / ۱۰۰۰ پا) کاهش ارتفاع داده و با زاویه مناسب روی مسیر ILS باند 27R فرود بیاورید.',
+      'Descend and vector 2 inbound arrivals from outer radar boundaries onto the RWY 27R ILS approach while maintaining standard separation (3 NM / 1,000 ft).',
     airportIcao: 'EGLL',
     landingRunwayId: '27R',
     departureRunwayId: '27L',
@@ -43,10 +43,10 @@ export const ACADEMY_MISSIONS: MissionDefinition[] = [
   {
     id: 'mission_2',
     number: 2,
-    title: 'توالی‌چینی ILS و مدیریت هم‌زمان باند',
-    subtitle: 'مرحله ۲ · Tehran Mehrabad (OIII)',
+    title: 'ILS Sequencing & Parallel Runway Ops',
+    subtitle: 'Stage 2 · Tehran Mehrabad (OIII)',
     description:
-      'در فرودگاه مرتفع مهرآباد (ارتفاع ۳۹۶۲ پا)، ۳ پرواز ورودی را روی باند 29R فرود بیاورید و هم‌زمان ۲ پرواز خروجی را از باند موازی 29L تیک‌آف دهید.',
+      'At high-elevation Mehrabad (3,962 ft AMSL), land 3 inbound flights on RWY 29R while launching 2 departures off parallel RWY 29L.',
     airportIcao: 'OIII',
     landingRunwayId: '29R',
     departureRunwayId: '29L',
@@ -71,10 +71,10 @@ export const ACADEMY_MISSIONS: MissionDefinition[] = [
   {
     id: 'mission_3',
     number: 3,
-    title: 'چالش باد جانبی شدید و باندهای متقاطع',
-    subtitle: 'مرحله ۳ · Crosswind Ridge Academy (TRN1)',
+    title: 'Severe Crosswind & Crossing Runways',
+    subtitle: 'Stage 3 · Crosswind Ridge Academy (TRN1)',
     description:
-      'در پایگاه تمرینی TRN1 تحت باد جانبی ۲۶ نات (تندباد ۳۴ نات) و باندهای متقاطع X (۳۶ و ۲۴)، ۲ فرود پایدار و ۱ برخاست ایمن را بدون تداخل روی باند انجام دهید.',
+      'Operate intersecting X-runways (36 / 24) under 26 kt crosswind (gusting 34 kt): execute 2 stabilized landings and 1 safe crossing departure.',
     airportIcao: 'TRN1',
     landingRunwayId: '36',
     departureRunwayId: '24',
@@ -99,10 +99,10 @@ export const ACADEMY_MISSIONS: MissionDefinition[] = [
   {
     id: 'mission_4',
     number: 4,
-    title: 'مدیریت وضعیت اضطراری 7700 و Go-Around',
-    subtitle: 'مرحله ۴ · Converging Delta Base (TRN2)',
+    title: 'Squawk 7700 Emergency & Go-Around',
+    subtitle: 'Stage 4 · Converging Delta Base (TRN2)',
     description:
-      'یک پرواز با کد اضطراری Squawk 7700 درخواست فرود فوری دارد. ضمن اولویت‌دهی و فرود ۲ پرواز (شامل پرواز اضطراری)، حداقل یک دستور Go-Around ایمن را مدیریت و پرواز را دوباره به باند هدایت کنید.',
+      'Handle a priority Squawk 7700 emergency arrival alongside converging runway traffic. Land 2 aircraft (including the emergency flight) and manage at least one safe Go-Around re-sequence.',
     airportIcao: 'TRN2',
     landingRunwayId: '15',
     departureRunwayId: '20',
@@ -129,10 +129,10 @@ export const ACADEMY_MISSIONS: MissionDefinition[] = [
   {
     id: 'mission_5',
     number: 5,
-    title: 'آزمون نهایی دریافت گواهینامه ATC',
-    subtitle: 'مرحله ۵ · New York Kennedy (KJFK)',
+    title: 'Final ATC Certification Checkride',
+    subtitle: 'Stage 5 · New York Kennedy (KJFK)',
     description:
-      'چک‌راید نهایی کنترلر ارشد در فرودگاه متقاطع جان اف کندی: ۳ فرود موفق و ۲ برخاست از باندهای متقاطع 31L و 04L با حفظ امتیاز حداقل ۹۰٪ و صفر تخلف جدایی.',
+      'Master checkride at intersecting KJFK: complete 3 arrivals on 31L and 2 departures off 04L with zero separation violations and a minimum score of 90%.',
     airportIcao: 'KJFK',
     landingRunwayId: '31L',
     departureRunwayId: '04L',
@@ -171,7 +171,7 @@ export function buildMissionObjectives(
   if (mission.targetLandings > 0) {
     objectives.push({
       id: 'landings',
-      label: `فرود ایمن (${stats.landings}/${mission.targetLandings})`,
+      label: `Safe Landings (${stats.landings}/${mission.targetLandings})`,
       current: stats.landings,
       target: mission.targetLandings,
       completed: stats.landings >= mission.targetLandings,
@@ -181,7 +181,7 @@ export function buildMissionObjectives(
   if (mission.targetDepartures > 0) {
     objectives.push({
       id: 'departures',
-      label: `تیک‌آف خروجی (${stats.departures}/${mission.targetDepartures})`,
+      label: `Departures (${stats.departures}/${mission.targetDepartures})`,
       current: stats.departures,
       target: mission.targetDepartures,
       completed: stats.departures >= mission.targetDepartures,
@@ -191,7 +191,7 @@ export function buildMissionObjectives(
   if (mission.requireEmergencyHandled) {
     objectives.push({
       id: 'emergency',
-      label: 'فرود پرواز اضطراری (Squawk 7700)',
+      label: 'Land Emergency Aircraft (Squawk 7700)',
       current: emergencyHandled ? 1 : 0,
       target: 1,
       completed: emergencyHandled,
@@ -202,7 +202,7 @@ export function buildMissionObjectives(
     const gaOk = goAroundObserved || stats.goArounds >= 1;
     objectives.push({
       id: 'go_around',
-      label: 'اجرای موفق یک Go-Around کنترل‌شده',
+      label: 'Execute Controlled Go-Around',
       current: gaOk ? 1 : 0,
       target: 1,
       completed: gaOk,
@@ -211,7 +211,7 @@ export function buildMissionObjectives(
 
   objectives.push({
     id: 'separation',
-    label: `حفظ جدایی استاندارد (حداکثر ${mission.maxViolations} خطا)`,
+    label: `Maintain Separation (Max ${mission.maxViolations} STCA)`,
     current: stats.separationViolations,
     target: mission.maxViolations,
     completed: stats.separationViolations <= mission.maxViolations,
@@ -221,7 +221,7 @@ export function buildMissionObjectives(
 
   objectives.push({
     id: 'score',
-    label: `امتیاز عملیاتی حداقل ${mission.minScore}%`,
+    label: `Minimum Operational Score ${mission.minScore}%`,
     current: stats.score,
     target: mission.minScore,
     completed: stats.score >= mission.minScore,
@@ -259,7 +259,7 @@ export function evaluateMissionProgress(
     return {
       ...prevState,
       status: 'failed',
-      failReason: `تخطی از حداقل جدایی استاندارد (STCA Violations: ${stats.separationViolations})`,
+      failReason: `Standard separation minimum breached (STCA Violations: ${stats.separationViolations})`,
       emergencyHandled,
       goAroundObserved,
       objectives,

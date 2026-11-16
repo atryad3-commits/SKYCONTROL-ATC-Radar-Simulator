@@ -111,14 +111,82 @@ export interface Runway {
   occupied: boolean;        // Runway occupancy state
 }
 
+export type WaypointRole = 'HOLD' | 'IAF' | 'FAF' | 'EXIT' | 'VOR';
+
 export interface Waypoint {
   name: string;             // e.g. "LAM"
   description: string;      // e.g. "Lambourne VOR"
   position: Position2D;     // In NM from airport center
+  role?: WaypointRole;
   isHoldingFix?: boolean;
   defaultHoldingHeading?: number;
   holdingTurnDirection?: 'Right' | 'Left';
   isInitialApproachFix?: boolean;
+  isFinalApproachFix?: boolean;
+  isDepartureExit?: boolean;
+  altitudeConstraint?: string; // e.g. "MAX 6000ft" or "AT 3000ft"
+  speedConstraintKt?: number;  // e.g. 220
+}
+
+export interface ProcedureLeg {
+  fromFix: string;
+  toFix: string;
+  courseDeg: number;
+  distanceNM: number;
+  altitudeConstraint?: string;
+  minAltitudeFt?: number;
+  maxAltitudeFt?: number;
+  speedLimitKt?: number;
+}
+
+export interface PublishedProcedureRoute {
+  id: string;
+  name: string;             // e.g. "LAM3A", "WOD1G"
+  type: 'STAR' | 'SID';
+  description: string;
+  runwayIds: string[];
+  waypointNames: string[];
+  legs: ProcedureLeg[];
+  initialAltitudeFt?: number;
+  finalAltitudeFt?: number;
+  maxSpeedKt?: number;
+}
+
+export interface TmaBoundary {
+  sectorLabel: string;
+  floorLabel: string;
+  ceilingLabel: string;
+  transitionAltitudeFt: number;
+  polygon: Position2D[];
+}
+
+export interface AirportNavVisibility {
+  visibleStarIds: string[];
+  visibleSidIds: string[];
+  visibleWaypoints: string[];
+}
+
+export interface PreFlightSessionConfig {
+  airportIcao: string;
+  landingRunwayId: string;
+  departureRunwayId: string;
+  mode: 'free' | 'mission' | 'custom';
+  missionId?: MissionId;
+  customScenarioId?: string;
+  spawnIntervalSec: number;
+  maxTraffic: number;
+  initialInbounds: number;
+  initialDepartures: number;
+  heavyRatio: number;
+  allowEmergencies: boolean;
+  emergencyDelaySec: number;
+  weather: WeatherCondition;
+  radioPreset: 'clear_communication' | 'normal_aviation' | 'weak_signal' | 'heavy_interference' | 'emergency_transmission';
+  audioMuted: boolean;
+  audioVolume: number;
+  towerVoiceId?: string;
+  simSpeed: number;
+  perAirportVisibility?: Record<string, AirportNavVisibility>;
 }
 
 export interface AirspaceSector {
@@ -128,6 +196,15 @@ export interface AirspaceSector {
   floorAltitude: number;
   ceilingAltitude: number;
   transitionAltitude: number;
+}
+
+export interface TerrainFeature {
+  id: string;
+  kind: 'contour' | 'water' | 'river' | 'coastline' | 'peak' | 'obstacle';
+  label?: string;
+  elevationFt?: number;
+  points: Position2D[];
+  closed?: boolean;
 }
 
 export interface Airport {
@@ -143,6 +220,10 @@ export interface Airport {
   sector: AirspaceSector;
   defaultArrivalRunway: string;
   defaultDepartureRunway: string;
+  approachRoutes?: PublishedProcedureRoute[];
+  departureRoutes?: PublishedProcedureRoute[];
+  tmaBoundary?: TmaBoundary;
+  terrainFeatures?: TerrainFeature[];
 }
 
 export interface AirportProfile {
@@ -152,7 +233,7 @@ export interface AirportProfile {
   category: 'International' | 'Training';
   runwayLayoutLabel: string;
   difficultyLabel: 'Standard' | 'Moderate' | 'Challenging' | 'High Crosswind';
-  summaryFa: string;
+  summary: string;
   defaultWeather: WeatherCondition;
   directorCallsign: string;
   vhfFrequency: string;

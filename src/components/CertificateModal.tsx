@@ -120,12 +120,12 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
         <div className="px-5 py-3 bg-[#0c1d14] border-b border-[#1b422d] flex items-center justify-between">
           <div className="flex items-center gap-2 text-[#ffd166]">
             <Award className="w-5 h-5" />
-            <span className="font-bold text-sm" dir="rtl">گواهینامه رسمی کنترلر ترافیک هوایی (ATC)</span>
+            <span className="font-bold text-sm">Official Air Traffic Control (ATC) Certificate</span>
           </div>
           <button
             onClick={onClose}
             className="p-1.5 rounded hover:bg-[#163826] text-[#5da87d] hover:text-white transition-colors"
-            title="بستن"
+            title="Close"
           >
             <X className="w-4 h-4" />
           </button>
@@ -141,8 +141,8 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
             OFFICIAL ATC APPROACH DIRECTOR CERTIFICATE
           </h2>
 
-          <p className="text-xs text-[#a2f5bf] max-w-lg leading-relaxed" dir="rtl">
-            گواهی می‌شود کنترلر زیر تمامی ۵ مرحله آموزشی، عملیات باندهای موازی و متقاطع، باد جانبی شدید و مدیریت وضعیت اضطراری Squawk 7700 را با موفقیت کامل پشت سر گذاشته است.
+          <p className="text-xs text-[#a2f5bf] max-w-lg leading-relaxed">
+            This certifies that the controller below has passed all five terminal radar qualification stages, parallel and intersecting runway operations, severe crosswind approaches, and Squawk 7700 emergency management.
           </p>
 
           <div className="py-3 px-8 border-y border-[#1f5437] my-1">
@@ -153,7 +153,7 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
           </div>
 
           {/* Completed Missions Verification */}
-          <div className="w-full max-w-lg grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-right text-[11px]" dir="rtl">
+          <div className="w-full max-w-lg grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-left text-[11px]">
             {ACADEMY_MISSIONS.map(m => (
               <div key={m.id} className="flex items-center gap-1.5 text-[#a2f5bf]">
                 <CheckCircle2 className="w-3.5 h-3.5 text-[#00ff66] shrink-0" />
@@ -172,21 +172,21 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
         </div>
 
         {/* Footer Actions */}
-        <div className="px-5 py-3.5 bg-[#0a1811] flex flex-wrap items-center justify-between gap-3" dir="rtl">
+        <div className="px-5 py-3.5 bg-[#0a1811] flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
               onClick={handleDownloadPng}
               className="px-4 py-2 bg-[#ffd166] hover:bg-[#ffe08a] text-black font-bold rounded flex items-center gap-1.5 transition-colors text-xs whitespace-nowrap"
             >
               <Download className="w-4 h-4" />
-              <span>دانلود تصویر گواهینامه (PNG)</span>
+              <span>Download Certificate (PNG)</span>
             </button>
             <button
               onClick={() => window.print()}
               className="px-3.5 py-2 bg-[#123321] hover:bg-[#19472f] text-[#00ff66] border border-[#246340] rounded font-semibold flex items-center gap-1.5 transition-colors text-xs whitespace-nowrap"
             >
               <Printer className="w-4 h-4" />
-              <span>چاپ</span>
+              <span>Print</span>
             </button>
           </div>
 
@@ -194,7 +194,7 @@ export const CertificateModal: React.FC<CertificateModalProps> = ({
             onClick={onClose}
             className="px-4 py-2 bg-[#0f281a] hover:bg-[#183d29] text-[#d1e7dd] border border-[#1e4a31] rounded font-semibold text-xs transition-colors whitespace-nowrap"
           >
-            بازگشت به رادار
+            Return to Radar
           </button>
         </div>
       </div>
