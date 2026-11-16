@@ -290,7 +290,7 @@ export class AudioEngine {
       return 0.014;
     }
     // Smooth continuous co-articulation across adjacent words & whole units
-    return -0.014;
+    return -0.022;
   }
 
   /**

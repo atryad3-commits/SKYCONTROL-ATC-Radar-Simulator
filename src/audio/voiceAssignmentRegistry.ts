@@ -254,7 +254,7 @@ export class VoiceAssignmentRegistry {
     const baseRate = hasRichOsPool
       ? 1.1 + (((hash >> 3) % 4) - 1) * 0.025
       : register.rate * 1.12;
-    const basePackPlaybackRate = 0.99 + ((hash >> 2) % 4) * 0.012;
+    const basePackPlaybackRate = 1.13 + ((hash >> 2) % 4) * 0.015;
 
     const carrierCenterHz =
       matchedProfile.voiceConfig.carrierCenterHz || 1160 + (hash % 8) * 95;
