@@ -520,11 +520,28 @@ export function generateInboundFlight(
   const inboundTrack = calculateBearing(x, y, aimX, aimY);
   const heading = Math.round(normalizeHeading(inboundTrack + (Math.random() * 16 - 8)));
 
+  const starAssignment = resolveArrivalProcedureAssignment(
+    airport,
+    arrivalRwy,
+    x,
+    y
+  );
+
   let assignedWaypoint: string | null = null;
+  let routeQueue: string[] = [];
   if (
     !options.isEmergency &&
     !options.initialScopeDistribution &&
-    Math.random() < 0.22 &&
+    starAssignment.arrivalRouteWaypoints.length > 0 &&
+    Math.random() < 0.32
+  ) {
+    // Some inbound flights check in already transitioning along their assigned STAR
+    assignedWaypoint = starAssignment.arrivalRouteWaypoints[0];
+    routeQueue = starAssignment.arrivalRouteWaypoints.slice(1);
+  } else if (
+    !options.isEmergency &&
+    !options.initialScopeDistribution &&
+    Math.random() < 0.18 &&
     airport.waypoints.length > 0
   ) {
     const frontCandidates = airport.waypoints.filter(wp => {
@@ -605,11 +622,21 @@ export function generateInboundFlight(
     expediteAltitude: Boolean(options.isEmergency),
     turnRate: 0,
     status: 'Inbound',
+    flightPhase: assignedWaypoint ? 'STAR_ENROUTE' : 'ARRIVAL',
     assignedRunway: arrivalRwy.id,
     transponder: options.isEmergency ? '7700' : getNextSquawk(),
     isEmergency: Boolean(options.isEmergency),
     emergencyType: options.isEmergency ? options.emergencyType || 'ENGINE_FAILURE' : null,
     assignedWaypoint,
+    routeQueue,
+    autoInterceptILS: Boolean(assignedWaypoint && routeQueue.length > 0),
+    assignedStarId: starAssignment.assignedStarId,
+    assignedStarName: starAssignment.assignedStarName,
+    assignedIafWaypoint: starAssignment.assignedIafWaypoint,
+    arrivalFafWaypoint: starAssignment.arrivalFafWaypoint,
+    arrivalRouteWaypoints: starAssignment.arrivalRouteWaypoints,
+    landingCleared: false,
+    landingClearanceRequested: false,
     holdingWaypoint: null,
     holdingInboundHeading: arrivalRwy.heading,
     holdingLegTime: 60,
@@ -634,6 +661,95 @@ export function generateInboundFlight(
       perf.normalDescentRateFpm,
       perf.serviceCeilingFt
     ),
+  };
+}
+
+export interface ArrivalProcedureAssignment {
+  assignedStarId: string;
+  assignedStarName: string;
+  assignedIafWaypoint: string;
+  arrivalFafWaypoint: string;
+  arrivalRouteWaypoints: string[];
+}
+
+/**
+ * Resolves a matching published STAR corridor, Initial Approach Fix (IAF), and Final Approach Fix (FAF)
+ * for an arriving aircraft based on its entry sector and assigned landing runway.
+ */
+export function resolveArrivalProcedureAssignment(
+  airport: Airport,
+  arrivalRunway: Runway,
+  spawnX: number = 0,
+  spawnY: number = 0
+): ArrivalProcedureAssignment {
+  const stars = airport.approachRoutes || [];
+  const matchingRwyStars = stars.filter(
+    s => s.runwayIds.includes(arrivalRunway.id) && s.waypointNames.length > 0
+  );
+  const starPool =
+    matchingRwyStars.length > 0
+      ? matchingRwyStars
+      : stars.filter(s => s.waypointNames.length > 0);
+
+  if (starPool.length > 0) {
+    // Score candidate STARs by proximity of entry fix to aircraft's entry coordinates
+    let bestStar = starPool[0];
+    let bestScore = Infinity;
+    for (const candidate of starPool) {
+      const entryFixName = candidate.waypointNames[0];
+      const entryWp = airport.waypoints.find(w => w.name === entryFixName);
+      if (entryWp) {
+        const dist = Math.hypot(entryWp.position.x - spawnX, entryWp.position.y - spawnY);
+        if (dist < bestScore) {
+          bestScore = dist;
+          bestStar = candidate;
+        }
+      }
+    }
+
+    const routeWps = bestStar.waypointNames.filter(name =>
+      airport.waypoints.some(w => w.name === name)
+    );
+    const iafWp =
+      routeWps.find(name => airport.waypoints.find(w => w.name === name)?.isInitialApproachFix) ||
+      routeWps[Math.max(0, routeWps.length - 2)] ||
+      routeWps[0] ||
+      '';
+    const fafWp =
+      routeWps.find(name => airport.waypoints.find(w => w.name === name)?.isFinalApproachFix) ||
+      routeWps[routeWps.length - 1] ||
+      iafWp;
+
+    return {
+      assignedStarId: bestStar.id,
+      assignedStarName: bestStar.name,
+      assignedIafWaypoint: iafWp,
+      arrivalFafWaypoint: fafWp,
+      arrivalRouteWaypoints: routeWps,
+    };
+  }
+
+  // Fallback for airfields without explicit STAR definitions
+  const iafCandidates = airport.waypoints.filter(
+    w => w.isInitialApproachFix || w.role === 'IAF' || w.isHoldingFix
+  );
+  const fafCandidates = airport.waypoints.filter(
+    w => w.isFinalApproachFix || w.role === 'FAF'
+  );
+  const chosenIaf =
+    iafCandidates[0] || airport.waypoints[0];
+  const chosenFaf =
+    fafCandidates[0] || chosenIaf;
+  const routeWps = Array.from(
+    new Set([chosenIaf?.name, chosenFaf?.name].filter(Boolean) as string[])
+  );
+
+  return {
+    assignedStarId: `${airport.icao}_STAR_${arrivalRunway.id}`,
+    assignedStarName: `${chosenIaf?.name || 'ARR'}1A`,
+    assignedIafWaypoint: chosenIaf?.name || '',
+    arrivalFafWaypoint: chosenFaf?.name || chosenIaf?.name || '',
+    arrivalRouteWaypoints: routeWps,
   };
 }
 

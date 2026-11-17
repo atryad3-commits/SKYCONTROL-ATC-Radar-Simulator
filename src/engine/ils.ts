@@ -9,11 +9,11 @@
  * - Runway occupancy validation and automatic go-around sequencing
  */
 
-import { Aircraft, AircraftStatus } from '../types';
+import { Aircraft, AircraftStatus, Waypoint } from '../types';
 import { RunwayGeometry, calculateRunwayRelativePosition, isInsideRunwayBoundaries } from './runwayGeometry';
 import { getAircraftPerformance, AircraftPerformance } from './aircraftPerformance';
 import { RunwayOccupancyManager } from './runwayOccupancy';
-import { getHeadingDelta, normalizeHeading } from './physics';
+import { calculateBearing, calculateDistance, getHeadingDelta, normalizeHeading } from './physics';
 
 const FEET_PER_NM = 6076.12;
 
@@ -278,9 +278,13 @@ export function initiateGoAround(
   const updatedAc: Aircraft = {
     ...ac,
     status: 'GoAround',
+    flightPhase: 'GO_AROUND',
     ilsArmed: false,
     ilsLocalizerCaptured: false,
     ilsGlideslopeCaptured: false,
+    landingCleared: false,
+    landingClearedRunway: undefined,
+    landingClearanceRequested: false,
     targetAltitude: clampedAlt,
     targetAirspeed: Math.min(210, perf.cruiseAirspeedIAS),
     verticalSpeed: perf.initialClimbRateFpm, // Model-matched go-around climb rate
@@ -290,6 +294,259 @@ export function initiateGoAround(
 
   const message = `Going around, climbing to ${clampedAlt} feet (${reason})`;
   return { aircraft: updatedAc, message };
+}
+
+export interface ArrivalGateStatus {
+  alongTrackNM: number;
+  crossTrackNM: number;
+  aglFt: number;
+  interceptOffsetDeg: number;
+  platformAltitudeFt: number;
+  approachInterceptSpeedKt: number;
+  isStarActive: boolean;
+  isBaseVectorActive: boolean;
+  isFinalInterceptActive: boolean;
+  isInsideCaptureCone: boolean;
+  isLocCaptured: boolean;
+  isGsCaptured: boolean;
+  isLandingClearanceAuthorized: boolean;
+  canClearToLand: boolean;
+  starName: string | null;
+  iafWaypointName: string | null;
+  fafWaypointName: string | null;
+  distToIafNM: number | null;
+}
+
+/**
+ * Evaluates current geometry, ILS capture readiness, STAR progression, and
+ * Tower landing clearance eligibility for an inbound arrival.
+ */
+export function evaluateArrivalGates(
+  ac: Aircraft,
+  runway: RunwayGeometry,
+  waypoints: Waypoint[] = []
+): ArrivalGateStatus {
+  const perf = getAircraftPerformance(ac.aircraftType);
+  const { alongTrackNM, crossTrackNM } = calculateRunwayRelativePosition(ac.x, ac.y, runway);
+  const loc = calculateLocalizerDeviation(ac.x, ac.y, runway);
+  const aglFt = Math.max(0, Math.round(ac.altitude - runway.elevationFeet));
+
+  const platformAltitudeFt = Math.min(
+    perf.serviceCeilingFt,
+    Math.ceil(runway.elevationFeet / 1000) * 1000 +
+      (perf.aircraftClass === 'LIGHT_GA' ? 2000 : 3000)
+  );
+  const approachInterceptSpeedKt = Math.min(
+    perf.maxAirspeedIAS,
+    Math.max(perf.minAirspeedIAS + 10, perf.typicalApproachSpeedIAS + 30)
+  );
+
+  const interceptOffsetDeg = Math.abs(Math.round(getHeadingDelta(runway.magneticHeading, ac.heading)));
+  const isInsideCaptureCone =
+    alongTrackNM > 0.3 &&
+    alongTrackNM <= (runway.ils?.usableRangeNM || 18.0) + 1.5 &&
+    Math.abs(loc.angularDeviationDeg) <= 14 &&
+    interceptOffsetDeg <= 48;
+
+  const isStarActive =
+    ac.flightPhase === 'STAR_ENROUTE' ||
+    Boolean(
+      ac.assignedWaypoint &&
+        ac.arrivalRouteWaypoints &&
+        ac.arrivalRouteWaypoints.includes(ac.assignedWaypoint)
+    );
+
+  const isBaseVectorActive = ac.flightPhase === 'BASE_VECTOR';
+  const isFinalInterceptActive = ac.flightPhase === 'FINAL_INTERCEPT';
+  const isLocCaptured = Boolean(ac.ilsLocalizerCaptured);
+  const isGsCaptured = Boolean(ac.ilsGlideslopeCaptured);
+
+  const isLandingClearanceAuthorized =
+    ac.landingCleared === true &&
+    (!ac.landingClearedRunway || ac.landingClearedRunway === runway.id);
+
+  const canClearToLand =
+    ac.status !== 'Landed' &&
+    ac.status !== 'Departing' &&
+    ac.status !== 'Outbound' &&
+    (isLocCaptured ||
+      isGsCaptured ||
+      ac.status === 'FinalApproach' ||
+      ac.status === 'Established' ||
+      (ac.ilsArmed && alongTrackNM > 0.1 && alongTrackNM <= 14.0 && Math.abs(loc.angularDeviationDeg) <= 12));
+
+  const iafName = ac.assignedIafWaypoint || null;
+  const fafName = ac.arrivalFafWaypoint || null;
+  let distToIafNM: number | null = null;
+  if (iafName) {
+    const wp = waypoints.find(w => w.name === iafName);
+    if (wp) {
+      distToIafNM = Math.round(calculateDistance(ac.x, ac.y, wp.position.x, wp.position.y) * 10) / 10;
+    }
+  }
+
+  return {
+    alongTrackNM: Math.round(alongTrackNM * 10) / 10,
+    crossTrackNM: Math.round(crossTrackNM * 10) / 10,
+    aglFt,
+    interceptOffsetDeg,
+    platformAltitudeFt,
+    approachInterceptSpeedKt,
+    isStarActive,
+    isBaseVectorActive,
+    isFinalInterceptActive,
+    isInsideCaptureCone,
+    isLocCaptured,
+    isGsCaptured,
+    isLandingClearanceAuthorized,
+    canClearToLand,
+    starName: ac.assignedStarName || null,
+    iafWaypointName: iafName,
+    fafWaypointName: fafName,
+    distToIafNM,
+  };
+}
+
+/**
+ * Stage 1 of 3-Stage Intercept: Computes a signed Left/Right Base Leg vector
+ * targeting an extended centerline gate 11-12 NM before the runway threshold.
+ */
+export function computeBaseLegVector(
+  ac: Aircraft,
+  runway: RunwayGeometry
+): {
+  heading: number;
+  altitudeFt: number;
+  speedKt: number;
+  side: 'LEFT' | 'RIGHT';
+  gateAlongTrackNM: number;
+} {
+  const perf = getAircraftPerformance(ac.aircraftType);
+  const { alongTrackNM, crossTrackNM } = calculateRunwayRelativePosition(ac.x, ac.y, runway);
+  const side: 'LEFT' | 'RIGHT' = crossTrackNM >= 0 ? 'RIGHT' : 'LEFT';
+  const sideSign = side === 'RIGHT' ? 1 : -1;
+
+  // Target a clean base turn-in corner offset laterally from the 11.5 NM centerline gate
+  const gateAlongTrackNM = alongTrackNM > 13.5 ? Math.min(15.0, alongTrackNM - 1.5) : 11.5;
+  const baseCornerCrossNM =
+    Math.abs(crossTrackNM) > 2.5 && alongTrackNM >= 7.5
+      ? sideSign * 1.5
+      : sideSign * 4.0;
+
+  const rwyRad = (runway.magneticHeading * Math.PI) / 180;
+  const alongUnitX = Math.sin(rwyRad);
+  const alongUnitY = Math.cos(rwyRad);
+  const crossUnitX = Math.cos(rwyRad);
+  const crossUnitY = -Math.sin(rwyRad);
+
+  const cornerX =
+    runway.threshold.x - gateAlongTrackNM * alongUnitX + baseCornerCrossNM * crossUnitX;
+  const cornerY =
+    runway.threshold.y - gateAlongTrackNM * alongUnitY + baseCornerCrossNM * crossUnitY;
+
+  const distToCorner = calculateDistance(ac.x, ac.y, cornerX, cornerY);
+  const heading =
+    distToCorner > 1.2
+      ? Math.round(calculateBearing(ac.x, ac.y, cornerX, cornerY))
+      : Math.round(normalizeHeading(runway.magneticHeading - sideSign * 85));
+
+  const platformAlt = Math.min(
+    perf.serviceCeilingFt,
+    Math.ceil(runway.elevationFeet / 1000) * 1000 +
+      (perf.aircraftClass === 'LIGHT_GA' ? 2000 : 3500)
+  );
+  const altitudeFt = Math.min(ac.targetAltitude || platformAlt, platformAlt);
+  const speedKt = Math.max(
+    perf.minAirspeedIAS,
+    Math.min(
+      ac.targetAirspeed || perf.cruiseAirspeedIAS,
+      Math.min(perf.maxAirspeedIAS, perf.typicalApproachSpeedIAS + 45)
+    )
+  );
+
+  return {
+    heading: normalizeHeading(heading),
+    altitudeFt,
+    speedKt: Math.round(speedKt),
+    side,
+    gateAlongTrackNM: Math.round(gateAlongTrackNM * 10) / 10,
+  };
+}
+
+/**
+ * Stage 2 of 3-Stage Intercept: Computes a true 30° localizer intercept vector
+ * converging smoothly onto the runway extended centerline ahead of the FAF.
+ */
+export function computeFinalInterceptVector(
+  ac: Aircraft,
+  runway: RunwayGeometry
+): {
+  heading: number;
+  altitudeFt: number;
+  speedKt: number;
+  interceptAngleDeg: number;
+} {
+  const perf = getAircraftPerformance(ac.aircraftType);
+  const { alongTrackNM, crossTrackNM } = calculateRunwayRelativePosition(ac.x, ac.y, runway);
+
+  let interceptDelta = 0;
+  let interceptAngleDeg = 0;
+
+  if (Math.abs(crossTrackNM) <= 0.35 && alongTrackNM >= 2.0) {
+    // Already centered on localizer axis; steer subtle proportional lead onto runway course
+    const loc = calculateLocalizerDeviation(ac.x, ac.y, runway);
+    interceptDelta = -Math.max(-15, Math.min(15, loc.angularDeviationDeg * 5.0));
+    interceptAngleDeg = Math.round(Math.abs(interceptDelta));
+  } else if (alongTrackNM < 3.5) {
+    // Too close or past threshold to capture straight ahead; compute direct intercept back to 10 NM gate
+    const rwyRad = (runway.magneticHeading * Math.PI) / 180;
+    const gateX = runway.threshold.x - 10.5 * Math.sin(rwyRad);
+    const gateY = runway.threshold.y - 10.5 * Math.cos(rwyRad);
+    const brgToGate = Math.round(calculateBearing(ac.x, ac.y, gateX, gateY));
+    const platformAlt = Math.min(
+      perf.serviceCeilingFt,
+      Math.ceil(runway.elevationFeet / 1000) * 1000 +
+        (perf.aircraftClass === 'LIGHT_GA' ? 2000 : 3000)
+    );
+    const speedKt = Math.max(
+      perf.minAirspeedIAS,
+      Math.min(perf.maxAirspeedIAS, perf.typicalApproachSpeedIAS + 30)
+    );
+    return {
+      heading: normalizeHeading(brgToGate),
+      altitudeFt: Math.min(ac.targetAltitude || platformAlt, platformAlt),
+      speedKt: Math.round(speedKt),
+      interceptAngleDeg: Math.round(Math.abs(getHeadingDelta(runway.magneticHeading, brgToGate))),
+    };
+  } else {
+    // Converge onto extended centerline at up to 30° from the aircraft's current side
+    const sideSign = crossTrackNM >= 0 ? -1 : 1; // Right of course -> turn left (-); Left -> turn right (+)
+    const mag = Math.min(30, Math.max(18, Math.abs(crossTrackNM) * 18));
+    interceptDelta = sideSign * mag;
+    interceptAngleDeg = Math.round(mag);
+  }
+
+  const heading = normalizeHeading(Math.round(runway.magneticHeading + interceptDelta));
+  const platformAlt = Math.min(
+    perf.serviceCeilingFt,
+    Math.ceil(runway.elevationFeet / 1000) * 1000 +
+      (perf.aircraftClass === 'LIGHT_GA' ? 2000 : 3000)
+  );
+  const altitudeFt = Math.min(ac.targetAltitude || platformAlt, platformAlt);
+  const speedKt = Math.max(
+    perf.minAirspeedIAS,
+    Math.min(
+      ac.targetAirspeed || perf.cruiseAirspeedIAS,
+      Math.min(perf.maxAirspeedIAS, perf.typicalApproachSpeedIAS + 30)
+    )
+  );
+
+  return {
+    heading,
+    altitudeFt,
+    speedKt: Math.round(speedKt),
+    interceptAngleDeg,
+  };
 }
 
 /**
@@ -390,8 +647,29 @@ export function updateILSApproach(
     }
   }
 
-  // 5. Landing Sequence & Touchdown Validation
+  // 5. Landing Sequence, Mandatory Tower Landing Clearance Gate & Touchdown Validation
   // State transitions: FINAL_APPROACH -> FLARE (agl <= 50ft) -> TOUCHDOWN (agl <= 5ft, on runway)
+  if (locCaptured && alongTrackNM <= 0.45 && alongTrackNM >= -0.8 && aglAltitude <= 150 && currentStatus !== 'Landed') {
+    const landingForbiddenByClearance =
+      ac.landingCleared === false ||
+      (typeof ac.landingClearedRunway === 'string' && ac.landingClearedRunway !== runway.id);
+
+    if (landingForbiddenByClearance) {
+      const ga = initiateGoAround(ac, 'No landing clearance received');
+      if (occupancyManager) {
+        occupancyManager.releaseRunway(runway.id, ac.id);
+      }
+      return {
+        aircraft: ga.aircraft,
+        interceptedLocalizer: false,
+        interceptedGlideslope: false,
+        landed: false,
+        eventMessage: `Landing rejected: No landing clearance for runway ${runway.id}. ${ga.message}`,
+        eventType: 'LANDING_REJECTED',
+      };
+    }
+  }
+
   if (locCaptured && alongTrackNM <= 0.25 && alongTrackNM >= -0.8 && aglAltitude <= 60 && currentStatus !== 'Landed') {
     // Check runway clearance during short final and flare
     const runwayClearance = occupancyManager
@@ -456,6 +734,8 @@ export function updateILSApproach(
     } else {
       flightPhase = 'FINAL_APPROACH';
     }
+  } else if (currentStatus === 'Established') {
+    flightPhase = 'LOCALIZER_ESTABLISHED';
   } else if (currentStatus === 'Landed') {
     if (ac.indicatedAirspeed > 22.0) {
       flightPhase = 'ROLLOUT';

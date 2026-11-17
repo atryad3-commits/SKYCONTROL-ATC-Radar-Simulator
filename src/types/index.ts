@@ -116,6 +116,16 @@ export interface Aircraft {
   exitClimbMinAltitudeFt?: number;
   exitClimbMinSpeedKt?: number;
 
+  // Arrival STAR/IAF Routing & Tower Landing Clearance
+  assignedStarId?: string;
+  assignedStarName?: string;
+  assignedIafWaypoint?: string;
+  arrivalFafWaypoint?: string;
+  arrivalRouteWaypoints?: string[];
+  landingCleared?: boolean;
+  landingClearedRunway?: string;
+  landingClearanceRequested?: boolean;
+
   // UI & Radar Tagging
   tagOffset: { x: number; y: number }; // Vector leader line offset in screen px
   history: AircraftHistoryPoint[];     // Trail blips

@@ -240,8 +240,12 @@ export interface NavigationInstruction {
     | 'DIRECT'
     | 'ROUTE'
     | 'HOLD'
+    | 'STAR_APPROACH'
+    | 'BASE_VECTOR'
+    | 'FINAL_INTERCEPT'
     | 'ILS_VECTORS'
     | 'ILS_CLEARANCE'
+    | 'CLEARED_TO_LAND'
     | 'LINE_UP_WAIT'
     | 'TAKEOFF'
     | 'DEPARTURE_SID'
@@ -252,6 +256,9 @@ export interface NavigationInstruction {
   waypoint?: string;
   routeWaypoints?: string[];
   sidName?: string;
+  starName?: string;
+  side?: 'LEFT' | 'RIGHT';
+  speedKt?: number;
   runway?: string;
   heading?: number;
   turnDirection?: 'LEFT' | 'RIGHT';
@@ -519,6 +526,47 @@ export function formatNavigationForSpeech(
         spokenText: `${leadSpoken}hold at ${wpSpoken} as published, expect further clearance.`,
       };
     }
+    case 'STAR_APPROACH': {
+      const wps = nav.routeWaypoints && nav.routeWaypoints.length > 0
+        ? nav.routeWaypoints
+        : nav.waypoint
+        ? [nav.waypoint]
+        : [];
+      const rwy = nav.runway || ctx?.assignedRunway || '';
+      const alt = nav.altitudeFeet ?? 4000;
+      const altReadable = alt >= 8000 ? `FL${String(Math.round(alt / 100)).padStart(3, '0')}` : `${alt.toLocaleString('en-US')} ft`;
+      const starPrefix = nav.starName ? `cleared ${nav.starName} arrival, ` : '';
+      const wpsDisplay = wps.join(', ');
+      const wpsSpoken = wps.map(formatWaypointForSpeech).join(', ');
+      return {
+        displayText: `${leadDisplay}${starPrefix}proceed direct ${wpsDisplay}, descend to ${altReadable}, expect ILS runway ${rwy}`,
+        spokenText: `${leadSpoken}proceed direct ${wpsSpoken}, descend to ${formatAltitudeForSpeech(alt)}, expect I L S runway ${formatRunwayForSpeech(rwy)}.`,
+      };
+    }
+    case 'BASE_VECTOR': {
+      const rwy = nav.runway || ctx?.assignedRunway || '';
+      const hdg = nav.heading ?? ctx?.targetHeading ?? 0;
+      const hdgStr = String(((Math.round(hdg) % 360) + 360) % 360).padStart(3, '0');
+      const sideWord = nav.side === 'LEFT' ? 'left base' : 'right base';
+      const alt = nav.altitudeFeet ?? ctx?.targetAltitude ?? 3000;
+      const spd = Math.round(nav.speedKt ?? ctx?.targetAirspeed ?? 190);
+      const altReadable = alt >= 8000 ? `FL${String(Math.round(alt / 100)).padStart(3, '0')}` : `${alt.toLocaleString('en-US')} ft`;
+      return {
+        displayText: `${leadDisplay}turn heading ${hdgStr} for ${sideWord} runway ${rwy}, descend to ${altReadable}, speed ${spd} knots`,
+        spokenText: `${leadSpoken}turn ${formatHeadingForSpeech(hdg)} for ${sideWord} runway ${formatRunwayForSpeech(rwy)}, descend to ${formatAltitudeForSpeech(alt)}, ${formatAirspeedForSpeech(spd)}.`,
+      };
+    }
+    case 'FINAL_INTERCEPT': {
+      const rwy = nav.runway || ctx?.assignedRunway || '';
+      const hdg = nav.heading ?? ctx?.targetHeading ?? 0;
+      const hdgStr = String(((Math.round(hdg) % 360) + 360) % 360).padStart(3, '0');
+      const alt = nav.altitudeFeet ?? ctx?.targetAltitude ?? 3000;
+      const altReadable = alt >= 8000 ? `FL${String(Math.round(alt / 100)).padStart(3, '0')}` : `${alt.toLocaleString('en-US')} ft`;
+      return {
+        displayText: `${leadDisplay}turn heading ${hdgStr}, intercept localizer runway ${rwy}, descend to ${altReadable}`,
+        spokenText: `${leadSpoken}turn ${formatHeadingForSpeech(hdg)}, intercept localizer runway ${formatRunwayForSpeech(rwy)}, descend to ${formatAltitudeForSpeech(alt)}.`,
+      };
+    }
     case 'ILS_VECTORS': {
       const rwy = nav.runway || ctx?.assignedRunway || '';
       const hdg = nav.heading ?? ctx?.targetHeading ?? 0;
@@ -537,6 +585,16 @@ export function formatNavigationForSpeech(
       return {
         displayText: `${leadDisplay}cleared ILS approach runway ${rwy}, report established`,
         spokenText: `${leadSpoken}cleared I L S approach runway ${formatRunwayForSpeech(rwy)}, report established.`,
+      };
+    }
+    case 'CLEARED_TO_LAND': {
+      const rwy = nav.runway || ctx?.assignedRunway || '';
+      const windDir = String(Math.round(nav.windDirection ?? 270)).padStart(3, '0');
+      const windSpd = Math.round(nav.windSpeed ?? 10);
+      const qnh = nav.qnh ?? 1013;
+      return {
+        displayText: `${leadDisplay}wind ${windDir} degrees ${windSpd} knots, QNH ${qnh}, runway ${rwy} cleared to land`,
+        spokenText: `${leadSpoken}wind ${speakDigits(windDir)} degrees, ${speakDigits(String(windSpd))} knots, Q N H ${speakDigits(String(qnh))}, runway ${formatRunwayForSpeech(rwy)} cleared to land.`,
       };
     }
     case 'LINE_UP_WAIT': {

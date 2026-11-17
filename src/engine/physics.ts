@@ -280,6 +280,7 @@ export function stepAircraftPhysics(
             ilsArmed = true;
             autoInterceptILS = false;
             currentStatus = 'LocalizerIntercept';
+            currentFlightPhase = 'FINAL_INTERCEPT';
           }
         }
       } else {

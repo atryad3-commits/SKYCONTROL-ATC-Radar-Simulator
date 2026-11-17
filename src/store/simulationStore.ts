@@ -34,11 +34,17 @@ import {
   calculateBearing,
   getHeadingDelta,
 } from '../engine/physics';
-import { updateILSApproach } from '../engine/ils';
+import {
+  updateILSApproach,
+  computeBaseLegVector,
+  computeFinalInterceptVector,
+  evaluateArrivalGates,
+} from '../engine/ils';
 import { detectConflicts, ConflictEventTracker } from '../engine/conflict';
 import {
   generateInboundFlight,
   generateDepartureFlight,
+  resolveArrivalProcedureAssignment,
 } from '../engine/trafficGenerator';
 import {
   radioAudio,
@@ -64,7 +70,10 @@ import {
 import { formatPilotDisplayCallsign } from '../audio/aviationSpeechGrammar';
 import { SimulationEvent } from '../types/events';
 import { RadarTrackingEngine, RadarTrack } from '../engine/radarTracker';
-import { RunwayGeometry } from '../engine/runwayGeometry';
+import {
+  RunwayGeometry,
+  calculateRunwayRelativePosition,
+} from '../engine/runwayGeometry';
 import {
   buildMissionObjectives,
   evaluateMissionProgress,
@@ -238,8 +247,12 @@ export interface SimulationStore {
   setWaypointRoute: (id: string, waypoints: string[], armIlsAfter?: boolean) => void;
   clearRoute: (id: string) => void;
   assignRunway: (id: string, runwayId: string) => void;
+  clearArrivalStar: (id: string, armIlsAfter?: boolean) => void;
+  vectorBaseLeg: (id: string, runwayId?: string) => void;
+  vectorFinalIntercept: (id: string, runwayId?: string) => void;
   vectorToIntercept: (id: string, runwayId: string) => void;
   clearILS: (id: string, runwayId: string) => void;
+  clearToLand: (id: string, runwayId?: string) => void;
   goAround: (id: string) => void;
   holdAt: (id: string, waypointName: string) => void;
   lineUpAndWait: (id: string, runwayId: string) => void;
@@ -609,8 +622,15 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               ilsArmed: false,
               ilsLocalizerCaptured: false,
               ilsGlideslopeCaptured: false,
+              landingCleared: false,
+              landingClearedRunway: undefined,
+              landingClearanceRequested: false,
+              flightPhase:
+                a.status === 'Departing' || a.status === 'Outbound'
+                  ? a.flightPhase
+                  : 'ARRIVAL',
               status:
-                a.status === 'Established' || a.status === 'Holding' || a.status === 'LocalizerIntercept'
+                a.status === 'Established' || a.status === 'Holding' || a.status === 'LocalizerIntercept' || a.status === 'FinalApproach'
                   ? 'Inbound'
                   : a.status,
             }
@@ -1024,8 +1044,18 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   },
 
   assignRunway: (id, runwayId) => {
-    const ac = get().aircraft.find(a => a.id === id);
+    const { aircraft, airport } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
+
+    const rwyObj = airport.runways.find(r => r.id === runwayId) || airport.runways[0];
+    const isDeparture = ac.status === 'Departing' || ac.status === 'Outbound';
+    const starPlan =
+      !isDeparture && rwyObj
+        ? resolveArrivalProcedureAssignment(airport, rwyObj, ac.x, ac.y)
+        : null;
+
+    globalOccupancyManager.releaseRunway(ac.assignedRunway, ac.id);
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
@@ -1036,6 +1066,18 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               ilsArmed: false,
               ilsLocalizerCaptured: false,
               ilsGlideslopeCaptured: false,
+              landingCleared: false,
+              landingClearedRunway: undefined,
+              landingClearanceRequested: false,
+              ...(starPlan
+                ? {
+                    assignedStarId: starPlan.assignedStarId,
+                    assignedStarName: starPlan.assignedStarName,
+                    assignedIafWaypoint: starPlan.assignedIafWaypoint,
+                    arrivalFafWaypoint: starPlan.arrivalFafWaypoint,
+                    arrivalRouteWaypoints: starPlan.arrivalRouteWaypoints,
+                  }
+                : {}),
             }
           : a
       ),
@@ -1049,6 +1091,223 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       `${ac.callsign}, expect vectors ILS runway ${runwayId}`,
       `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
+    );
+  },
+
+  clearArrivalStar: (id, armIlsAfter = true) => {
+    const { aircraft, airport, activeLandingRunwayId } = get();
+    const ac = aircraft.find(a => a.id === id);
+    if (!ac) return;
+
+    const targetRwyId = ac.assignedRunway || activeLandingRunwayId;
+    const rwyObj = airport.runways.find(r => r.id === targetRwyId) || airport.runways[0];
+    const resolvedPlan =
+      ac.arrivalRouteWaypoints && ac.arrivalRouteWaypoints.length > 0
+        ? {
+            assignedStarId: ac.assignedStarId || `${airport.icao}_STAR_${targetRwyId}`,
+            assignedStarName: ac.assignedStarName || `${ac.arrivalRouteWaypoints[0]}1A`,
+            assignedIafWaypoint: ac.assignedIafWaypoint || ac.arrivalRouteWaypoints[0],
+            arrivalFafWaypoint:
+              ac.arrivalFafWaypoint ||
+              ac.arrivalRouteWaypoints[ac.arrivalRouteWaypoints.length - 1],
+            arrivalRouteWaypoints: ac.arrivalRouteWaypoints,
+          }
+        : resolveArrivalProcedureAssignment(airport, rwyObj, ac.x, ac.y);
+
+    const validFixes = resolvedPlan.arrivalRouteWaypoints.filter(name =>
+      airport.waypoints.some(w => w.name === name)
+    );
+    if (validFixes.length === 0) return;
+
+    // Pick first fix that isn't already right behind the aircraft so it doesn't loop backward
+    let startIndex = 0;
+    if (validFixes.length > 1) {
+      const firstWp = airport.waypoints.find(w => w.name === validFixes[0]);
+      const iafIdx = resolvedPlan.assignedIafWaypoint
+        ? validFixes.indexOf(resolvedPlan.assignedIafWaypoint)
+        : 1;
+      if (firstWp) {
+        const distFirst = Math.hypot(firstWp.position.x - ac.x, firstWp.position.y - ac.y);
+        const distAirport = Math.hypot(ac.x, ac.y);
+        const distFirstAirport = Math.hypot(firstWp.position.x, firstWp.position.y);
+        if (distFirst > 12 && distAirport < distFirstAirport + 2 && iafIdx > 0) {
+          startIndex = iafIdx;
+        }
+      }
+    }
+
+    const activePath = validFixes.slice(startIndex);
+    const [firstFix, ...restFixes] = activePath;
+
+    const starDef = (airport.approachRoutes || []).find(
+      s => s.id === resolvedPlan.assignedStarId
+    );
+    const bounds = getAircraftOperationalBounds(ac.aircraftType, airport.elevationFeet);
+    const perf = getAircraftPerformance(ac.aircraftType);
+    const platformAlt = Math.min(
+      bounds.maxAltitudeFt,
+      Math.max(
+        bounds.minAltitudeFt,
+        starDef?.finalAltitudeFt ||
+          Math.ceil(airport.elevationFeet / 1000) * 1000 +
+            (perf.aircraftClass === 'LIGHT_GA' ? 2000 : 3000)
+      )
+    );
+    const starTargetAlt = Math.min(ac.targetAltitude || platformAlt, platformAlt);
+    const starTargetSpeed = Math.max(
+      bounds.minSpeedKt,
+      Math.min(
+        bounds.maxSpeedKt,
+        starDef?.maxSpeedKt ? Math.min(starDef.maxSpeedKt, ac.targetAirspeed || 220) : Math.min(210, perf.cruiseAirspeedIAS)
+      )
+    );
+
+    set(state => ({
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              assignedRunway: targetRwyId,
+              assignedStarId: resolvedPlan.assignedStarId,
+              assignedStarName: resolvedPlan.assignedStarName,
+              assignedIafWaypoint: resolvedPlan.assignedIafWaypoint,
+              arrivalFafWaypoint: resolvedPlan.arrivalFafWaypoint,
+              arrivalRouteWaypoints: resolvedPlan.arrivalRouteWaypoints,
+              assignedWaypoint: firstFix,
+              routeQueue: restFixes,
+              autoInterceptILS: armIlsAfter,
+              holdingWaypoint: null,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              landingCleared: false,
+              landingClearedRunway: undefined,
+              landingClearanceRequested: false,
+              targetAltitude: starTargetAlt,
+              targetAirspeed: starTargetSpeed,
+              status: 'Inbound',
+              flightPhase: 'STAR_ENROUTE',
+            }
+          : a
+      ),
+    }));
+
+    const routeText = activePath.join(', ');
+    const altText = formatReadableAlt(starTargetAlt);
+    const pilotPhrase = `Cleared ${resolvedPlan.assignedStarName} arrival via ${routeText}, descending ${altText}`;
+    logCommsExchange(
+      get,
+      set,
+      ac,
+      `${ac.callsign}, cleared ${resolvedPlan.assignedStarName} arrival, proceed direct ${routeText}, descend to ${altText}, expect ILS runway ${targetRwyId}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
+      pilotPhrase,
+      { atcRole: 'APPROACH', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
+    );
+  },
+
+  vectorBaseLeg: (id, runwayId) => {
+    const { aircraft, activeRunwayGeometries, activeLandingRunwayId, weather } = get();
+    const ac = aircraft.find(a => a.id === id);
+    if (!ac) return;
+    const targetRwyId = runwayId || ac.assignedRunway || activeLandingRunwayId;
+    const rwyGeom =
+      activeRunwayGeometries.find(r => r.id === targetRwyId) ||
+      activeRunwayGeometries[0];
+    if (!rwyGeom) return;
+
+    const baseVec = computeBaseLegVector(ac, rwyGeom);
+
+    set(state => ({
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              assignedRunway: rwyGeom.id,
+              assignedWaypoint: null,
+              routeQueue: [],
+              autoInterceptILS: false,
+              holdingWaypoint: null,
+              targetHeading: baseVec.heading,
+              targetAltitude: baseVec.altitudeFt,
+              targetAirspeed: baseVec.speedKt,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              landingCleared: false,
+              landingClearedRunway: undefined,
+              landingClearanceRequested: false,
+              status: 'Inbound',
+              flightPhase: 'BASE_VECTOR',
+            }
+          : a
+      ),
+    }));
+
+    const hdgStr = baseVec.heading.toString().padStart(3, '0');
+    const altText = formatReadableAlt(baseVec.altitudeFt);
+    const sideWord = baseVec.side === 'LEFT' ? 'left base' : 'right base';
+    const pilotPhrase = `Heading ${hdgStr}, ${sideWord} runway ${rwyGeom.id}, descending ${altText}, speed ${baseVec.speedKt} knots`;
+    logCommsExchange(
+      get,
+      set,
+      ac,
+      `${ac.callsign}, turn heading ${hdgStr} for ${sideWord} runway ${rwyGeom.id}, descend to ${altText} QNH ${weather.qnh}, speed ${baseVec.speedKt} knots`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
+      pilotPhrase,
+      { atcRole: 'APPROACH', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
+    );
+  },
+
+  vectorFinalIntercept: (id, runwayId) => {
+    const { aircraft, activeRunwayGeometries, activeLandingRunwayId, weather } = get();
+    const ac = aircraft.find(a => a.id === id);
+    if (!ac) return;
+    const targetRwyId = runwayId || ac.assignedRunway || activeLandingRunwayId;
+    const rwyGeom =
+      activeRunwayGeometries.find(r => r.id === targetRwyId) ||
+      activeRunwayGeometries[0];
+    if (!rwyGeom) return;
+
+    const intercept = computeFinalInterceptVector(ac, rwyGeom);
+
+    set(state => ({
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              assignedRunway: rwyGeom.id,
+              assignedWaypoint: null,
+              routeQueue: [],
+              autoInterceptILS: false,
+              holdingWaypoint: null,
+              targetHeading: intercept.heading,
+              targetAltitude: intercept.altitudeFt,
+              targetAirspeed: intercept.speedKt,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              landingCleared: false,
+              landingClearedRunway: undefined,
+              landingClearanceRequested: false,
+              status: 'LocalizerIntercept',
+              flightPhase: 'FINAL_INTERCEPT',
+            }
+          : a
+      ),
+    }));
+
+    const hdgStr = intercept.heading.toString().padStart(3, '0');
+    const altText = formatReadableAlt(intercept.altitudeFt);
+    const pilotPhrase = `Heading ${hdgStr}, intercept localizer runway ${rwyGeom.id}, descending ${altText}`;
+    logCommsExchange(
+      get,
+      set,
+      ac,
+      `${ac.callsign}, turn heading ${hdgStr}, intercept final runway ${rwyGeom.id}, descend to ${altText} QNH ${weather.qnh}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
+      pilotPhrase,
+      { atcRole: 'APPROACH', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
     );
   },
 
@@ -1137,7 +1396,18 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               ilsArmed: true,
               assignedRunway: runwayId,
               autoInterceptILS: false,
-              status: 'LocalizerIntercept',
+              assignedWaypoint: null,
+              routeQueue: [],
+              status:
+                a.status === 'FinalApproach' || a.status === 'Established'
+                  ? a.status
+                  : 'LocalizerIntercept',
+              flightPhase:
+                a.ilsGlideslopeCaptured
+                  ? 'FINAL_APPROACH'
+                  : a.ilsLocalizerCaptured
+                  ? 'LOCALIZER_ESTABLISHED'
+                  : 'APPROACH',
             }
           : a
       ),
@@ -1154,10 +1424,84 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     );
   },
 
+  clearToLand: (id, runwayId) => {
+    const { aircraft, activeRunwayGeometries, airport, weather, stats } = get();
+    const ac = aircraft.find(a => a.id === id);
+    if (!ac) return;
+
+    const targetRwyId = runwayId || ac.assignedRunway;
+    const rwyGeom =
+      activeRunwayGeometries.find(r => r.id === targetRwyId) ||
+      activeRunwayGeometries[0];
+    if (!rwyGeom) return;
+
+    const occupancyCheck = globalOccupancyManager.canClearForLanding(rwyGeom.id, ac.id);
+    if (!occupancyCheck.allowed) {
+      const pilotPhrase = `Unable landing clearance, ${occupancyCheck.reason || `runway ${rwyGeom.id} occupied`}`;
+      logCommsExchange(
+        get,
+        set,
+        ac,
+        `${ac.callsign}, continue approach runway ${rwyGeom.id}, traffic on runway`,
+        `${pilotPhrase}, ${pilotTag(ac)}`,
+        pilotPhrase,
+        { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
+      );
+      return;
+    }
+
+    const gates = evaluateArrivalGates(ac, rwyGeom, airport.waypoints);
+    if (!gates.canClearToLand && !ac.isEmergency) {
+      const pilotPhrase = `Roger, continue approach runway ${rwyGeom.id}, not established yet`;
+      logCommsExchange(
+        get,
+        set,
+        ac,
+        `${ac.callsign}, continue approach runway ${rwyGeom.id}, expect landing clearance on final`,
+        `${pilotPhrase}, ${pilotTag(ac)}`,
+        pilotPhrase,
+        { atcRole: 'TOWER', priority: 'ATC_CLEARANCE' }
+      );
+      return;
+    }
+
+    globalOccupancyManager.reserveRunway(rwyGeom.id, ac.id, ac.callsign, stats.elapsedSeconds);
+
+    set(state => ({
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              assignedRunway: rwyGeom.id,
+              ilsArmed: true,
+              landingCleared: true,
+              landingClearedRunway: rwyGeom.id,
+              landingClearanceRequested: false,
+            }
+          : a
+      ),
+    }));
+
+    const windDirStr = Math.round(weather.windDirection).toString().padStart(3, '0');
+    const windSpd = Math.round(weather.windSpeed);
+    const pilotPhrase = `Cleared to land runway ${rwyGeom.id}`;
+    logCommsExchange(
+      get,
+      set,
+      ac,
+      `${ac.callsign}, wind ${windDirStr} degrees ${windSpd} knots, QNH ${weather.qnh}, runway ${rwyGeom.id} cleared to land`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
+      pilotPhrase,
+      { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
+    );
+  },
+
   goAround: id => {
     const { aircraft, airport, activeMission, stats } = get();
     const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
+
+    globalOccupancyManager.releaseRunway(ac.assignedRunway, ac.id);
 
     const perf = getAircraftPerformance(ac.aircraftType);
     const missedAlt = Math.min(
@@ -1184,9 +1528,13 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           ? {
               ...a,
               status: 'GoAround',
+              flightPhase: 'GO_AROUND',
               ilsArmed: false,
               ilsLocalizerCaptured: false,
               ilsGlideslopeCaptured: false,
+              landingCleared: false,
+              landingClearedRunway: undefined,
+              landingClearanceRequested: false,
               assignedWaypoint: null,
               routeQueue: [],
               autoInterceptILS: false,
@@ -2436,6 +2784,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
     let scoreDelta = 0;
     let newLandings = stats.landings;
+    let newGoArounds = stats.goArounds;
     let emergencyLandedThisTick = false;
     let goAroundThisTick = false;
 
@@ -2516,6 +2865,27 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           );
           currentAc = ilsResult.aircraft;
 
+          // Request Tower landing clearance once established on final inside 5.5 NM
+          if (
+            (currentAc.ilsLocalizerCaptured || currentAc.ilsGlideslopeCaptured || currentAc.status === 'FinalApproach') &&
+            currentAc.status !== 'Landed' &&
+            currentAc.landingCleared === false &&
+            !currentAc.landingClearanceRequested
+          ) {
+            const relPos = calculateRunwayRelativePosition(currentAc.x, currentAc.y, assignedRwyGeom);
+            if (relPos.alongTrackNM <= 5.5 && relPos.alongTrackNM > 0.5) {
+              currentAc = { ...currentAc, landingClearanceRequested: true };
+              logPilotTransmission(
+                get,
+                set,
+                currentAc,
+                `${airport.name} Tower, ${currentAc.callsign}, final runway ${assignedRwyGeom.id}, ${relPos.alongTrackNM.toFixed(1)} miles, request landing clearance.`,
+                true,
+                { priority: currentAc.isEmergency ? 'EMERGENCY' : 'PILOT_CALLIN', atcRole: 'TOWER' }
+              );
+            }
+          }
+
           if (ilsResult.landed && ac.status !== 'Landed') {
             newLandings += 1;
             scoreDelta += ac.isEmergency ? 35 : 15;
@@ -2534,7 +2904,12 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               atcRole: 'APPROACH',
             });
           } else if (ilsResult.eventType === 'GS_CAPTURED') {
-            const gsMsg = `${ac.callsign}, fully established ILS runway ${assignedRwyGeom.id}, gear down, landing checks complete.`;
+            const gsMsg = currentAc.landingCleared === false
+              ? `${airport.name} Tower, ${ac.callsign}, glideslope captured runway ${assignedRwyGeom.id}, gear down, request landing clearance.`
+              : `${ac.callsign}, fully established ILS runway ${assignedRwyGeom.id}, gear down, landing checks complete.`;
+            if (currentAc.landingCleared === false) {
+              currentAc = { ...currentAc, landingClearanceRequested: true };
+            }
             logPilotTransmission(get, set, currentAc, gsMsg, true, {
               priority: ac.isEmergency ? 'EMERGENCY' : 'PILOT_READBACK',
               atcRole: 'TOWER',
@@ -2551,6 +2926,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
             ilsResult.eventType === 'LANDING_REJECTED'
           ) {
             goAroundThisTick = true;
+            newGoArounds += 1;
+            if (activeMission.status !== 'active' || !activeMission.mission?.requireGoAroundHandled) {
+              scoreDelta -= 4;
+            }
             const gaMsg = `${ac.callsign}, going around runway ${assignedRwyGeom.id}, ${ilsResult.eventMessage || 'missed approach'}.`;
             logPilotTransmission(get, set, currentAc, gaMsg, true, {
               priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC',
@@ -2685,6 +3064,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const nextStats: SimulationStats = {
       ...stats,
       landings: newLandings,
+      goArounds: newGoArounds,
       separationViolations: newViolations,
       score: Math.min(100, Math.max(0, stats.score + scoreDelta)),
       elapsedSeconds: currentSimTime,
