@@ -10,11 +10,11 @@
  * 7. DEPARTURE_NAVIGATION: Acceleration to 220-250 kt and departure navigation
  */
 
-import { Aircraft } from '../types';
-import { RunwayGeometry, isInsideRunwayBoundaries } from './runwayGeometry';
-import { getAircraftPerformance, AircraftPerformance } from './aircraftPerformance';
+import { Aircraft, Waypoint } from '../types';
+import { RunwayGeometry } from './runwayGeometry';
+import { getAircraftPerformance } from './aircraftPerformance';
 import { RunwayOccupancyManager } from './runwayOccupancy';
-import { FlightPhase } from './flightPhases';
+import { calculateDistance } from './physics';
 
 export type TakeoffPhase =
   | 'PARKED'
@@ -26,6 +26,9 @@ export type TakeoffPhase =
   | 'ROTATION'
   | 'LIFTOFF'
   | 'INITIAL_CLIMB'
+  | 'EXIT_ROUTING'
+  | 'HANDOFF_READY'
+  | 'HANDED_OFF'
   | 'DEPARTURE_NAVIGATION'
   | 'AIRBORNE'
   | 'REJECTED_TAKEOFF'
@@ -38,6 +41,97 @@ export interface TakeoffStepResult {
   phaseChanged: boolean;
 }
 
+export interface DepartureGateStatus {
+  aglFt: number;
+  minClimbAglFt: number;
+  minClimbAltFt: number;
+  minClimbSpeedKt: number;
+  climbAltMet: boolean;
+  climbSpeedMet: boolean;
+  isClimbGateMet: boolean;
+  exitWaypointName: string | null;
+  exitFixDistNM: number | null;
+  isExitRouteActive: boolean;
+  isHandoffReady: boolean;
+}
+
+export const EXIT_HANDOFF_RADIUS_NM = 3.0;
+
+/**
+ * Evaluates whether a departing aircraft has satisfied initial climb altitude & speed
+ * gates to proceed onto its SID exit route and/or perform Center Handoff (Goodbye).
+ */
+export function evaluateDepartureGates(
+  ac: Aircraft,
+  groundElevationFt: number = 0,
+  waypoints: Waypoint[] = []
+): DepartureGateStatus {
+  const perf = getAircraftPerformance(ac.aircraftType);
+  const aglFt = Math.max(0, Math.round(ac.altitude - groundElevationFt));
+  const minClimbAglFt = perf.aircraftClass === 'LIGHT_GA' ? 1000 : 1500;
+  const fallbackMinAlt = Math.min(
+    perf.serviceCeilingFt,
+    Math.ceil(groundElevationFt / 500) * 500 + minClimbAglFt
+  );
+  const minClimbAltFt = ac.exitClimbMinAltitudeFt ?? fallbackMinAlt;
+  const defaultMinSpeed =
+    perf.aircraftClass === 'LIGHT_GA'
+      ? Math.min(90, perf.cruiseAirspeedIAS)
+      : perf.aircraftClass === 'REGIONAL_TURBOPROP'
+      ? Math.min(150, perf.cruiseAirspeedIAS)
+      : Math.min(185, perf.cruiseAirspeedIAS);
+  const minClimbSpeedKt = ac.exitClimbMinSpeedKt ?? defaultMinSpeed;
+
+  const climbAltMet = ac.altitude >= minClimbAltFt - 25 || aglFt >= minClimbAglFt;
+  const climbSpeedMet = ac.indicatedAirspeed >= minClimbSpeedKt - 2;
+  const isClimbGateMet = climbAltMet && climbSpeedMet;
+
+  const exitWaypointName =
+    ac.assignedExitWaypoint ||
+    (ac.departureRouteWaypoints && ac.departureRouteWaypoints.length > 0
+      ? ac.departureRouteWaypoints[ac.departureRouteWaypoints.length - 1]
+      : null);
+
+  let exitFixDistNM: number | null = null;
+  if (exitWaypointName) {
+    const wp = waypoints.find(w => w.name === exitWaypointName);
+    if (wp) {
+      exitFixDistNM =
+        Math.round(calculateDistance(ac.x, ac.y, wp.position.x, wp.position.y) * 10) / 10;
+    }
+  }
+
+  const isExitRouteActive =
+    ac.flightPhase === 'EXIT_ROUTING' ||
+    ac.flightPhase === 'HANDOFF_READY' ||
+    Boolean(
+      ac.assignedWaypoint &&
+        ((ac.departureRouteWaypoints && ac.departureRouteWaypoints.includes(ac.assignedWaypoint)) ||
+          ac.assignedWaypoint === exitWaypointName)
+    );
+
+  const isHandoffReady =
+    ac.flightPhase === 'HANDOFF_READY' ||
+    ((ac.status === 'Outbound' || ac.flightPhase === 'EXIT_ROUTING') &&
+      isClimbGateMet &&
+      exitFixDistNM !== null &&
+      exitFixDistNM <= EXIT_HANDOFF_RADIUS_NM);
+
+  return {
+    aglFt,
+    minClimbAglFt,
+    minClimbAltFt,
+    minClimbSpeedKt,
+    climbAltMet,
+    climbSpeedMet,
+    isClimbGateMet,
+    exitWaypointName,
+    exitFixDistNM,
+    isExitRouteActive,
+    isHandoffReady,
+  };
+}
+
 /**
  * Validates and positions an aircraft to Line Up and Wait on a runway
  */
@@ -47,6 +141,22 @@ export function lineUpAircraft(
   occupancyManager?: RunwayOccupancyManager,
   simTimeSec: number = 0
 ): { success: boolean; aircraft: Aircraft; reason?: string } {
+  const isGroundDeparture =
+    !ac.flightPhase ||
+    ac.flightPhase === 'HOLD_SHORT' ||
+    ac.flightPhase === 'PARKED' ||
+    ac.flightPhase === 'TAXI' ||
+    ac.flightPhase === 'TAXIING' ||
+    ac.flightPhase === 'LINEUP' ||
+    ac.flightPhase === 'WAITING_FOR_CLEARANCE';
+  if (ac.indicatedAirspeed > 5 || !isGroundDeparture || ac.status === 'Outbound') {
+    return {
+      success: false,
+      aircraft: ac,
+      reason: 'Aircraft is already rolling or airborne',
+    };
+  }
+
   if (occupancyManager) {
     const check = occupancyManager.canClearForTakeoff(runway.id, ac.id);
     if (!check.allowed) {
@@ -66,6 +176,7 @@ export function lineUpAircraft(
   const updated: Aircraft = {
     ...ac,
     status: 'Departing',
+    flightPhase: 'LINEUP',
     x: lineupX,
     y: lineupY,
     heading: runway.magneticHeading,
@@ -83,7 +194,7 @@ export function lineUpAircraft(
 }
 
 /**
- * Issues Takeoff Clearance after validating runway occupancy
+ * Issues Takeoff Clearance after validating runway occupancy and LINEUP stage
  */
 export function issueTakeoffClearance(
   ac: Aircraft,
@@ -96,16 +207,38 @@ export function issueTakeoffClearance(
     if (!check.allowed) {
       return { success: false, aircraft: ac, reason: check.reason };
     }
+  }
+
+  if (
+    ac.flightPhase === 'HOLD_SHORT' ||
+    ac.flightPhase === 'PARKED' ||
+    ac.flightPhase === 'TAXI' ||
+    ac.flightPhase === 'TAXIING'
+  ) {
+    return {
+      success: false,
+      aircraft: ac,
+      reason: 'Aircraft is holding short; instruct Line Up and Wait first',
+    };
+  }
+
+  if (occupancyManager) {
     occupancyManager.occupyRunway(runway.id, ac.id, ac.callsign, 'Takeoff', simTimeSec);
   }
 
   const perf = getAircraftPerformance(ac.aircraftType);
+  const initialClimbTarget = Math.min(
+    perf.serviceCeilingFt,
+    Math.max(ac.targetAltitude, runway.elevationFeet + perf.initialDepartureClearanceAglFt)
+  );
+  const departureTargetIAS = Math.min(210, perf.cruiseAirspeedIAS);
 
   const updated: Aircraft = {
     ...ac,
     status: 'Departing',
-    targetAltitude: Math.max(ac.targetAltitude, 6000), // Cleared initial altitude
-    targetAirspeed: 210, // Initial climb airspeed
+    flightPhase: 'TAKEOFF_ROLL',
+    targetAltitude: initialClimbTarget,
+    targetAirspeed: departureTargetIAS,
     heading: runway.magneticHeading,
     targetHeading: runway.magneticHeading,
   };
@@ -156,11 +289,12 @@ export function stepTakeoffSequence(
   runway: RunwayGeometry,
   dt: number,
   occupancyManager?: RunwayOccupancyManager,
-  simTimeSec: number = 0
+  _simTimeSec: number = 0
 ): TakeoffStepResult {
   const perf = getAircraftPerformance(ac.aircraftType);
   const elevation = runway.elevationFeet;
   const aglAltitude = ac.altitude - elevation;
+  const initialClimbTransitionAgl = perf.aircraftClass === 'LIGHT_GA' ? 1000 : 1500;
 
   let indicatedAirspeed = ac.indicatedAirspeed;
   let altitude = ac.altitude;
@@ -172,6 +306,28 @@ export function stepTakeoffSequence(
   let eventMessage: string | undefined;
   let eventType: TakeoffStepResult['eventType'];
   let phaseChanged = false;
+
+  // Ground waiting stages remain stationary until takeoff clearance is issued
+  if (
+    currentFlightPhase === 'HOLD_SHORT' ||
+    currentFlightPhase === 'LINEUP' ||
+    currentFlightPhase === 'WAITING_FOR_CLEARANCE' ||
+    currentFlightPhase === 'PARKED' ||
+    currentFlightPhase === 'TAXI' ||
+    currentFlightPhase === 'TAXIING' ||
+    currentFlightPhase === 'RTO_STOPPED'
+  ) {
+    return {
+      aircraft: {
+        ...ac,
+        indicatedAirspeed: 0,
+        groundSpeed: 0,
+        verticalSpeed: 0,
+        altitude: elevation,
+      },
+      phaseChanged: false,
+    };
+  }
 
   const rwyRad = (runway.magneticHeading * Math.PI) / 180;
 
@@ -198,8 +354,10 @@ export function stepTakeoffSequence(
   // 1. TAKEOFF ROLL (Ground acceleration from 0 to Vr)
   else if (aglAltitude <= 5 && indicatedAirspeed < perf.rotationSpeedIAS) {
     const prevSpeed = indicatedAirspeed;
-    // Accelerate along runway centerline under full takeoff thrust
-    indicatedAirspeed = Math.min(perf.rotationSpeedIAS, indicatedAirspeed + perf.takeoffAccelerationKts_s * dt);
+    indicatedAirspeed = Math.min(
+      perf.rotationSpeedIAS,
+      indicatedAirspeed + perf.takeoffAccelerationKts_s * dt
+    );
     const groundDistNM = (indicatedAirspeed * dt) / 3600;
     x += groundDistNM * Math.sin(rwyRad);
     y += groundDistNM * Math.cos(rwyRad);
@@ -207,7 +365,6 @@ export function stepTakeoffSequence(
     altitude = elevation;
     currentFlightPhase = 'TAKEOFF_ROLL';
 
-    // V1 Callout Check
     if (prevSpeed < perf.takeoffDecisionSpeedIAS && indicatedAirspeed >= perf.takeoffDecisionSpeedIAS) {
       eventType = 'V1';
       eventMessage = `${ac.callsign} V1 decision speed (${perf.takeoffDecisionSpeedIAS}kt)`;
@@ -219,15 +376,18 @@ export function stepTakeoffSequence(
       phaseChanged = true;
     }
   }
-  // 2. ROTATION & LIFTOFF (from Vr to V2, beginning pitch-up and climb)
-  else if (aglAltitude <= 30 && indicatedAirspeed >= perf.rotationSpeedIAS && indicatedAirspeed < perf.takeoffSafetySpeedIAS + 10) {
+  // 2. ROTATION & LIFTOFF (from Vr to >35 ft AGL, pitch-up and climb without speed deadzone)
+  else if (aglAltitude <= 35 && indicatedAirspeed >= perf.rotationSpeedIAS) {
     const prevSpeed = indicatedAirspeed;
-    indicatedAirspeed += (perf.takeoffAccelerationKts_s * 0.8) * dt;
+    const maxRollIas = Math.max(perf.takeoffSafetySpeedIAS + 12, ac.targetAirspeed || 210);
+    indicatedAirspeed = Math.min(
+      maxRollIas,
+      indicatedAirspeed + perf.takeoffAccelerationKts_s * 0.8 * dt
+    );
     const groundDistNM = (indicatedAirspeed * dt) / 3600;
     x += groundDistNM * Math.sin(rwyRad);
     y += groundDistNM * Math.cos(rwyRad);
 
-    // Initial rotation lift rate
     verticalSpeed = Math.min(perf.initialClimbRateFpm, verticalSpeed + 800 * dt);
     altitude += (verticalSpeed / 60) * dt;
 
@@ -235,40 +395,62 @@ export function stepTakeoffSequence(
       eventType = 'V2';
       eventMessage = `${ac.callsign} V2 achieved (${perf.takeoffSafetySpeedIAS}kt)`;
       phaseChanged = true;
-    } else if (aglAltitude > 10 && currentFlightPhase !== 'LIFTOFF') {
+    } else if (altitude - elevation > 10 && currentFlightPhase !== 'LIFTOFF') {
       eventType = 'LIFTOFF';
       eventMessage = `${ac.callsign} airborne runway ${runway.id}`;
       currentFlightPhase = 'LIFTOFF';
       phaseChanged = true;
     }
   }
-  // 3. INITIAL CLIMB (Climbing to 1,500 ft AGL along runway heading)
-  else if (aglAltitude > 30 && aglAltitude < 1500) {
+  // 3. INITIAL CLIMB (Climbing straight ahead on runway heading up to initial climb transition AGL)
+  else if (aglAltitude > 35 && aglAltitude < initialClimbTransitionAgl) {
     verticalSpeed = perf.initialClimbRateFpm;
-    altitude = Math.min(ac.targetAltitude, altitude + (verticalSpeed / 60) * dt);
-    currentFlightPhase = 'INITIAL_CLIMB';
+    const effectiveTargetAlt = Math.max(ac.targetAltitude, elevation + initialClimbTransitionAgl);
+    altitude = Math.min(effectiveTargetAlt, altitude + (verticalSpeed / 60) * dt);
+    if (currentFlightPhase !== 'EXIT_ROUTING' && currentFlightPhase !== 'HANDOFF_READY') {
+      currentFlightPhase = 'INITIAL_CLIMB';
+    }
 
-    // Accelerate smoothly toward climb speed (210 kt)
-    indicatedAirspeed = Math.min(ac.targetAirspeed, indicatedAirspeed + 1.8 * dt);
+    const effectiveTargetIas = ac.targetAirspeed || Math.min(210, perf.cruiseAirspeedIAS);
+    indicatedAirspeed = Math.min(
+      effectiveTargetIas,
+      indicatedAirspeed + Math.max(0.9, perf.accelRateKts_s) * dt
+    );
 
     const groundDistNM = (indicatedAirspeed * dt) / 3600;
     x += groundDistNM * Math.sin(rwyRad);
     y += groundDistNM * Math.cos(rwyRad);
 
     const newAgl = altitude - elevation;
-    // Release runway occupancy once airborne past 500 ft AGL
     if (newAgl >= 500 && occupancyManager) {
       occupancyManager.releaseRunway(runway.id, ac.id);
     }
+
+    if (newAgl >= initialClimbTransitionAgl) {
+      currentStatus = 'Outbound';
+      if (currentFlightPhase !== 'EXIT_ROUTING' && currentFlightPhase !== 'HANDOFF_READY') {
+        currentFlightPhase = ac.assignedWaypoint ? 'EXIT_ROUTING' : 'INITIAL_CLIMB';
+      }
+      phaseChanged = true;
+    }
   }
-  // 4. DEPARTURE NAVIGATION (Above 1,500 ft AGL)
-  else if (aglAltitude >= 1500) {
+  // 4. DEPARTURE OUTBOUND TRANSITION (Above initial climb transition AGL)
+  else if (aglAltitude >= initialClimbTransitionAgl) {
     currentStatus = 'Outbound';
-    currentFlightPhase = 'ENROUTE';
-    // Fully airborne departure navigation
+    if (currentFlightPhase !== 'EXIT_ROUTING' && currentFlightPhase !== 'HANDOFF_READY') {
+      currentFlightPhase = ac.assignedWaypoint ? 'EXIT_ROUTING' : 'INITIAL_CLIMB';
+    }
     verticalSpeed = perf.maxClimbRateFpm;
-    altitude = Math.min(ac.targetAltitude, altitude + (verticalSpeed / 60) * dt);
-    indicatedAirspeed = Math.min(ac.targetAirspeed, indicatedAirspeed + 2.0 * dt);
+    altitude = Math.min(
+      Math.max(ac.targetAltitude, altitude),
+      perf.serviceCeilingFt,
+      altitude + (verticalSpeed / 60) * dt
+    );
+    indicatedAirspeed = Math.min(
+      ac.targetAirspeed || perf.cruiseAirspeedIAS,
+      perf.maxAirspeedIAS,
+      indicatedAirspeed + perf.accelRateKts_s * dt
+    );
 
     const groundDistNM = (indicatedAirspeed * dt) / 3600;
     x += groundDistNM * Math.sin((ac.heading * Math.PI) / 180);

@@ -55,7 +55,13 @@ import {
   issueTakeoffClearance,
   lineUpAircraft,
   rejectTakeoff,
+  evaluateDepartureGates,
 } from '../engine/takeoff';
+import {
+  getAircraftOperationalBounds,
+  getAircraftPerformance,
+} from '../engine/aircraftPerformance';
+import { formatPilotDisplayCallsign } from '../audio/aviationSpeechGrammar';
 import { SimulationEvent } from '../types/events';
 import { RadarTrackingEngine, RadarTrack } from '../engine/radarTracker';
 import { RunwayGeometry } from '../engine/runwayGeometry';
@@ -64,6 +70,14 @@ import {
   evaluateMissionProgress,
   getMissionById,
 } from '../engine/missions';
+
+export interface EnvelopeWarning {
+  aircraftId: string;
+  callsign: string;
+  kind: 'SPEED' | 'ALTITUDE';
+  message: string;
+  timestamp: number;
+}
 
 const globalConflictTracker = new ConflictEventTracker();
 const initialResolved = resolveConfiguredAirport('EGLL');
@@ -208,6 +222,8 @@ export interface SimulationStore {
   // Tactical measurement tool
   measureStart: { x: number; y: number } | null;
   measureCurrent: { x: number; y: number } | null;
+  envelopeWarning: EnvelopeWarning | null;
+  clearEnvelopeWarning: () => void;
 
   // Actions & Commands
   selectAircraft: (id: string | null) => void;
@@ -229,6 +245,8 @@ export interface SimulationStore {
   lineUpAndWait: (id: string, runwayId: string) => void;
   clearTakeoff: (id: string) => void;
   abortTakeoff: (id: string) => void;
+  proceedDepartureOnExit: (id: string) => void;
+  handoffDeparture: (id: string) => void;
   repositionTag: (id: string, offsetX: number, offsetY: number) => void;
 
   // Simulation, Airport, Mission & Scenario Management
@@ -338,6 +356,15 @@ function formatReadableAlt(altFeet: number): string {
     return `FL${fl.toString().padStart(3, '0')}`;
   }
   return `${altFeet.toLocaleString('en-US')} ft`;
+}
+
+function pilotTag(ac: Aircraft): string {
+  return formatPilotDisplayCallsign({
+    callsign: ac.callsign,
+    airline: ac.airline,
+    telephony: ac.telephony,
+    category: ac.category,
+  });
 }
 
 interface CommsExchangeMeta {
@@ -548,9 +575,20 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   getRadarTrack: (aircraftId: string) => globalRadarTracker.getTrack(aircraftId),
   measureStart: null,
   measureCurrent: null,
+  envelopeWarning: null,
+
+  clearEnvelopeWarning: () => {
+    set({ envelopeWarning: null });
+  },
 
   selectAircraft: id => {
-    set({ selectedAircraftId: id });
+    set(state => ({
+      selectedAircraftId: id,
+      envelopeWarning:
+        state.envelopeWarning && state.envelopeWarning.aircraftId === id
+          ? state.envelopeWarning
+          : null,
+    }));
   },
 
   setHeading: (id, heading) => {
@@ -595,7 +633,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       atcCmd,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -634,7 +672,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, cancel route, maintain present heading ${hdgStr}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -679,7 +717,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       atcCmd,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -724,7 +762,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       atcCmd,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -733,7 +771,13 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const { aircraft, airport, weather } = get();
     const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
-    const target = Math.max(airport.elevationFeet, Math.min(20000, Math.round(altitude)));
+
+    const perf = getAircraftPerformance(ac.aircraftType);
+    const bounds = getAircraftOperationalBounds(ac.aircraftType, airport.elevationFeet);
+    const requested = Math.round(altitude);
+    const clampedHigh = requested > bounds.maxAltitudeFt;
+    const clampedLow = requested < airport.elevationFeet;
+    const target = Math.max(airport.elevationFeet, Math.min(bounds.maxAltitudeFt, requested));
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
@@ -746,6 +790,20 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
             }
           : a
       ),
+      envelopeWarning:
+        clampedHigh || clampedLow
+          ? {
+              aircraftId: ac.id,
+              callsign: ac.callsign,
+              kind: 'ALTITUDE',
+              message: clampedHigh
+                ? `${ac.callsign} (${ac.aircraftType}) max altitude ${bounds.maxAltitudeFt.toLocaleString()} ft — clamped from ${requested.toLocaleString()} ft`
+                : `${ac.callsign} (${ac.aircraftType}) below field elevation ${airport.elevationFeet.toLocaleString()} ft — clamped`,
+              timestamp: Date.now(),
+            }
+          : state.envelopeWarning?.kind === 'ALTITUDE' && state.envelopeWarning.aircraftId === ac.id
+          ? null
+          : state.envelopeWarning,
     }));
 
     const isClimb = target > ac.altitude;
@@ -754,29 +812,56 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       : pickVariant(['descend', 'descend and maintain']);
     const pilotAction = isClimb ? 'Climbing' : 'Descending to';
     const altText = formatReadableAlt(target);
+    const reqText = formatReadableAlt(requested);
     const qnhTag = !isClimb && target < 8000 ? `, QNH ${weather.qnh}` : '';
     const expeditePhrase = expedite ? ', expedite' : '';
-    const pilotPhrase = `${pilotAction} ${altText}${expedite ? ', expediting' : ''}${qnhTag}`;
+
+    const pilotPhrase = clampedHigh
+      ? `Unable ${reqText}, ${perf.name} max altitude ${altText}, maintaining ${altText}`
+      : clampedLow
+      ? `Unable ${reqText}, minimum altitude ${altText}, maintaining ${altText}`
+      : `${pilotAction} ${altText}${expedite ? ', expediting' : ''}${qnhTag}`;
 
     logCommsExchange(
       get,
       set,
       ac,
-      `${ac.callsign}, ${actionWord} ${altText}${qnhTag}${expeditePhrase}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${ac.callsign}, ${actionWord} ${clampedHigh || clampedLow ? reqText : altText}${qnhTag}${expeditePhrase}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
 
   setSpeed: (id, speed) => {
-    const ac = get().aircraft.find(a => a.id === id);
+    const { aircraft, airport } = get();
+    const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
-    const target = Math.max(140, Math.min(260, Math.round(speed)));
+
+    const perf = getAircraftPerformance(ac.aircraftType);
+    const bounds = getAircraftOperationalBounds(ac.aircraftType, airport.elevationFeet);
+    const requested = Math.round(speed);
+    const clampedHigh = requested > bounds.maxSpeedKt;
+    const clampedLow = requested < bounds.minSpeedKt;
+    const target = Math.max(bounds.minSpeedKt, Math.min(bounds.maxSpeedKt, requested));
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
         a.id === id ? { ...a, targetAirspeed: target } : a
       ),
+      envelopeWarning:
+        clampedHigh || clampedLow
+          ? {
+              aircraftId: ac.id,
+              callsign: ac.callsign,
+              kind: 'SPEED',
+              message: clampedHigh
+                ? `${ac.callsign} (${ac.aircraftType}) max IAS ${bounds.maxSpeedKt} kt — clamped from ${requested} kt`
+                : `${ac.callsign} (${ac.aircraftType}) min clean IAS ${bounds.minSpeedKt} kt — clamped from ${requested} kt`,
+              timestamp: Date.now(),
+            }
+          : state.envelopeWarning?.kind === 'SPEED' && state.envelopeWarning.aircraftId === ac.id
+          ? null
+          : state.envelopeWarning,
     }));
 
     const verb =
@@ -785,19 +870,22 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         : target > ac.indicatedAirspeed + 5
         ? pickVariant(['increase speed to', 'speed'])
         : 'maintain speed';
-    const pilotPhrase =
-      target < ac.indicatedAirspeed - 5
-        ? `Reducing speed ${target} knots`
-        : target > ac.indicatedAirspeed + 5
-        ? `Increasing to ${target} knots`
-        : `Maintaining ${target} knots`;
+    const pilotPhrase = clampedHigh
+      ? `Unable ${requested} knots, ${perf.name} max speed ${bounds.maxSpeedKt} knots, maintaining ${target} knots`
+      : clampedLow
+      ? `Unable ${requested} knots, minimum speed ${bounds.minSpeedKt} knots, maintaining ${target} knots`
+      : target < ac.indicatedAirspeed - 5
+      ? `Reducing speed ${target} knots`
+      : target > ac.indicatedAirspeed + 5
+      ? `Increasing to ${target} knots`
+      : `Maintaining ${target} knots`;
 
     logCommsExchange(
       get,
       set,
       ac,
-      `${ac.callsign}, ${verb} ${target} knots`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${ac.callsign}, ${verb} ${requested} knots`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -815,7 +903,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               assignedWaypoint: waypointName,
               routeQueue: [],
               holdingWaypoint: null,
-              status: a.status === 'Departing' ? 'Departing' : 'Inbound',
+              status: a.status === 'Departing' || a.status === 'Outbound' ? a.status : 'Inbound',
+              flightPhase:
+                (a.status === 'Departing' || a.status === 'Outbound') && a.flightPhase === 'INITIAL_CLIMB'
+                  ? 'EXIT_ROUTING'
+                  : a.flightPhase,
               ilsArmed: false,
               ilsLocalizerCaptured: false,
               ilsGlideslopeCaptured: false,
@@ -837,7 +929,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       atcCmd,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -864,7 +956,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               ...a,
               routeQueue: updatedQueue,
               holdingWaypoint: null,
-              status: a.status === 'Departing' ? 'Departing' : 'Inbound',
+              status: a.status === 'Departing' || a.status === 'Outbound' ? a.status : 'Inbound',
             }
           : a
       ),
@@ -877,7 +969,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, recleared route via ${fullPath}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -901,7 +993,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               routeQueue: restFixes,
               autoInterceptILS: armIlsAfter,
               holdingWaypoint: null,
-              status: a.status === 'Departing' ? 'Departing' : 'Inbound',
+              status: a.status === 'Departing' || a.status === 'Outbound' ? a.status : 'Inbound',
+              flightPhase:
+                (a.status === 'Departing' || a.status === 'Outbound') && a.flightPhase === 'INITIAL_CLIMB'
+                  ? 'EXIT_ROUTING'
+                  : a.flightPhase,
               ilsArmed: false,
               ilsLocalizerCaptured: false,
               ilsGlideslopeCaptured: false,
@@ -918,7 +1014,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, proceed direct ${routeText}${ilsSuffix}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -951,7 +1047,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, expect vectors ILS runway ${runwayId}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -982,9 +1078,17 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     );
     void clampedDelta;
 
-    const finalAlt = Math.ceil(airport.elevationFeet / 1000) * 1000 + 3000;
+    const perf = getAircraftPerformance(ac.aircraftType);
+    const finalAlt = Math.min(
+      perf.serviceCeilingFt,
+      Math.ceil(airport.elevationFeet / 1000) * 1000 +
+        (perf.aircraftClass === 'LIGHT_GA' ? 2000 : 3000)
+    );
     const nextAlt = Math.min(ac.targetAltitude, finalAlt);
-    const nextSpd = Math.min(ac.targetAirspeed, 190);
+    const nextSpd = Math.max(
+      perf.minAirspeedIAS,
+      Math.min(ac.targetAirspeed, Math.min(190, perf.cruiseAirspeedIAS))
+    );
 
     set(state => ({
       aircraft: state.aircraft.map(a =>
@@ -1016,7 +1120,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, turn heading ${hdgStr}, descend to ${altText} QNH ${weather.qnh}, cleared ILS runway ${runwayId}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -1045,7 +1149,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, cleared ILS approach runway ${runwayId}, report established`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -1055,7 +1159,12 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
 
-    const missedAlt = Math.ceil(airport.elevationFeet / 1000) * 1000 + 3000;
+    const perf = getAircraftPerformance(ac.aircraftType);
+    const missedAlt = Math.min(
+      perf.serviceCeilingFt,
+      Math.ceil(airport.elevationFeet / 1000) * 1000 +
+        Math.min(3000, perf.initialDepartureClearanceAglFt)
+    );
     const nextStats: SimulationStats = {
       ...stats,
       goArounds: stats.goArounds + 1,
@@ -1083,7 +1192,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
               autoInterceptILS: false,
               holdingWaypoint: null,
               targetAltitude: missedAlt,
-              targetAirspeed: 210,
+              targetAirspeed: Math.min(210, perf.cruiseAirspeedIAS),
               targetHeading: a.heading,
               expediteAltitude: true,
             }
@@ -1100,7 +1209,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, go around, climb straight ahead to ${altStr}`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase,
       { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
     );
@@ -1138,7 +1247,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, hold at ${waypointName} as published, expect further clearance`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase
     );
   },
@@ -1159,7 +1268,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         set,
         ac,
         `${ac.callsign}, runway ${runwayId}, line up and wait`,
-        `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+        `${pilotPhrase}, ${pilotTag(ac)}`,
         pilotPhrase,
         { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
       );
@@ -1176,14 +1285,14 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, behind landing traffic, runway ${runwayId} line up and wait`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase,
       { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
     );
   },
 
   clearTakeoff: id => {
-    const { aircraft, activeRunwayGeometries, stats, weather, activeMission } = get();
+    const { aircraft, activeRunwayGeometries, stats, weather } = get();
     const ac = aircraft.find(a => a.id === id);
     if (!ac) return;
     const rwyGeom =
@@ -1203,7 +1312,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         set,
         ac,
         `${ac.callsign}, runway ${ac.assignedRunway} cleared for takeoff`,
-        `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+        `${pilotPhrase}, ${pilotTag(ac)}`,
         pilotPhrase,
         { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
       );
@@ -1212,18 +1321,12 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
     const nextStats: SimulationStats = {
       ...stats,
-      departures: stats.departures + 1,
       score: Math.min(100, stats.score + 5),
     };
-    const nextMissionState =
-      activeMission.status === 'active'
-        ? evaluateMissionProgress(activeMission, nextStats, false, false)
-        : activeMission;
 
     set(state => ({
       aircraft: state.aircraft.map(a => (a.id === id ? res.aircraft : a)),
       stats: nextStats,
-      activeMission: nextMissionState,
     }));
 
     const windDirStr = Math.round(weather.windDirection).toString().padStart(3, '0');
@@ -1234,7 +1337,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, ${windText}, QNH ${weather.qnh}, runway ${ac.assignedRunway} cleared for takeoff`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase,
       { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'ATC_CLEARANCE' }
     );
@@ -1270,10 +1373,176 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       set,
       ac,
       `${ac.callsign}, hold position, stop immediately, abort takeoff!`,
-      `${pilotPhrase}, ${ac.telephony} ${ac.callsign.slice(3)}`,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
       pilotPhrase,
       { atcRole: 'TOWER', priority: ac.isEmergency ? 'EMERGENCY' : 'CRITICAL_ATC' }
     );
+  },
+
+  proceedDepartureOnExit: id => {
+    const { aircraft, airport } = get();
+    const ac = aircraft.find(a => a.id === id);
+    if (!ac) return;
+
+    const gates = evaluateDepartureGates(ac, airport.elevationFeet, airport.waypoints);
+    const rawRoute =
+      ac.departureRouteWaypoints && ac.departureRouteWaypoints.length > 0
+        ? ac.departureRouteWaypoints
+        : ac.assignedExitWaypoint
+        ? [ac.assignedExitWaypoint]
+        : [];
+    const validRoute = rawRoute.filter(name =>
+      airport.waypoints.some(w => w.name === name)
+    );
+    const fallbackExit = airport.waypoints.find(
+      w => w.role === 'EXIT' || w.isDepartureExit
+    );
+    const finalRoute =
+      validRoute.length > 0
+        ? validRoute
+        : fallbackExit
+        ? [fallbackExit.name]
+        : [];
+    if (finalRoute.length === 0) return;
+
+    if (!gates.isClimbGateMet) {
+      const pilotPhrase = `Unable exit route ${finalRoute[finalRoute.length - 1]}, climbing through ${Math.round(ac.altitude)} feet, need ${gates.minClimbAglFt} feet AGL and ${gates.minClimbSpeedKt} knots`;
+      logCommsExchange(
+        get,
+        set,
+        ac,
+        `${ac.callsign}, proceed direct ${finalRoute.join(', ')}`,
+        `${pilotPhrase}, ${pilotTag(ac)}`,
+        `Unable exit route, still on initial climb`,
+        { atcRole: 'APPROACH', priority: 'ATC_CLEARANCE' }
+      );
+      return;
+    }
+
+    const [firstFix, ...restFixes] = finalRoute;
+    const exitFix = finalRoute[finalRoute.length - 1];
+    const sid = (airport.departureRoutes || []).find(s => s.id === ac.assignedSidId);
+    const bounds = getAircraftOperationalBounds(ac.aircraftType, airport.elevationFeet);
+    const perf = getAircraftPerformance(ac.aircraftType);
+    const desiredSidAlt =
+      perf.aircraftClass === 'LIGHT_GA'
+        ? Math.min(bounds.maxAltitudeFt, Math.ceil(airport.elevationFeet / 1000) * 1000 + 3500)
+        : Math.min(
+            bounds.maxAltitudeFt,
+            Math.max(
+              sid?.finalAltitudeFt || Math.ceil(airport.elevationFeet / 1000) * 1000 + 10000,
+              ac.targetAltitude
+            )
+          );
+    const desiredSidSpeed = Math.min(
+      bounds.maxSpeedKt,
+      Math.max(
+        bounds.minSpeedKt,
+        sid?.maxSpeedKt ? Math.min(sid.maxSpeedKt, perf.cruiseAirspeedIAS) : perf.cruiseAirspeedIAS
+      )
+    );
+
+    set(state => ({
+      aircraft: state.aircraft.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              assignedWaypoint: firstFix,
+              routeQueue: restFixes,
+              assignedExitWaypoint: a.assignedExitWaypoint || exitFix,
+              departureRouteWaypoints: finalRoute,
+              holdingWaypoint: null,
+              autoInterceptILS: false,
+              ilsArmed: false,
+              ilsLocalizerCaptured: false,
+              ilsGlideslopeCaptured: false,
+              targetAltitude: desiredSidAlt,
+              targetAirspeed: desiredSidSpeed,
+              expediteAltitude: true,
+              status: a.status === 'Departing' ? 'Outbound' : a.status,
+              flightPhase: 'EXIT_ROUTING',
+            }
+          : a
+      ),
+    }));
+
+    const routeText = finalRoute.join(', ');
+    const altText = formatReadableAlt(desiredSidAlt);
+    const sidLabel = ac.assignedSidName ? `${ac.assignedSidName} departure, ` : '';
+    const atcCmd = `${ac.callsign}, ${sidLabel}proceed direct ${routeText}, climb maintain ${altText}`;
+    const pilotPhrase = `Proceed direct ${routeText}, climbing ${altText}`;
+    logCommsExchange(
+      get,
+      set,
+      ac,
+      atcCmd,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
+      pilotPhrase,
+      { atcRole: 'APPROACH', priority: 'ATC_CLEARANCE' }
+    );
+  },
+
+  handoffDeparture: id => {
+    const { aircraft, airport, stats, activeMission, selectedAircraftId } = get();
+    const ac = aircraft.find(a => a.id === id);
+    if (!ac) return;
+
+    const gates = evaluateDepartureGates(ac, airport.elevationFeet, airport.waypoints);
+    const nearExitOrReady =
+      gates.isHandoffReady ||
+      (gates.isClimbGateMet && (gates.exitFixDistNM === null || gates.exitFixDistNM <= 5.0));
+
+    if (!nearExitOrReady) {
+      const distInfo =
+        gates.exitFixDistNM !== null && gates.exitWaypointName
+          ? `${gates.exitFixDistNM.toFixed(1)} miles from ${gates.exitWaypointName}`
+          : 'still climbing in terminal sector';
+      const pilotPhrase = `Unable Center handoff, ${distInfo}`;
+      logCommsExchange(
+        get,
+        set,
+        ac,
+        `${ac.callsign}, contact Center on 132.45`,
+        `${pilotPhrase}, ${pilotTag(ac)}`,
+        pilotPhrase,
+        { atcRole: 'APPROACH', priority: 'ATC_CLEARANCE' }
+      );
+      return;
+    }
+
+    const centerFreq = '132.45';
+    const atcCmd = `${ac.callsign}, radar service terminated passing ${gates.exitWaypointName || 'exit gate'}, contact Center on ${centerFreq}, good day`;
+    const pilotPhrase = `Contact Center ${centerFreq}, goodbye`;
+
+    logCommsExchange(
+      get,
+      set,
+      ac,
+      atcCmd,
+      `${pilotPhrase}, ${pilotTag(ac)}`,
+      pilotPhrase,
+      { atcRole: 'APPROACH', priority: 'ATC_CLEARANCE' }
+    );
+
+    globalOccupancyManager.releaseRunway(ac.assignedRunway, ac.id);
+
+    const nextStats: SimulationStats = {
+      ...stats,
+      departures: stats.departures + 1,
+      score: Math.min(100, stats.score + 10),
+    };
+    const nextMissionState =
+      activeMission.status === 'active'
+        ? evaluateMissionProgress(activeMission, nextStats, false, false)
+        : activeMission;
+
+    const remaining = aircraft.filter(a => a.id !== id);
+    set({
+      aircraft: remaining,
+      selectedAircraftId: selectedAircraftId === id ? null : selectedAircraftId,
+      stats: nextStats,
+      activeMission: nextMissionState,
+    });
   },
 
   repositionTag: (id, offsetX, offsetY) => {
@@ -2178,11 +2447,20 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         activeRunwayGeometries[0];
       let currentAc = ac;
 
-      const isGroundDeparture =
+      const isTakeoffSequenceFlight =
         currentAc.status === 'Departing' &&
-        currentAc.altitude - assignedRwyGeom.elevationFeet <= 1500;
+        (currentAc.flightPhase === 'HOLD_SHORT' ||
+          currentAc.flightPhase === 'LINEUP' ||
+          currentAc.flightPhase === 'TAKEOFF_ROLL' ||
+          currentAc.flightPhase === 'ROTATION' ||
+          currentAc.flightPhase === 'LIFTOFF' ||
+          currentAc.flightPhase === 'INITIAL_CLIMB' ||
+          currentAc.flightPhase === 'REJECTED_TAKEOFF' ||
+          currentAc.flightPhase === 'RTO_STOPPED' ||
+          !currentAc.flightPhase ||
+          currentAc.altitude - assignedRwyGeom.elevationFeet <= 1500);
 
-      if (isGroundDeparture && currentAc.indicatedAirspeed > 0) {
+      if (isTakeoffSequenceFlight) {
         const toResult = stepTakeoffSequence(
           currentAc,
           assignedRwyGeom,
@@ -2191,7 +2469,18 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           currentSimTime
         );
         currentAc = toResult.aircraft;
+        if (toResult.phaseChanged && toResult.eventType === 'LIFTOFF') {
+          logPilotTransmission(
+            get,
+            set,
+            currentAc,
+            `${airport.name} Departure, ${currentAc.callsign}, airborne runway ${assignedRwyGeom.id}, climbing on runway heading.`,
+            true,
+            { priority: 'PILOT_READBACK', atcRole: 'TOWER' }
+          );
+        }
       } else {
+        const prevPhase = currentAc.flightPhase;
         currentAc = stepAircraftPhysics(
           currentAc,
           actualDt,
@@ -2200,6 +2489,18 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           currentSimTime,
           airport.elevationFeet
         );
+
+        if (prevPhase !== 'HANDOFF_READY' && currentAc.flightPhase === 'HANDOFF_READY') {
+          const exitName = currentAc.assignedExitWaypoint || 'exit gate';
+          logPilotTransmission(
+            get,
+            set,
+            currentAc,
+            `${airport.name} Director, ${currentAc.callsign}, passing ${formatReadableAlt(Math.round(currentAc.altitude))} at ${exitName}, request Center handoff.`,
+            true,
+            { priority: 'PILOT_CALLIN', atcRole: 'APPROACH' }
+          );
+        }
 
         if (
           currentAc.ilsArmed ||
@@ -2264,7 +2565,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       );
       const isLandedStopped =
         currentAc.status === 'Landed' && currentAc.indicatedAirspeed <= 0.1;
-      const isFarOut = distFromCenter > 55.0;
+      const isFarOut = distFromCenter > 70.0;
 
       if (!isLandedStopped && !isFarOut) {
         updatedAircraft.push(currentAc);
@@ -2314,7 +2615,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
             set,
             acA,
             atcTraffic,
-            `${pilotAck}, ${acA.telephony} ${acA.callsign.slice(3)}`,
+            `${pilotAck}, ${pilotTag(acA)}`,
             pilotAck,
             { atcRole: 'APPROACH', priority: 'CONFLICT_ALERT' }
           );
@@ -2353,14 +2654,21 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
       if (candidates.length > 0) {
         const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+        const chosenPerf = getAircraftPerformance(chosen.aircraftType);
         let reqText: string | null = null;
         if (chosen.status === 'Inbound' && chosen.routeQueue && chosen.routeQueue.length > 0) {
           reqText = `${airport.name} Director, ${chosen.callsign}, request direct ${chosen.routeQueue[0]}.`;
         } else if (chosen.status === 'Inbound' && chosen.altitude >= 7000 && chosen.targetAltitude >= 6000) {
           const reqFeet = Math.max(3000, Math.round((chosen.altitude - 3000) / 1000) * 1000);
           reqText = `${airport.name} Director, ${chosen.callsign}, request lower ${formatReadableAlt(reqFeet)}.`;
-        } else if (chosen.status === 'Departing' && chosen.altitude >= 2500 && chosen.targetAltitude <= 10000) {
-          reqText = `${airport.name} Director, ${chosen.callsign}, request climb FL120.`;
+        } else if (
+          chosen.status === 'Departing' &&
+          chosen.altitude >= 2500 &&
+          chosen.targetAltitude <= 10000 &&
+          chosenPerf.aircraftClass !== 'LIGHT_GA'
+        ) {
+          const reqClimb = Math.min(12000, chosenPerf.tmaOperatingCeilingFt);
+          reqText = `${airport.name} Director, ${chosen.callsign}, request climb ${formatReadableAlt(reqClimb)}.`;
         }
 
         if (reqText) {

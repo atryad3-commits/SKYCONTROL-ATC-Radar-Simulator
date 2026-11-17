@@ -273,20 +273,22 @@ export function initiateGoAround(
   reason: string,
   missedApproachAltFt: number = 3000
 ): { aircraft: Aircraft; message: string } {
+  const perf = getAircraftPerformance(ac.aircraftType);
+  const clampedAlt = Math.min(missedApproachAltFt, perf.serviceCeilingFt);
   const updatedAc: Aircraft = {
     ...ac,
     status: 'GoAround',
     ilsArmed: false,
     ilsLocalizerCaptured: false,
     ilsGlideslopeCaptured: false,
-    targetAltitude: missedApproachAltFt,
-    targetAirspeed: 210,
-    verticalSpeed: 2400, // Full go-around climb rate
+    targetAltitude: clampedAlt,
+    targetAirspeed: Math.min(210, perf.cruiseAirspeedIAS),
+    verticalSpeed: perf.initialClimbRateFpm, // Model-matched go-around climb rate
     expediteAltitude: true,
     targetHeading: ac.heading, // Maintain runway heading initially
   };
 
-  const message = `Going around, climbing to ${missedApproachAltFt} feet (${reason})`;
+  const message = `Going around, climbing to ${clampedAlt} feet (${reason})`;
   return { aircraft: updatedAc, message };
 }
 

@@ -30,6 +30,11 @@ export const AIRLINE_CALLSIGNS: Record<string, string> = {
   SIA: 'Singapore',
   CPA: 'Cathay',
   TAP: 'Air Portugal',
+  EJA: 'Execjet',
+  VJT: 'Vista',
+  NJE: 'Fraction',
+  BEE: 'Jersey',
+  LOG: 'Logan',
 };
 
 export const NATO_PHONETIC_ALPHABET: Record<string, string> = {
@@ -79,20 +84,123 @@ export const WAYPOINT_SPEECH_MAP: Record<string, string> = {
   LAM: 'Lambourne',
   BIG: 'Biggin',
   OCK: 'Ockham',
+  BPK: 'Brookmans Park',
+  DET: 'Detling',
+  SAM: 'Southampton',
+  MID: 'Midhurst',
+  CPT: 'Compton',
+  WOD: 'Woodley',
+  CHT: 'Chiltern',
+  LON: 'London',
+  EPM: 'Epsom',
   VR: 'Varamin',
   MEH: 'Mehrabad',
   RUS: 'Rudeshur',
   SAV: 'Saveh',
+  SHH: 'Shahriar',
+  QOM: 'Qom',
+  FIR: 'Firuzkuh',
   JFK: 'Kennedy',
   DPK: 'Deer Park',
+  DEER: 'Deer Park',
+  ROBER: 'Roberts',
   CAM: 'Camrn',
+  CAMRN: 'Camrn',
   CRI: 'Canarsie',
   LND: 'Lindy',
+  LENDY: 'Lendy',
+  KENDA: 'Kenda',
+  ZIGGY: 'Ziggy',
+  SHIPP: 'Shipp',
+  BETTE: 'Bette',
+  COATE: 'Coate',
   DMV: 'Damavand',
   VAR: 'Varamin',
   KRD: 'Karaj',
   TRN: 'Tehran',
   RAD: 'Radan',
+  XWEST: 'Crosswind West',
+  XNRTH: 'Crosswind North',
+  DSOUTH: 'Delta South',
+  DWEST: 'Delta West',
+  // Expanded Iranian, Middle East, European, US & Asian fixes
+  IKA: 'Khomeini',
+  VARAM: 'Varamin',
+  KHMIR: 'Khomir',
+  SAVEH: 'Saveh',
+  RUDEN: 'Rudeshur',
+  PARND: 'Parand',
+  VRMIN: 'Varamin',
+  SYZ: 'Shiraz',
+  DARAB: 'Darab',
+  MARVD: 'Marvdasht',
+  FIROZ: 'Firuzabad',
+  KAZRN: 'Kazerun',
+  YASUJ: 'Yasuj',
+  LAREX: 'Larex',
+  DXB: 'Dubai',
+  DESDI: 'Desdi',
+  BUBIN: 'Bubin',
+  VUTEB: 'Vuteb',
+  LOVEM: 'Lovem',
+  DARAX: 'Darax',
+  RIBOT: 'Ribot',
+  MIADA: 'Miada',
+  CGN: 'De Gaulle',
+  MOPAR: 'Mopar',
+  LORNI: 'Lorni',
+  BANOX: 'Banox',
+  OKIPA: 'Okipa',
+  ATREX: 'Atrex',
+  BUBLI: 'Bubli',
+  RANUX: 'Ranux',
+  SPL: 'Schiphol',
+  SUGOL: 'Sugol',
+  ARTIP: 'Artip',
+  RIVER: 'River',
+  NARSO: 'Narso',
+  ANDIK: 'Andik',
+  ARNEM: 'Arnhem',
+  GORLO: 'Gorlo',
+  FFM: 'Frankfurt',
+  GEDRN: 'Gedern',
+  SPESA: 'Spessart',
+  UNOKO: 'Unoko',
+  ROLIS: 'Rolis',
+  ANEKI: 'Aneki',
+  BIBTI: 'Bibti',
+  TOBAK: 'Tobak',
+  KLO: 'Kloten',
+  GIPOL: 'Gipol',
+  EKRON: 'Ekron',
+  AMIKI: 'Amiki',
+  RILAX: 'Rilax',
+  DEGES: 'Deges',
+  VEBIT: 'Vebit',
+  ORD: 'O’Hare',
+  WATSN: 'Watson',
+  FYTTE: 'Fytte',
+  ROYKO: 'Royko',
+  BENKY: 'Benky',
+  SFO: 'San Francisco',
+  PNTRE: 'Point Reyes',
+  MODES: 'Modesto',
+  BGSUR: 'Big Sur',
+  CEDES: 'Cedes',
+  OFFSH: 'Offshore',
+  TRUKN: 'Truckee',
+  HND: 'Haneda',
+  ADDUM: 'Addum',
+  CREAM: 'Cream',
+  ARLON: 'Arlon',
+  SPENS: 'Spens',
+  LAXAS: 'Laxas',
+  SEKIY: 'Sekiyado',
+  JSY: 'Jersey',
+  ORTAC: 'Ortac',
+  DINRD: 'Dinard',
+  MINQI: 'Minquiers',
+  SKERY: 'Skerry',
 };
 
 export type AtcStationRole = 'TOWER' | 'APPROACH' | 'GROUND';
@@ -136,15 +244,19 @@ export interface NavigationInstruction {
     | 'ILS_CLEARANCE'
     | 'LINE_UP_WAIT'
     | 'TAKEOFF'
+    | 'DEPARTURE_SID'
+    | 'CENTER_HANDOFF'
     | 'GO_AROUND'
     | 'HEADING'
     | 'PRESENT_HEADING';
   waypoint?: string;
   routeWaypoints?: string[];
+  sidName?: string;
   runway?: string;
   heading?: number;
   turnDirection?: 'LEFT' | 'RIGHT';
   altitudeFeet?: number;
+  frequency?: string;
   qnh?: number;
   windDirection?: number;
   windSpeed?: number;
@@ -442,6 +554,29 @@ export function formatNavigationForSpeech(
       return {
         displayText: `${leadDisplay}wind ${windDir} degrees ${windSpd} knots, QNH ${qnh}, runway ${rwy} cleared for takeoff`,
         spokenText: `${leadSpoken}wind ${speakDigits(windDir)} degrees, ${speakDigits(String(windSpd))} knots, Q N H ${speakDigits(String(qnh))}, runway ${formatRunwayForSpeech(rwy)} cleared for takeoff.`,
+      };
+    }
+    case 'DEPARTURE_SID': {
+      const wps = nav.routeWaypoints && nav.routeWaypoints.length > 0
+        ? nav.routeWaypoints
+        : nav.waypoint
+        ? [nav.waypoint]
+        : [];
+      const routeDisplay = wps.join(', ');
+      const routeSpoken = wps.map(formatWaypointForSpeech).join(', ');
+      const alt = nav.altitudeFeet ?? 10000;
+      const altReadable = alt >= 8000 ? `FL${String(Math.round(alt / 100)).padStart(3, '0')}` : `${alt.toLocaleString('en-US')} ft`;
+      const sidPrefix = nav.sidName ? `cleared ${nav.sidName} departure, ` : '';
+      return {
+        displayText: `${leadDisplay}${sidPrefix}proceed direct ${routeDisplay}, climb maintain ${altReadable}`,
+        spokenText: `${leadSpoken}proceed direct ${routeSpoken}, climb and maintain ${formatAltitudeForSpeech(alt)}.`,
+      };
+    }
+    case 'CENTER_HANDOFF': {
+      const freq = nav.frequency || '132.45';
+      return {
+        displayText: `${leadDisplay}radar service terminated, contact Center on ${freq}, good day`,
+        spokenText: `${leadSpoken}radar service terminated, contact Center on ${formatFrequencyForSpeech(freq)}, good day.`,
       };
     }
     case 'GO_AROUND': {

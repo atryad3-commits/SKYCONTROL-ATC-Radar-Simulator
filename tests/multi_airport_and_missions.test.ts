@@ -33,10 +33,29 @@ import {
 import { ActiveMissionState, SimulationStats } from '../src/types';
 
 describe('Multi-Airport Registry & Varied Runway Configurations', () => {
-  it('registers all 5 international and training airports with valid runways and holding fixes', () => {
-    expect(ALL_AIRPORT_PROFILES.length).toBe(5);
+  it('registers all 16 international, regional, and training airports with valid runways, fixes, and terrain', () => {
+    expect(ALL_AIRPORT_PROFILES.length).toBe(16);
     const icaos = ALL_AIRPORT_PROFILES.map(p => p.airport.icao);
-    expect(icaos).toEqual(['EGLL', 'OIII', 'KJFK', 'TRN1', 'TRN2']);
+    expect(icaos).toEqual(
+      expect.arrayContaining([
+        'EGLL',
+        'OIII',
+        'KJFK',
+        'OIIE',
+        'OISS',
+        'OMDB',
+        'LFPG',
+        'EHAM',
+        'EDDF',
+        'LSZH',
+        'EGJJ',
+        'KORD',
+        'KSFO',
+        'RJTT',
+        'TRN1',
+        'TRN2',
+      ])
+    );
 
     for (const profile of ALL_AIRPORT_PROFILES) {
       expect(profile.airport.runways.length).toBeGreaterThanOrEqual(4);
@@ -44,7 +63,20 @@ describe('Multi-Airport Registry & Varied Runway Configurations', () => {
       expect(profile.reciprocalPairs.length).toBeGreaterThanOrEqual(2);
       const holdingFixes = profile.airport.waypoints.filter(w => w.isHoldingFix);
       expect(holdingFixes.length).toBeGreaterThanOrEqual(3);
+      expect(profile.airport.terrainFeatures?.length ?? 0).toBeGreaterThanOrEqual(3);
     }
+
+    // Verify genuinely varied multi-strip architectures
+    expect(getAirportProfile('LFPG').reciprocalPairs.length).toBe(4);
+    expect(getAirportProfile('KSFO').reciprocalPairs.length).toBe(4);
+    expect(getAirportProfile('RJTT').reciprocalPairs.length).toBe(4);
+    expect(getAirportProfile('EHAM').reciprocalPairs.length).toBe(3);
+    expect(getAirportProfile('EDDF').reciprocalPairs.length).toBe(3);
+    expect(getAirportProfile('LSZH').reciprocalPairs.length).toBe(3);
+    expect(getAirportProfile('KORD').reciprocalPairs.length).toBe(3);
+    expect(getAirportProfile('OISS').airport.elevationFeet).toBe(4921);
+    expect(getAirportProfile('EHAM').airport.elevationFeet).toBe(-11);
+    expect(getAirportProfile('EGJJ').category).toBe('Regional');
   });
 
   it('resolves custom landing/departure runway choices per airport', () => {
@@ -56,18 +88,34 @@ describe('Multi-Airport Registry & Varied Runway Configurations', () => {
     const depRwy = resolvedOiii.airport.runways.find(r => r.id === '11R');
     expect(arrRwy?.activeLanding).toBe(true);
     expect(depRwy?.activeDeparture).toBe(true);
+
+    const resolvedSfo = resolveConfiguredAirport('KSFO', '28R', '01R');
+    expect(resolvedSfo.landingRunwayId).toBe('28R');
+    expect(resolvedSfo.departureRunwayId).toBe('01R');
   });
 
-  it('computes centered ILS localizer alignment for angled runways (OIII 29R & TRN1 36)', () => {
+  it('computes centered ILS localizer alignment for angled runways across global hubs', () => {
     for (const [icao, rwyId] of [
       ['OIII', '29R'],
+      ['OISS', '29R'],
+      ['OMDB', '30L'],
+      ['LFPG', '27R'],
+      ['EHAM', '18R'],
+      ['EHAM', '06'],
+      ['EDDF', '25C'],
+      ['LSZH', '14'],
+      ['LSZH', '28'],
       ['KJFK', '31L'],
+      ['KORD', '22R'],
+      ['KSFO', '28R'],
+      ['RJTT', '34L'],
+      ['EGJJ', '26'],
       ['TRN1', '36'],
       ['TRN2', '15'],
     ] as const) {
       const profile = getAirportProfile(icao);
       const rwy = profile.runwayGeometries.find(r => r.id === rwyId)!;
-      expect(rwy).toBeDefined();
+      expect(rwy, `${icao} missing runway ${rwyId}`).toBeDefined();
 
       // Place aircraft exactly 10 NM back along extended centerline
       const rad = (rwy.magneticHeading * Math.PI) / 180;
@@ -108,7 +156,20 @@ describe('Airport-Agnostic Traffic Generator', () => {
     const dep = generateDepartureFlight({ airport: oiii });
     expect(dep.origin).toBe('OIII');
     expect(dep.altitude).toBe(3962);
-    expect(dep.targetAltitude).toBeGreaterThanOrEqual(9000);
+    expect(dep.targetAltitude).toBeGreaterThanOrEqual(
+      dep.aircraftClass === 'LIGHT_GA' ? 7000 : 9000
+    );
+
+    const oiss = getAirportProfile('OISS').airport;
+    const oissInbound = generateInboundFlight(2, { airport: oiss });
+    expect(oissInbound.altitude).toBeGreaterThanOrEqual(8000);
+    expect(oissInbound.altitude - oiss.elevationFeet).toBeGreaterThanOrEqual(3000);
+
+    const egjj = getAirportProfile('EGJJ').airport;
+    for (let i = 0; i < 8; i++) {
+      const regionalAc = generateInboundFlight(10 + i, { airport: egjj, heavyRatio: 0.5 });
+      expect(regionalAc.aircraftClass).not.toBe('HEAVY_WIDEBODY');
+    }
   });
 
   it('spawns emergency Squawk 7700 flights when requested', () => {
@@ -225,9 +286,10 @@ describe('Randomized 360° Perimeter Entry & ICAO Radiotelephony Speech Engine',
       for (const existing of spawned) {
         expect(calculateDistance(ac.x, ac.y, existing.x, existing.y)).toBeGreaterThan(6);
       }
-      // Verify inside visible radar perimeter range (<= 36.5 NM)
+      // Verify inside visible radar perimeter range (Light GA enters 14–22 NM, Jets/Props 26–36 NM)
       const range = Math.hypot(ac.x, ac.y);
-      expect(range).toBeGreaterThanOrEqual(26.5);
+      const minExpectedRange = ac.aircraftClass === 'LIGHT_GA' ? 13.5 : 25.5;
+      expect(range).toBeGreaterThanOrEqual(minExpectedRange);
       expect(range).toBeLessThanOrEqual(36.5);
       spawned.push(ac);
     }

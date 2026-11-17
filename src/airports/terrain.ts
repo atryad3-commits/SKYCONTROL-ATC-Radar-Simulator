@@ -6,6 +6,7 @@
  */
 
 import { Airport, TerrainFeature } from '../types';
+import { EXPANDED_TERRAIN_BY_ICAO } from './terrainExpanded';
 
 const EGLL_TERRAIN: TerrainFeature[] = [
   // River Thames winding West-East just South of Heathrow runways & through London
@@ -465,6 +466,7 @@ const TERRAIN_BY_ICAO: Record<string, TerrainFeature[]> = {
   KJFK: KJFK_TERRAIN,
   TRN1: TRN1_TERRAIN,
   TRN2: TRN2_TERRAIN,
+  ...EXPANDED_TERRAIN_BY_ICAO,
 };
 
 export function attachTerrainToAirport(airport: Airport): Airport {

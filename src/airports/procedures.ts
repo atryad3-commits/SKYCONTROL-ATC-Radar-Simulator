@@ -7,53 +7,17 @@
 import {
   Airport,
   AirportNavVisibility,
-  Position2D,
   ProcedureLeg,
   PublishedProcedureRoute,
-  TmaBoundary,
   Waypoint,
 } from '../types';
 import { calculateBearing, calculateDistance } from '../engine/physics';
-
-interface LegConstraintSpec {
-  altitudeConstraint?: string;
-  minAltitudeFt?: number;
-  maxAltitudeFt?: number;
-  speedLimitKt?: number;
-}
-
-interface ProcedureSpec {
-  id: string;
-  name: string;
-  type: 'STAR' | 'SID';
-  description: string;
-  runwayIds: string[];
-  waypointNames: string[];
-  legConstraints: LegConstraintSpec[];
-  initialAltitudeFt?: number;
-  finalAltitudeFt?: number;
-  maxSpeedKt?: number;
-}
-
-interface AirportProceduralPackage {
-  extraWaypoints: Waypoint[];
-  waypointOverrides?: Record<string, Partial<Waypoint>>;
-  stars: ProcedureSpec[];
-  sids: ProcedureSpec[];
-  tmaBoundary: TmaBoundary;
-}
-
-function makeOctagonPolygon(radiusX: number, radiusY: number, skewX = 0, skewY = 0): Position2D[] {
-  const vertices: Position2D[] = [];
-  for (let i = 0; i < 8; i++) {
-    const angle = (i * Math.PI) / 4 + Math.PI / 8;
-    vertices.push({
-      x: Math.round((radiusX * Math.sin(angle) + skewX) * 10) / 10,
-      y: Math.round((radiusY * Math.cos(angle) + skewY) * 10) / 10,
-    });
-  }
-  return vertices;
-}
+import {
+  AirportProceduralPackage,
+  LegConstraintSpec,
+  makeOctagonPolygon,
+} from './airportBuilder';
+import { EXPANDED_PROCEDURAL_PACKAGES } from './proceduresExpanded';
 
 const AIRPORT_PROCEDURAL_PACKAGES: Record<string, AirportProceduralPackage> = {
   EGLL: {
@@ -840,6 +804,7 @@ const AIRPORT_PROCEDURAL_PACKAGES: Record<string, AirportProceduralPackage> = {
       polygon: makeOctagonPolygon(31.5, 29.5),
     },
   },
+  ...EXPANDED_PROCEDURAL_PACKAGES,
 };
 
 function buildProcedureLegs(

@@ -4,125 +4,14 @@
  * crosswind / converging training airfields (TRN1, TRN2) with exact runway geometry.
  */
 
-import { Airport, AirportProfile, Runway, Waypoint } from '../types';
+import { Airport, AirportProfile, Waypoint } from '../types';
 import { RunwayGeometry } from '../engine/runwayGeometry';
+import { buildRunwayPair } from './airportBuilder';
 import { HEATHROW_AIRPORT, HEATHROW_RUNWAY_GEOMETRIES } from './heathrow';
 import { attachProceduresToAirport } from './procedures';
 import { attachTerrainToAirport } from './terrain';
-
-const FEET_PER_NM = 6076.12;
-
-interface RunwayPairSpec {
-  primaryId: string;
-  reciprocalId: string;
-  primaryHeading: number;
-  centerOffset: { x: number; y: number };
-  lengthFeet: number;
-  widthFeet: number;
-  elevationFeet: number;
-  ilsFrequencyPrimary: string;
-  ilsFrequencyReciprocal: string;
-  activeLandingPrimary?: boolean;
-  activeDeparturePrimary?: boolean;
-}
-
-function buildRunwayPair(
-  airportId: string,
-  spec: RunwayPairSpec
-): { runways: Runway[]; geometries: RunwayGeometry[]; reciprocal: [string, string] } {
-  const halfLenNM = spec.lengthFeet / FEET_PER_NM / 2;
-  const hdg1 = spec.primaryHeading;
-  const hdg2 = (hdg1 + 180) % 360 || 360;
-  const rad1 = (hdg1 * Math.PI) / 180;
-
-  // Threshold of primary runway sits behind center relative to landing direction
-  const th1 = {
-    x: Math.round((spec.centerOffset.x - halfLenNM * Math.sin(rad1)) * 1000) / 1000,
-    y: Math.round((spec.centerOffset.y - halfLenNM * Math.cos(rad1)) * 1000) / 1000,
-  };
-  const end1 = {
-    x: Math.round((spec.centerOffset.x + halfLenNM * Math.sin(rad1)) * 1000) / 1000,
-    y: Math.round((spec.centerOffset.y + halfLenNM * Math.cos(rad1)) * 1000) / 1000,
-  };
-
-  const r1: Runway = {
-    id: spec.primaryId,
-    heading: hdg1,
-    lengthFeet: spec.lengthFeet,
-    threshold: th1,
-    endPosition: end1,
-    ilsFrequency: spec.ilsFrequencyPrimary,
-    glideslopeAngle: 3.0,
-    activeLanding: Boolean(spec.activeLandingPrimary),
-    activeDeparture: Boolean(spec.activeDeparturePrimary),
-    occupied: false,
-  };
-
-  const r2: Runway = {
-    id: spec.reciprocalId,
-    heading: hdg2,
-    lengthFeet: spec.lengthFeet,
-    threshold: end1,
-    endPosition: th1,
-    ilsFrequency: spec.ilsFrequencyReciprocal,
-    glideslopeAngle: 3.0,
-    activeLanding: false,
-    activeDeparture: false,
-    occupied: false,
-  };
-
-  const g1: RunwayGeometry = {
-    id: spec.primaryId,
-    airportId,
-    designator: spec.primaryId,
-    threshold: th1,
-    oppositeThreshold: end1,
-    trueHeading: hdg1,
-    magneticHeading: hdg1,
-    lengthFeet: spec.lengthFeet,
-    widthFeet: spec.widthFeet,
-    elevationFeet: spec.elevationFeet,
-    activeLanding: Boolean(spec.activeLandingPrimary),
-    activeDeparture: Boolean(spec.activeDeparturePrimary),
-    occupancyState: 'Available',
-    ils: {
-      frequency: spec.ilsFrequencyPrimary,
-      glideslopeAngleDeg: 3.0,
-      localizerCourseDeg: hdg1,
-      usableRangeNM: 18.0,
-      catCategory: 'CAT_III',
-    },
-  };
-
-  const g2: RunwayGeometry = {
-    id: spec.reciprocalId,
-    airportId,
-    designator: spec.reciprocalId,
-    threshold: end1,
-    oppositeThreshold: th1,
-    trueHeading: hdg2,
-    magneticHeading: hdg2,
-    lengthFeet: spec.lengthFeet,
-    widthFeet: spec.widthFeet,
-    elevationFeet: spec.elevationFeet,
-    activeLanding: false,
-    activeDeparture: false,
-    occupancyState: 'Available',
-    ils: {
-      frequency: spec.ilsFrequencyReciprocal,
-      glideslopeAngleDeg: 3.0,
-      localizerCourseDeg: hdg2,
-      usableRangeNM: 18.0,
-      catCategory: 'CAT_I',
-    },
-  };
-
-  return {
-    runways: [r1, r2],
-    geometries: [g1, g2],
-    reciprocal: [spec.primaryId, spec.reciprocalId],
-  };
-}
+import { MIDDLE_EAST_EUROPE_PROFILES } from './catalogMiddleEastEurope';
+import { AMERICAS_ASIA_PROFILES } from './catalogAmericasAsia';
 
 // ---------------------------------------------------------------------------
 // 1. EGLL – London Heathrow Airport (International · Parallel 27R/27L & 09L/09R)
@@ -476,21 +365,19 @@ const TRN2_PROFILE: AirportProfile = {
   vhfFrequency: '124.300 MHz',
 };
 
-export const AIRPORTS_REGISTRY: Record<string, AirportProfile> = {
-  EGLL: EGLL_PROFILE,
-  OIII: OIII_PROFILE,
-  KJFK: KJFK_PROFILE,
-  TRN1: TRN1_PROFILE,
-  TRN2: TRN2_PROFILE,
-};
-
 export const ALL_AIRPORT_PROFILES: AirportProfile[] = [
   EGLL_PROFILE,
   OIII_PROFILE,
   KJFK_PROFILE,
+  ...MIDDLE_EAST_EUROPE_PROFILES,
+  ...AMERICAS_ASIA_PROFILES,
   TRN1_PROFILE,
   TRN2_PROFILE,
 ];
+
+export const AIRPORTS_REGISTRY: Record<string, AirportProfile> = Object.fromEntries(
+  ALL_AIRPORT_PROFILES.map(profile => [profile.airport.icao, profile])
+);
 
 export function getAirportProfile(icao: string): AirportProfile {
   return AIRPORTS_REGISTRY[icao] || EGLL_PROFILE;

@@ -10,6 +10,7 @@
  */
 
 import { Aircraft, WeatherCondition, Waypoint } from '../types';
+import { getAircraftPerformance } from './aircraftPerformance';
 
 /** Standard gravitational acceleration in ft/s² */
 export const GRAVITY_FT_S2 = 32.174;
@@ -205,9 +206,11 @@ export function stepAircraftPhysics(
   simTimeSec: number = 0,
   groundElevationFt: number = 83
 ): Aircraft {
+  const perf = getAircraftPerformance(ac.aircraftType);
+
   // If landed, smoothly decelerate on the runway heading
   if (ac.status === 'Landed') {
-    const decelRate = 18.0; // kts/sec on runway roll
+    const decelRate = perf.landingRollDecelRateKts_s || 18.0; // kts/sec on runway roll
     const newSpeed = Math.max(0, ac.indicatedAirspeed - decelRate * dt);
     const rwyHeadingRad = (ac.heading * Math.PI) / 180;
     const distNM = (newSpeed * dt) / 3600;
@@ -235,6 +238,7 @@ export function stepAircraftPhysics(
   let targetAltitude = ac.targetAltitude;
   let targetAirspeed = ac.targetAirspeed;
   let currentStatus = ac.status;
+  let currentFlightPhase = ac.flightPhase;
   let assignedWaypoint = ac.assignedWaypoint;
   let routeQueue = ac.routeQueue ? [...ac.routeQueue] : [];
   let ilsArmed = ac.ilsArmed;
@@ -242,12 +246,20 @@ export function stepAircraftPhysics(
   let holdingLeg = ac.holdingLeg;
   let holdingTimer = ac.holdingTimer;
 
-  // 1. Waypoint & Multi-Leg Route Sequencing (Direct-To -> routeQueue -> Optional Auto-ILS)
+  const isDepartureAircraft = currentStatus === 'Departing' || currentStatus === 'Outbound';
+
+  // 1. Waypoint & Multi-Leg Route Sequencing (Direct-To -> routeQueue -> Optional Auto-ILS or Exit Gate)
   if (assignedWaypoint) {
     const wp = waypoints.find(w => w.name === assignedWaypoint);
     if (wp) {
       const distToWp = calculateDistance(ac.x, ac.y, wp.position.x, wp.position.y);
-      if (distToWp < 1.1) {
+      const isFinalExitFix =
+        isDepartureAircraft &&
+        routeQueue.length === 0 &&
+        wp.name === ac.assignedExitWaypoint;
+      const captureRadius = isFinalExitFix ? 3.0 : 1.1;
+
+      if (distToWp <= captureRadius) {
         // Waypoint reached
         if (wp.isHoldingFix && currentStatus === 'Holding') {
           // Keep holding logic active
@@ -261,7 +273,10 @@ export function stepAircraftPhysics(
           }
         } else {
           assignedWaypoint = null;
-          if (autoInterceptILS && currentStatus !== 'Departing') {
+          if (isFinalExitFix) {
+            // Maintain current outbound radial cleanly while awaiting Center Handoff (Goodbye)
+            targetHeading = ac.heading;
+          } else if (autoInterceptILS && !isDepartureAircraft) {
             ilsArmed = true;
             autoInterceptILS = false;
             currentStatus = 'LocalizerIntercept';
@@ -319,37 +334,42 @@ export function stepAircraftPhysics(
     }
   }
 
-  // 3. Airspeed Integration (IAS)
-  const accelRate = 2.0; // kts/s
-  const decelRate = 2.5; // kts/s
+  // 3. Airspeed Integration (IAS) constrained by aircraft performance envelope
+  const accelRate = perf.accelRateKts_s || 2.0; // kts/s
+  const decelRate = perf.decelRateKts_s || 2.5; // kts/s
+  const cappedTargetAirspeed = Math.min(targetAirspeed, perf.maxAirspeedIAS);
   let newIAS = ac.indicatedAirspeed;
-  const speedDiff = targetAirspeed - ac.indicatedAirspeed;
+  const speedDiff = cappedTargetAirspeed - ac.indicatedAirspeed;
 
   if (Math.abs(speedDiff) > 0.2) {
     if (speedDiff > 0) {
-      newIAS = Math.min(targetAirspeed, ac.indicatedAirspeed + accelRate * dt);
+      newIAS = Math.min(cappedTargetAirspeed, ac.indicatedAirspeed + accelRate * dt);
     } else {
-      newIAS = Math.max(targetAirspeed, ac.indicatedAirspeed - decelRate * dt);
+      newIAS = Math.max(cappedTargetAirspeed, ac.indicatedAirspeed - decelRate * dt);
     }
   }
 
-  // 4. Altitude & Vertical Speed Integration
-  const climbRate = ac.expediteAltitude ? 3200 : 2000; // fpm
-  const descentRate = ac.expediteAltitude ? 2800 : 1500; // fpm
+  // 4. Altitude & Vertical Speed Integration scaled to model capability
+  const normalClimb = Math.max(450, Math.round(perf.initialClimbRateFpm * 0.85));
+  const climbRate = ac.expediteAltitude ? perf.maxClimbRateFpm : normalClimb; // fpm
+  const descentRate = ac.expediteAltitude
+    ? Math.round(perf.normalDescentRateFpm * 1.65)
+    : perf.normalDescentRateFpm; // fpm
+  const ceilingCappedTargetAlt = Math.min(targetAltitude, perf.serviceCeilingFt);
   let newAltitude = ac.altitude;
   let verticalSpeed = 0;
-  const altDiff = targetAltitude - ac.altitude;
+  const altDiff = ceilingCappedTargetAlt - ac.altitude;
 
   if (Math.abs(altDiff) > 5) {
     if (altDiff > 0) {
       verticalSpeed = climbRate;
-      newAltitude = Math.min(targetAltitude, ac.altitude + (verticalSpeed / 60) * dt);
+      newAltitude = Math.min(ceilingCappedTargetAlt, ac.altitude + (verticalSpeed / 60) * dt);
     } else {
       verticalSpeed = -descentRate;
-      newAltitude = Math.max(targetAltitude, ac.altitude + (verticalSpeed / 60) * dt);
+      newAltitude = Math.max(ceilingCappedTargetAlt, ac.altitude + (verticalSpeed / 60) * dt);
     }
   } else {
-    newAltitude = targetAltitude;
+    newAltitude = ceilingCappedTargetAlt;
     verticalSpeed = 0;
   }
 
@@ -357,7 +377,7 @@ export function stepAircraftPhysics(
   const tasKnots = calculateTASFromIAS(newIAS, newAltitude);
 
   // 6. Turn Rate, Bank Angle & Heading Integration
-  const maxBank = ac.maxBankAngle || DEFAULT_MAX_BANK_ANGLE_DEG;
+  const maxBank = ac.maxBankAngle || perf.maxBankAngleDeg || DEFAULT_MAX_BANK_ANGLE_DEG;
   const { turnRateDegS, bankAngleDeg } = calculateTurnRateAndBankAngle(
     tasKnots,
     ac.heading,
@@ -390,6 +410,33 @@ export function stepAircraftPhysics(
   const newX = ac.x + dx;
   const newY = ac.y + dy;
 
+  // 8b. Departure Exit Gate & Handoff Readiness Detection
+  if (isDepartureAircraft && ac.assignedExitWaypoint) {
+    const exitWp = waypoints.find(w => w.name === ac.assignedExitWaypoint);
+    const minClimbAglFt = perf.aircraftClass === 'LIGHT_GA' ? 1000 : 1500;
+    const minClimbAltFt =
+      ac.exitClimbMinAltitudeFt ??
+      Math.min(perf.serviceCeilingFt, Math.ceil(groundElevationFt / 500) * 500 + minClimbAglFt);
+    const defaultMinSpeed =
+      perf.aircraftClass === 'LIGHT_GA'
+        ? Math.min(90, perf.cruiseAirspeedIAS)
+        : perf.aircraftClass === 'REGIONAL_TURBOPROP'
+        ? Math.min(150, perf.cruiseAirspeedIAS)
+        : Math.min(185, perf.cruiseAirspeedIAS);
+    const minClimbSpeedKt = ac.exitClimbMinSpeedKt ?? defaultMinSpeed;
+    const climbGateMet =
+      (newAltitude >= minClimbAltFt - 25 || newAltitude - groundElevationFt >= minClimbAglFt) &&
+      newIAS >= minClimbSpeedKt - 2;
+
+    if (
+      exitWp &&
+      climbGateMet &&
+      calculateDistance(newX, newY, exitWp.position.x, exitWp.position.y) <= 3.0
+    ) {
+      currentFlightPhase = 'HANDOFF_READY';
+    }
+  }
+
   // 9. Trail History (stored using simulation time)
   let newHistory = ac.history;
   const lastPoint = ac.history[ac.history.length - 1];
@@ -420,6 +467,7 @@ export function stepAircraftPhysics(
     turnRate: Math.round(turnRateDegS * 10) / 10,
     bankAngle: bankAngleDeg,
     status: currentStatus,
+    flightPhase: currentFlightPhase,
     assignedWaypoint,
     routeQueue,
     ilsArmed,

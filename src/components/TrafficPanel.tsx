@@ -22,6 +22,7 @@ import {
   ArrowUpRight,
 } from 'lucide-react';
 import { calculateDistance } from '../engine/physics';
+import { getAircraftPerformance } from '../engine/aircraftPerformance';
 import { TrackStatus } from '../engine/radarTracker';
 import { radioAudio } from '../audio/radioAudio';
 
@@ -341,6 +342,23 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                 );
                 const trackStatus: TrackStatus = trackMap.get(ac.id) || 'CONFIRMED';
 
+                const isDeparture = ac.status === 'Departing' || ac.status === 'Outbound';
+                const phaseText = ac.isEmergency
+                  ? '7700'
+                  : ac.status === 'FinalApproach'
+                  ? 'FINAL'
+                  : ac.flightPhase === 'HANDOFF_READY'
+                  ? 'HANDOFF'
+                  : ac.flightPhase === 'EXIT_ROUTING'
+                  ? 'EXITING'
+                  : ac.flightPhase === 'INITIAL_CLIMB'
+                  ? 'CLIMB'
+                  : ac.flightPhase === 'LINEUP'
+                  ? 'LINED UP'
+                  : ac.flightPhase === 'HOLD_SHORT'
+                  ? 'HOLD SHORT'
+                  : ac.flightPhase || ac.status.toUpperCase();
+
                 return (
                   <button
                     type="button"
@@ -370,8 +388,7 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                           {ac.callsign}
                         </span>
                         <span className="text-[10px] text-[#558f6e]">
-                          {ac.aircraftType}
-                          {ac.category === 'Heavy' ? '/H' : ''}
+                          {ac.aircraftType} · {getAircraftPerformance(ac.aircraftType).classLabel}
                         </span>
                       </div>
 
@@ -379,18 +396,18 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                         className={`text-[10px] font-semibold ${
                           ac.isEmergency
                             ? 'text-[#ff4d4d]'
-                            : ac.status === 'Established' || ac.status === 'FinalApproach'
+                            : ac.flightPhase === 'HANDOFF_READY'
+                            ? 'text-[#00ff66]'
+                            : ac.status === 'Established' ||
+                              ac.status === 'FinalApproach' ||
+                              ac.flightPhase === 'EXIT_ROUTING'
                             ? 'text-[#00e5ff]'
-                            : trackStatus === 'STALE' || trackStatus === 'LOST'
-                            ? 'text-[#ffb703]'
+                            : trackStatus === 'STALE' || trackStatus === 'LOST' || ac.flightPhase === 'LINEUP' || ac.flightPhase === 'HOLD_SHORT'
+                            ? 'text-[#ffd166]'
                             : 'text-[#77bd94]'
                         }`}
                       >
-                        {ac.isEmergency
-                          ? '7700'
-                          : ac.status === 'FinalApproach'
-                          ? 'FINAL'
-                          : ac.flightPhase || ac.status.toUpperCase()}
+                        {phaseText}
                       </span>
                     </div>
 
@@ -407,10 +424,12 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                       </span>
                     </div>
 
-                    {(ac.assignedWaypoint || ac.ilsArmed || ac.assignedRunway) && (
+                    {(ac.assignedWaypoint || ac.assignedExitWaypoint || ac.ilsArmed || ac.assignedRunway) && (
                       <div className="flex items-center justify-between text-[10px] text-[#558f6e] mt-0.5 tabular-nums">
                         <span className="truncate">
-                          {ac.assignedWaypoint
+                          {isDeparture && ac.assignedExitWaypoint
+                            ? `${ac.assignedWaypoint ? `DIR ${ac.assignedWaypoint}` : `EXIT ${ac.assignedExitWaypoint}`} · RWY ${ac.assignedRunway}`
+                            : ac.assignedWaypoint
                             ? `DIR ${ac.assignedWaypoint}`
                             : `RWY ${ac.assignedRunway}${ac.ilsArmed ? ' ILS' : ''}`}
                         </span>
@@ -499,7 +518,9 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                           <PlaneTakeoff className="w-3 h-3 text-[#00e5ff]" />
                         )}
                         <span className="font-bold text-white">{ac.callsign}</span>
-                        <span className="text-[10px] text-[#6ca885]">{ac.aircraftType}</span>
+                        <span className="text-[10px] text-[#6ca885]">
+                          {ac.aircraftType} · {getAircraftPerformance(ac.aircraftType).classLabel}
+                        </span>
                       </div>
                       <span
                         className={`text-[10px] font-bold ${
@@ -513,6 +534,9 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                     <div className="flex items-center justify-between text-[11px] text-[#9de8bc] mt-1">
                       <span>
                         {ac.origin} → {ac.destination}
+                        {!isArrival && ac.assignedExitWaypoint
+                          ? ` · EXIT ${ac.assignedExitWaypoint}`
+                          : ''}
                       </span>
                       <span>
                         FL{Math.round(ac.altitude / 100).toString().padStart(3, '0')} →{' '}
@@ -527,7 +551,17 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                         HDG {Math.round(ac.targetHeading).toString().padStart(3, '0')}° ·{' '}
                         {Math.round(ac.indicatedAirspeed)}kt
                       </span>
-                      <span className="text-[#00ff66]">RWY {ac.assignedRunway}</span>
+                      <span
+                        className={
+                          !isArrival && ac.flightPhase === 'HANDOFF_READY'
+                            ? 'text-[#00ff66] font-bold'
+                            : 'text-[#00ff66]'
+                        }
+                      >
+                        {!isArrival && ac.assignedSidName
+                          ? `${ac.assignedSidName} · RWY ${ac.assignedRunway}`
+                          : `RWY ${ac.assignedRunway}`}
+                      </span>
                     </div>
                   </button>
                 );

@@ -17,6 +17,7 @@ import { computeDefaultAirportVisibility } from '../airports/procedures';
 import { calculateBearing, calculateDistance, normalizeHeading } from '../engine/physics';
 import { TrackStatus, RadarTrack } from '../engine/radarTracker';
 import { getAltitudeColor, getAltitudeRgba } from '../utils/altitudeColor';
+import { drawRadarAircraftSilhouette } from '../utils/aircraftSilhouettes';
 import {
   MousePointer,
   Compass,
@@ -1150,21 +1151,40 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           }
         }
 
-        // Compute ordered waypoints along cleared route: assignedWaypoint + routeQueue
-        const routeSteps: Array<{ x: number; y: number; label: string; isDestination?: boolean }> = [];
+        // Compute ordered waypoints along cleared route: assignedWaypoint + routeQueue,
+        // or filed SID exit preview for departures awaiting Proceed on Exit
+        const routeSteps: Array<{ x: number; y: number; label: string; isDestination?: boolean; isExitPreview?: boolean }> = [];
+        const isDepartureAc = ac.status === 'Departing' || ac.status === 'Outbound';
         const queuedNames = [
           ...(ac.assignedWaypoint ? [ac.assignedWaypoint] : []),
           ...(ac.routeQueue || []),
         ];
+        const useDeparturePreview =
+          queuedNames.length === 0 &&
+          isDepartureAc &&
+          ac.flightPhase !== 'HANDOFF_READY' &&
+          Boolean(ac.departureRouteWaypoints && ac.departureRouteWaypoints.length > 0);
+        const displayWaypointNames = useDeparturePreview
+          ? ac.departureRouteWaypoints || []
+          : queuedNames;
 
-        for (let qIdx = 0; qIdx < queuedNames.length; qIdx++) {
-          const wpName = queuedNames[qIdx];
+        for (let qIdx = 0; qIdx < displayWaypointNames.length; qIdx++) {
+          const wpName = displayWaypointNames[qIdx];
           const wp = airport.waypoints.find(w => w.name === wpName);
           if (wp) {
+            const isExitEnd = isDepartureAc && wpName === ac.assignedExitWaypoint;
             routeSteps.push({
               x: wp.position.x,
               y: wp.position.y,
-              label: qIdx === 0 ? `FIX ${wp.name}` : `LEG ${qIdx + 1}: ${wp.name}`,
+              label: useDeparturePreview
+                ? isExitEnd
+                  ? `SID EXIT ${wp.name}`
+                  : `SID ${wp.name}`
+                : qIdx === 0
+                ? `FIX ${wp.name}`
+                : `LEG ${qIdx + 1}: ${wp.name}`,
+              isDestination: isExitEnd,
+              isExitPreview: useDeparturePreview,
             });
           }
         }
@@ -1173,7 +1193,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         if (
           rwy &&
           (routeSteps.length > 0 || ac.ilsArmed || ac.ilsLocalizerCaptured || ac.status === 'FinalApproach') &&
-          ac.status !== 'Departing'
+          !isDepartureAc
         ) {
           routeSteps.push({
             x: rwy.threshold.x,
@@ -1184,8 +1204,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         }
 
         if (routeSteps.length > 0) {
-          ctx.lineWidth = 2.0;
-          ctx.setLineDash([6, 4]);
+          ctx.lineWidth = useDeparturePreview ? 1.4 : 2.0;
+          ctx.setLineDash(useDeparturePreview ? [3, 5] : [6, 4]);
 
           let prevWorld = { x: displayX, y: displayY };
           let currPos = pos;
@@ -1417,31 +1437,24 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.fill();
       }
 
-      // 7d. Target Symbol & Direction Needle
-      ctx.save();
-      ctx.translate(pos.sx, pos.sy);
-      ctx.rotate((ac.heading * Math.PI) / 180);
-
-      ctx.strokeStyle = primaryColor;
-      ctx.fillStyle = primaryColor;
-      ctx.lineWidth = isFreshHit ? 2.5 : 2;
-
+      // 7d. Target Silhouette Symbol (Class & Model Matched, Heading Aligned)
       if (isLost) {
-        // Flashing interrogation square for lost tracks
+        ctx.save();
+        ctx.translate(pos.sx, pos.sy);
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = isFreshHit ? 2.2 : 1.8;
         ctx.strokeRect(-5, -5, 10, 10);
+        ctx.restore();
       } else {
-        // Standard ATC target blip
-        ctx.beginPath();
-        ctx.arc(0, 0, isSelected ? 5.5 : isFreshHit ? 5.0 : 4, 0, Math.PI * 2);
-        ctx.stroke();
-
-        // Heading direction needle
-        ctx.beginPath();
-        ctx.moveTo(0, -5);
-        ctx.lineTo(0, isFreshHit ? -12 : -10);
-        ctx.stroke();
+        drawRadarAircraftSilhouette(ctx, pos.sx, pos.sy, {
+          aircraftType: ac.aircraftType,
+          headingDeg: ac.heading,
+          primaryColor,
+          isSelected,
+          isFreshHit,
+          rangeNM,
+        });
       }
-      ctx.restore();
 
       // Active VHF Radio Transmission Animation on Target Blip
       const isTransmitting = Boolean(activeTransmission && activeTransmission.callsign === ac.callsign);
@@ -1688,32 +1701,82 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const gs = Math.round(ac.groundSpeed || ac.indicatedAirspeed);
       const hdg = Math.round(ac.heading).toString().padStart(3, '0');
       const trkDeg = Math.round(ac.groundTrack ?? ac.heading).toString().padStart(3, '0');
-      const phaseTag = isEmergency ? 'EMER' : ac.ilsGlideslopeCaptured ? 'GS' : ac.ilsLocalizerCaptured ? 'LOC' : ac.status.slice(0, 3).toUpperCase();
+      const isDepTag = ac.status === 'Departing' || ac.status === 'Outbound';
+      const depPhaseCode =
+        ac.flightPhase === 'HANDOFF_READY'
+          ? 'H/O'
+          : ac.flightPhase === 'EXIT_ROUTING'
+          ? 'SID'
+          : ac.flightPhase === 'INITIAL_CLIMB'
+          ? 'CLB'
+          : ac.flightPhase === 'LINEUP'
+          ? 'LUP'
+          : ac.flightPhase === 'HOLD_SHORT'
+          ? 'HLD'
+          : ac.flightPhase === 'TAKEOFF_ROLL' || ac.flightPhase === 'ROTATION' || ac.flightPhase === 'LIFTOFF'
+          ? 'T/O'
+          : ac.status.slice(0, 3).toUpperCase();
+      const phaseTag = isEmergency
+        ? 'EMER'
+        : ac.ilsGlideslopeCaptured
+        ? 'GS'
+        : ac.ilsLocalizerCaptured
+        ? 'LOC'
+        : isDepTag
+        ? depPhaseCode
+        : ac.status.slice(0, 3).toUpperCase();
       const hdgStr = extTag && trkDeg !== hdg ? `${hdg}/${trkDeg}°` : `${hdg}°`;
       ctx.font = '9px "IBM Plex Mono", monospace';
-      ctx.fillStyle = isEmergency ? '#ff6b6b' : ac.ilsGlideslopeCaptured ? '#00e5ff' : '#73b890';
+      ctx.fillStyle = isEmergency
+        ? '#ff6b6b'
+        : ac.flightPhase === 'HANDOFF_READY'
+        ? '#00ff66'
+        : ac.ilsGlideslopeCaptured || ac.flightPhase === 'EXIT_ROUTING'
+        ? '#00e5ff'
+        : '#73b890';
       ctx.fillText(`${gs}kt ${hdgStr} ${phaseTag}`, tagX + 4, tagY + 25);
 
-      // Line 4: Tactical Route / Runway / Distance Readout
+      // Line 4: Tactical Route / Exit Gate / Runway / Distance Readout
       const distStr =
         typeof ac.distanceToThreshold === 'number'
           ? `${ac.distanceToThreshold.toFixed(1)}NM`
           : `${Math.hypot(ac.x, ac.y).toFixed(1)}NM`;
+      const depRouteChip =
+        ac.flightPhase === 'HANDOFF_READY'
+          ? `HO ${ac.assignedExitWaypoint || 'CTR'}`
+          : ac.assignedWaypoint
+          ? `→${ac.assignedWaypoint}`
+          : ac.assignedExitWaypoint
+          ? `EXIT ${ac.assignedExitWaypoint}`
+          : `R${ac.assignedRunway}`;
       if (isSelected) {
         ctx.font = 'bold 9px "IBM Plex Mono", monospace';
-        ctx.fillStyle = '#00e5ff';
-        const routeChip = ac.assignedWaypoint ? `→${ac.assignedWaypoint}` : `R${ac.assignedRunway}`;
+        ctx.fillStyle = ac.flightPhase === 'HANDOFF_READY' ? '#00ff66' : '#00e5ff';
+        const routeChip = isDepTag
+          ? depRouteChip
+          : ac.assignedWaypoint
+          ? `→${ac.assignedWaypoint}`
+          : `R${ac.assignedRunway}`;
         ctx.fillText(
           extTag
             ? `${ac.origin}→${ac.destination} [${routeChip} ${distStr}]`
-            : `FROM ${ac.origin} ➔ ${ac.destination} [${ac.assignedRunway}]`,
+            : `${ac.origin} ➔ ${ac.destination} [${routeChip}]`,
           tagX + 4,
           tagY + 36
         );
       } else if (extTag) {
         ctx.font = '9px "IBM Plex Mono", monospace';
-        ctx.fillStyle = ac.status === 'Departing' ? '#ffd166' : '#58b384';
-        const navHint = ac.assignedWaypoint ? `→${ac.assignedWaypoint}` : `RWY ${ac.assignedRunway}`;
+        ctx.fillStyle =
+          ac.flightPhase === 'HANDOFF_READY'
+            ? '#00ff66'
+            : ac.status === 'Departing'
+            ? '#ffd166'
+            : '#58b384';
+        const navHint = isDepTag
+          ? depRouteChip
+          : ac.assignedWaypoint
+          ? `→${ac.assignedWaypoint}`
+          : `RWY ${ac.assignedRunway}`;
         ctx.fillText(`${navHint} · ${distStr}`, tagX + 4, tagY + 35);
       }
     }

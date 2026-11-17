@@ -1,32 +1,35 @@
 /**
- * SKYCONTROL - Realistic Airport-Agnostic Traffic Generator
- * Spawns authentic airline arrivals and departures from truly randomized 360° perimeter
- * vectors with spatial anti-clustering, varied intercept courses, and organic curved trail history.
+ * SKYCONTROL - Realistic Airport-Agnostic Mixed-Fleet Traffic Generator
+ * Spawns authentic Heavy Widebodies, Narrowbody Jets, Regional Turboprops,
+ * Business Jets, and Light GA Piston Aircraft with model-matched initial speeds,
+ * altitudes, callsigns/tail registrations, and organic curved entry trails.
  */
 
-import { Aircraft, AircraftCategory, Airport, Runway } from '../types';
+import { Aircraft, AircraftCategory, AircraftClass, Airport, Runway } from '../types';
 import { calculateBearing, normalizeHeading } from './physics';
+import { getAircraftPerformance } from './aircraftPerformance';
 import { HEATHROW_AIRPORT } from '../airports/heathrow';
 
-interface AirlineProfile {
+interface OperatorProfile {
   prefix: string;
   airline: string;
   telephony: string;
-  types: Array<{ model: string; category: AircraftCategory }>;
+  isRegistrationPrefix?: boolean;
+  types: Array<{ model: string; category: AircraftCategory; aircraftClass: AircraftClass }>;
   origins: string[];
 }
 
-const AIRLINES: AirlineProfile[] = [
+const OPERATORS: OperatorProfile[] = [
   {
     prefix: 'BAW',
     airline: 'British Airways',
     telephony: 'Speedbird',
     types: [
-      { model: 'A320', category: 'Large' },
-      { model: 'A321', category: 'Large' },
-      { model: 'A350', category: 'Heavy' },
-      { model: 'B77W', category: 'Heavy' },
-      { model: 'B789', category: 'Heavy' },
+      { model: 'A320', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A321', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A350', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'B77W', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'B789', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['KJFK', 'EDDF', 'LFPG', 'EHAM', 'LEMD', 'OMDB', 'KLAX'],
   },
@@ -35,9 +38,10 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Iran Air',
     telephony: 'Iranair',
     types: [
-      { model: 'A320', category: 'Large' },
-      { model: 'A321', category: 'Large' },
-      { model: 'B77W', category: 'Heavy' },
+      { model: 'A320', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A321', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'B77W', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'AT76', category: 'Large', aircraftClass: 'REGIONAL_TURBOPROP' },
     ],
     origins: ['OISS', 'OIMM', 'OMDB', 'LTFM', 'EDDF'],
   },
@@ -46,9 +50,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Emirates',
     telephony: 'Emirates',
     types: [
-      { model: 'B77W', category: 'Heavy' },
-      { model: 'A388', category: 'Heavy' },
-      { model: 'A350', category: 'Heavy' },
+      { model: 'B77W', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'A388', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'A350', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['OMDB', 'EGLL', 'KJFK', 'OIII'],
   },
@@ -57,9 +61,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Virgin Atlantic',
     telephony: 'Virgin',
     types: [
-      { model: 'A350', category: 'Heavy' },
-      { model: 'B789', category: 'Heavy' },
-      { model: 'A339', category: 'Heavy' },
+      { model: 'A350', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'B789', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'A339', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['KJFK', 'KBOS', 'KMIA', 'EGLL'],
   },
@@ -68,9 +72,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Lufthansa',
     telephony: 'Lufthansa',
     types: [
-      { model: 'A320', category: 'Large' },
-      { model: 'A321', category: 'Large' },
-      { model: 'B789', category: 'Heavy' },
+      { model: 'A320', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A321', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'B789', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['EDDF', 'EDDM', 'OIII'],
   },
@@ -79,8 +83,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Air France',
     telephony: 'Air France',
     types: [
-      { model: 'A320', category: 'Large' },
-      { model: 'A220', category: 'Large' },
+      { model: 'A320', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A220', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'AT76', category: 'Large', aircraftClass: 'REGIONAL_TURBOPROP' },
     ],
     origins: ['LFPG', 'EGLL', 'LIRF'],
   },
@@ -89,9 +94,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'KLM Royal Dutch',
     telephony: 'KLM',
     types: [
-      { model: 'B738', category: 'Large' },
-      { model: 'B789', category: 'Heavy' },
-      { model: 'E190', category: 'Large' },
+      { model: 'B738', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'B789', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'E190', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
     ],
     origins: ['EHAM', 'EGLL', 'OIII'],
   },
@@ -100,9 +105,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Turkish Airlines',
     telephony: 'Turkish',
     types: [
-      { model: 'A321', category: 'Large' },
-      { model: 'B77W', category: 'Heavy' },
-      { model: 'A333', category: 'Heavy' },
+      { model: 'A321', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'B77W', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'A333', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['LTFM', 'OIII', 'EGLL', 'KJFK'],
   },
@@ -111,9 +116,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Qatar Airways',
     telephony: 'Qatari',
     types: [
-      { model: 'A350', category: 'Heavy' },
-      { model: 'B77W', category: 'Heavy' },
-      { model: 'A320', category: 'Large' },
+      { model: 'A350', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'B77W', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'A320', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
     ],
     origins: ['OTHH', 'OIII', 'EGLL', 'KJFK'],
   },
@@ -122,9 +127,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Swiss International',
     telephony: 'Swiss',
     types: [
-      { model: 'A220', category: 'Large' },
-      { model: 'A321', category: 'Large' },
-      { model: 'A333', category: 'Heavy' },
+      { model: 'A220', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A321', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A333', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['LSZH', 'LSGG', 'EGLL'],
   },
@@ -133,9 +138,9 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'Delta Air Lines',
     telephony: 'Delta',
     types: [
-      { model: 'B738', category: 'Large' },
-      { model: 'A321', category: 'Large' },
-      { model: 'A350', category: 'Heavy' },
+      { model: 'B738', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A321', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'A350', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['KATL', 'KLAX', 'EGLL', 'KORD'],
   },
@@ -144,12 +149,84 @@ const AIRLINES: AirlineProfile[] = [
     airline: 'American',
     telephony: 'American',
     types: [
-      { model: 'B738', category: 'Large' },
-      { model: 'B77W', category: 'Heavy' },
-      { model: 'B788', category: 'Heavy' },
+      { model: 'B738', category: 'Large', aircraftClass: 'NARROWBODY_JET' },
+      { model: 'B77W', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
+      { model: 'B788', category: 'Heavy', aircraftClass: 'HEAVY_WIDEBODY' },
     ],
     origins: ['KDFW', 'KORD', 'KJFK'],
   },
+  // Regional Turboprop Operators
+  {
+    prefix: 'BEE',
+    airline: 'Flybe Regional',
+    telephony: 'Jersey',
+    types: [
+      { model: 'DH8D', category: 'Large', aircraftClass: 'REGIONAL_TURBOPROP' },
+      { model: 'AT76', category: 'Large', aircraftClass: 'REGIONAL_TURBOPROP' },
+    ],
+    origins: ['EGPH', 'EGCC', 'EGBB', 'OISS', 'LFOB'],
+  },
+  {
+    prefix: 'LOG',
+    airline: 'Loganair',
+    telephony: 'Logan',
+    types: [
+      { model: 'AT76', category: 'Large', aircraftClass: 'REGIONAL_TURBOPROP' },
+      { model: 'DH8D', category: 'Large', aircraftClass: 'REGIONAL_TURBOPROP' },
+    ],
+    origins: ['EGPD', 'EGPF', 'EGNT', 'EIDW'],
+  },
+  // Business Jet Operators
+  {
+    prefix: 'EJA',
+    airline: 'NetJets Aviation',
+    telephony: 'Execjet',
+    types: [
+      { model: 'C56X', category: 'Small', aircraftClass: 'BIZJET' },
+      { model: 'LJ45', category: 'Small', aircraftClass: 'BIZJET' },
+      { model: 'GLF5', category: 'Large', aircraftClass: 'BIZJET' },
+    ],
+    origins: ['KTEB', 'EGLF', 'LFPB', 'LSGG', 'KBED'],
+  },
+  {
+    prefix: 'VJT',
+    airline: 'VistaJet',
+    telephony: 'Vista',
+    types: [
+      { model: 'GLF5', category: 'Large', aircraftClass: 'BIZJET' },
+      { model: 'C56X', category: 'Small', aircraftClass: 'BIZJET' },
+      { model: 'LJ45', category: 'Small', aircraftClass: 'BIZJET' },
+    ],
+    origins: ['LFPB', 'EGLF', 'OMDW', 'LSZH'],
+  },
+  // General Aviation Light Aircraft
+  {
+    prefix: 'GA',
+    airline: 'General Aviation',
+    telephony: '',
+    isRegistrationPrefix: true,
+    types: [
+      { model: 'C172', category: 'Small', aircraftClass: 'LIGHT_GA' },
+      { model: 'SR22', category: 'Small', aircraftClass: 'LIGHT_GA' },
+      { model: 'PA28', category: 'Small', aircraftClass: 'LIGHT_GA' },
+    ],
+    origins: ['EGTB', 'EGKA', 'KFRG', 'KCDW', 'OIFM', 'OIIP'],
+  },
+];
+
+const GA_REGISTRATIONS = [
+  'N172SP',
+  'N22SR',
+  'N418PA',
+  'G-SKY1',
+  'G-BOAC',
+  'G-C172',
+  'G-SR22',
+  'EP-GA1',
+  'EP-PA2',
+  'N738C',
+  'D-EFLY',
+  'F-HBCD',
 ];
 
 let squawkCounter = 4501;
@@ -173,45 +250,90 @@ export interface SpawnFlightOptions {
   initialScopeDistribution?: boolean;
 }
 
-function pickAirlineAndType(heavyRatio?: number): {
-  airline: AirlineProfile;
-  aircraftSpec: { model: string; category: AircraftCategory };
+function pickOperatorAndType(
+  heavyRatio?: number,
+  runwayLengthFt?: number
+): {
+  operator: OperatorProfile;
+  aircraftSpec: { model: string; category: AircraftCategory; aircraftClass: AircraftClass };
 } {
-  const preferHeavy =
-    typeof heavyRatio === 'number' ? Math.random() < heavyRatio : undefined;
+  // Choose class distribution respecting heavyRatio and runway suitability
+  const effectiveHeavyRatio =
+    typeof runwayLengthFt === 'number' && runwayLengthFt < 6500
+      ? 0
+      : typeof heavyRatio === 'number'
+      ? heavyRatio
+      : 0.25;
 
-  if (preferHeavy !== undefined) {
-    const targetCategory: AircraftCategory = preferHeavy ? 'Heavy' : 'Large';
-    const matchingAirlines = AIRLINES.filter(a =>
-      a.types.some(t => t.category === targetCategory)
-    );
-    if (matchingAirlines.length > 0) {
-      const airline = matchingAirlines[Math.floor(Math.random() * matchingAirlines.length)];
-      const matchingTypes = airline.types.filter(t => t.category === targetCategory);
-      const spec = matchingTypes[Math.floor(Math.random() * matchingTypes.length)];
-      return { airline, aircraftSpec: spec };
+  const roll = Math.random();
+  let desiredClass: AircraftClass;
+
+  if (roll < effectiveHeavyRatio) {
+    desiredClass = 'HEAVY_WIDEBODY';
+  } else {
+    const remRoll = (roll - effectiveHeavyRatio) / Math.max(0.05, 1 - effectiveHeavyRatio);
+    if (typeof runwayLengthFt === 'number' && runwayLengthFt < 6500) {
+      // Regional/Training strips favor Light GA, Turboprops, and Bizjets
+      if (remRoll < 0.45) desiredClass = 'LIGHT_GA';
+      else if (remRoll < 0.78) desiredClass = 'REGIONAL_TURBOPROP';
+      else desiredClass = 'BIZJET';
+    } else {
+      // Major hubs get authentic mixed fleet: Narrowbodies, Turboprops, Bizjets & GA
+      if (remRoll < 0.50) desiredClass = 'NARROWBODY_JET';
+      else if (remRoll < 0.72) desiredClass = 'REGIONAL_TURBOPROP';
+      else if (remRoll < 0.87) desiredClass = 'BIZJET';
+      else desiredClass = 'LIGHT_GA';
     }
   }
 
-  const airline = AIRLINES[Math.floor(Math.random() * AIRLINES.length)];
-  const aircraftSpec = airline.types[Math.floor(Math.random() * airline.types.length)];
-  return { airline, aircraftSpec };
+  const matchingOperators = OPERATORS.filter(op =>
+    op.types.some(t => t.aircraftClass === desiredClass)
+  );
+  if (matchingOperators.length > 0) {
+    const operator =
+      matchingOperators[Math.floor(Math.random() * matchingOperators.length)];
+    const matchingTypes = operator.types.filter(
+      t => t.aircraftClass === desiredClass
+    );
+    const aircraftSpec =
+      matchingTypes[Math.floor(Math.random() * matchingTypes.length)];
+    return { operator, aircraftSpec };
+  }
+
+  const operator = OPERATORS[0];
+  return { operator, aircraftSpec: operator.types[0] };
 }
 
 function generateUniqueCallsign(
-  airline: AirlineProfile,
+  operator: OperatorProfile,
   existingAircraft: Aircraft[],
   minNum: number = 101
 ): string {
   const existingSet = new Set(existingAircraft.map(a => a.callsign));
+
+  if (operator.isRegistrationPrefix) {
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const candidate =
+        GA_REGISTRATIONS[Math.floor(Math.random() * GA_REGISTRATIONS.length)];
+      if (!existingSet.has(candidate)) {
+        return candidate;
+      }
+    }
+    const randDigits = Math.floor(100 + Math.random() * 899);
+    const letters = 'ABCDEFGHJKLMNPRSTUVWXYZ';
+    const l1 = letters[Math.floor(Math.random() * letters.length)];
+    const l2 = letters[Math.floor(Math.random() * letters.length)];
+    return `N${randDigits}${l1}${l2}`;
+  }
+
   for (let attempt = 0; attempt < 12; attempt++) {
     const num = Math.floor(minNum + Math.random() * (999 - minNum));
-    const candidate = `${airline.prefix}${num}`;
+    const candidate = `${operator.prefix}${num}`;
     if (!existingSet.has(candidate)) {
       return candidate;
     }
   }
-  return `${airline.prefix}${Math.floor(100 + Math.random() * 899)}`;
+  return `${operator.prefix}${Math.floor(100 + Math.random() * 899)}`;
 }
 
 /**
@@ -221,31 +343,45 @@ function generateUniqueCallsign(
 function pickRandomizedSpawnPosition(
   existingAircraft: Aircraft[],
   isEmergency: boolean,
-  initialScopeDistribution: boolean
+  initialScopeDistribution: boolean,
+  aircraftClass: AircraftClass
 ): { x: number; y: number; spawnDist: number; spawnBearing: number } {
+  // Light GA enters closer to the airport perimeter than widebody heavies
+  const isSlowProp = aircraftClass === 'LIGHT_GA';
   const minDistRange = isEmergency
-    ? 17
+    ? isSlowProp
+      ? 11
+      : 17
     : initialScopeDistribution
-    ? 15
-    : 27;
+    ? isSlowProp
+      ? 9
+      : 15
+    : isSlowProp
+    ? 14
+    : 26;
   const maxDistRange = isEmergency
-    ? 24
+    ? isSlowProp
+      ? 16
+      : 24
     : initialScopeDistribution
-    ? 32
+    ? isSlowProp
+      ? 18
+      : 32
+    : isSlowProp
+    ? 22
     : 36;
 
   let bestCandidate = {
     x: 0,
     y: 0,
-    spawnDist: 30,
+    spawnDist: (minDistRange + maxDistRange) / 2,
     spawnBearing: Math.random() * 360,
     minSeparation: -1,
   };
 
   const candidatesCount = 24;
   for (let i = 0; i < candidatesCount; i++) {
-    // Mix pure random azimuth with sector jitter so every direction around 360° gets sampled fairly
-    const sectorJitter = ((i * (360 / candidatesCount)) + Math.random() * 28) % 360;
+    const sectorJitter = (i * (360 / candidatesCount) + Math.random() * 28) % 360;
     const spawnBearing = i === 0 ? Math.random() * 360 : sectorJitter;
     const spawnDist = minDistRange + Math.random() * (maxDistRange - minDistRange);
     const rad = (spawnBearing * Math.PI) / 180;
@@ -262,10 +398,9 @@ function pickRandomizedSpawnPosition(
       if (dist < minSep) minSep = dist;
     }
 
-    // Also penalize spawning on nearly the exact same bearing as recent inbounds
     let bearingSpreadPenalty = 0;
     for (const other of existingAircraft) {
-      if (other.status === 'Inbound' && Math.hypot(other.x, other.y) > 12) {
+      if (other.status === 'Inbound' && Math.hypot(other.x, other.y) > 10) {
         const otherBearing = calculateBearing(0, 0, other.x, other.y);
         const diff = Math.abs(((spawnBearing - otherBearing + 540) % 360) - 180);
         if (diff < 32) {
@@ -285,7 +420,6 @@ function pickRandomizedSpawnPosition(
       };
     }
 
-    // Fast-accept if completely clear (>= 15 NM from everyone and well-spaced azimuth)
     if (score >= 15 && i >= 3) {
       break;
     }
@@ -301,12 +435,16 @@ function pickRandomizedSpawnPosition(
 
 /**
  * Generates an organic curved or slightly angled radar trail leading into the spawn position
+ * scaled cleanly to the aircraft's airspeed and descent rate.
  */
 function buildOrganicEntryHistory(
   x: number,
   y: number,
   heading: number,
-  altitude: number
+  altitude: number,
+  indicatedAirspeed: number,
+  descentFpm: number,
+  maxCeilingFt: number
 ): Aircraft['history'] {
   const pts: Aircraft['history'] = [];
   const curveSign = Math.random() < 0.5 ? -1 : 1;
@@ -315,7 +453,9 @@ function buildOrganicEntryHistory(
   let backX = x;
   let backY = y;
   let backHeading = heading;
-  const stepDist = 2.05;
+  // Scale trail dot distance realistically to ~15s flight intervals at aircraft speed
+  const stepDist = Math.max(0.35, (indicatedAirspeed / 3600) * 15);
+  const altPerStep = Math.max(120, Math.round((descentFpm / 60) * 15));
 
   const backwardsPts: Aircraft['history'] = [];
   for (let s = 1; s <= 6; s++) {
@@ -326,7 +466,7 @@ function buildOrganicEntryHistory(
     backwardsPts.push({
       x: backX,
       y: backY,
-      altitude: Math.min(20000, Math.round(altitude + s * (380 + Math.random() * 140))),
+      altitude: Math.min(maxCeilingFt, Math.round(altitude + s * altPerStep)),
       timestamp: -s * 15,
     });
   }
@@ -340,7 +480,7 @@ function buildOrganicEntryHistory(
 
 /**
  * Spawns a realistic inbound flight from any 360-degree radar perimeter position
- * along a non-fixed intercept vector (never constrained to a single fixed point or route).
+ * with speed, altitude, and callsign matched strictly to its aircraft model profile.
  */
 export function generateInboundFlight(
   idSuffix?: number,
@@ -354,22 +494,25 @@ export function generateInboundFlight(
     airport.runways[0];
 
   const existingAircraft = options.existingAircraft || [];
-  const { airline, aircraftSpec } = pickAirlineAndType(options.heavyRatio);
-  const callsign = generateUniqueCallsign(airline, existingAircraft, 101);
+  const { operator, aircraftSpec } = pickOperatorAndType(
+    options.heavyRatio,
+    arrivalRwy?.lengthFeet
+  );
+  const perf = getAircraftPerformance(aircraftSpec.model);
+  const callsign = generateUniqueCallsign(operator, existingAircraft, 101);
 
-  const validOrigins = airline.origins.filter(o => o !== airport.icao);
+  const validOrigins = operator.origins.filter(o => o !== airport.icao);
   const origin =
     validOrigins[Math.floor(Math.random() * validOrigins.length)] || 'EDDF';
 
   const { x, y, spawnDist } = pickRandomizedSpawnPosition(
     existingAircraft,
     Boolean(options.isEmergency),
-    Boolean(options.initialScopeDistribution)
+    Boolean(options.initialScopeDistribution),
+    aircraftSpec.aircraftClass
   );
 
-  // Pick a randomized target/offset point around the airport TMA so aircraft arrive along
-  // genuinely varied downwind, base, or diagonal crosswind vectors rather than fixed lines.
-  const offsetDist = options.isEmergency ? 2 + Math.random() * 4 : 3 + Math.random() * 9;
+  const offsetDist = options.isEmergency ? 2 + Math.random() * 4 : 3 + Math.random() * 8;
   const offsetAngleRad = Math.random() * Math.PI * 2;
   const aimX = offsetDist * Math.sin(offsetAngleRad);
   const aimY = offsetDist * Math.cos(offsetAngleRad);
@@ -377,45 +520,75 @@ export function generateInboundFlight(
   const inboundTrack = calculateBearing(x, y, aimX, aimY);
   const heading = Math.round(normalizeHeading(inboundTrack + (Math.random() * 16 - 8)));
 
-  // Occasionally (~20%, non-emergency) assign a randomized inbound STAR/waypoint on the same side;
-  // otherwise keep assignedWaypoint null so aircraft flies its unique random entry vector.
   let assignedWaypoint: string | null = null;
-  if (!options.isEmergency && !options.initialScopeDistribution && Math.random() < 0.22 && airport.waypoints.length > 0) {
+  if (
+    !options.isEmergency &&
+    !options.initialScopeDistribution &&
+    Math.random() < 0.22 &&
+    airport.waypoints.length > 0
+  ) {
     const frontCandidates = airport.waypoints.filter(wp => {
       const brg = calculateBearing(x, y, wp.position.x, wp.position.y);
       const diff = Math.abs(((brg - inboundTrack + 540) % 360) - 180);
       return diff < 55;
     });
     if (frontCandidates.length > 0) {
-      assignedWaypoint = frontCandidates[Math.floor(Math.random() * frontCandidates.length)].name;
+      assignedWaypoint =
+        frontCandidates[Math.floor(Math.random() * frontCandidates.length)].name;
     }
   }
 
-  // Entry altitude scaled cleanly above airport field elevation
+  // Model-matched entry altitude and airspeed
   const baseThousands = Math.ceil(airport.elevationFeet / 1000) * 1000;
-  const altitudeOffsets = options.isEmergency
-    ? [4000, 5000, 6000]
+  const minAgl = perf.initialSpawnAltMinAglFt;
+  const maxAgl = perf.initialSpawnAltMaxAglFt;
+  const rawAgl = options.isEmergency
+    ? minAgl + Math.floor(Math.random() * 3) * 500
     : options.initialScopeDistribution
-    ? [5000, 6000, 7000, 8000, 9000]
-    : [7000, 8000, 9000, 10000, 11000, 12000];
-  const altitude =
-    baseThousands +
-    altitudeOffsets[Math.floor(Math.random() * altitudeOffsets.length)];
-  const targetAltitude =
-    baseThousands + (options.isEmergency ? 3000 : 4000 + Math.floor(Math.random() * 3) * 1000);
+    ? minAgl + Math.floor(Math.random() * Math.max(2, Math.floor((maxAgl - minAgl) / 1000))) * 1000
+    : minAgl + 1000 + Math.floor(Math.random() * Math.max(2, Math.floor((maxAgl - minAgl) / 1000))) * 1000;
+  const altitude = Math.min(perf.serviceCeilingFt, baseThousands + rawAgl);
+
+  const targetOffsetAgl =
+    aircraftSpec.aircraftClass === 'LIGHT_GA'
+      ? options.isEmergency
+        ? 1500
+        : 2000 + Math.floor(Math.random() * 2) * 500
+      : options.isEmergency
+      ? 3000
+      : 4000 + Math.floor(Math.random() * 3) * 1000;
+  const targetAltitude = Math.min(
+    perf.serviceCeilingFt,
+    altitude,
+    baseThousands + targetOffsetAgl
+  );
+
+  const minSpd = perf.initialSpawnSpeedMinIAS;
+  const maxSpd = perf.initialSpawnSpeedMaxIAS;
   const indicatedAirspeed = options.isEmergency
-    ? 200 + Math.floor(Math.random() * 15)
-    : 220 + Math.floor(Math.random() * 30);
+    ? Math.max(perf.minAirspeedIAS + 10, Math.round(minSpd))
+    : Math.round(minSpd + Math.random() * (maxSpd - minSpd));
+
+  const targetAirspeed = Math.max(
+    perf.minAirspeedIAS,
+    Math.min(
+      perf.maxAirspeedIAS,
+      options.isEmergency
+        ? Math.round(perf.typicalApproachSpeedIAS + 18)
+        : Math.round(minSpd + (maxSpd - minSpd) * 0.45)
+    )
+  );
 
   const id = `ac_${Date.now()}_${idSuffix || Math.floor(Math.random() * 10000)}_${Math.floor(Math.random() * 999)}`;
 
   return {
     id,
     callsign,
-    airline: airline.airline,
-    telephony: airline.telephony,
+    airline: operator.airline,
+    telephony: operator.telephony || callsign,
     aircraftType: aircraftSpec.model,
     category: aircraftSpec.category,
+    aircraftClass: aircraftSpec.aircraftClass,
     origin,
     destination: airport.icao,
     x,
@@ -423,11 +596,12 @@ export function generateInboundFlight(
     altitude,
     targetAltitude,
     indicatedAirspeed,
-    targetAirspeed: options.isEmergency ? 185 : 210 + Math.floor(Math.random() * 20),
+    targetAirspeed,
     groundSpeed: indicatedAirspeed,
     heading,
     targetHeading: heading,
-    verticalSpeed: -1400,
+    maxBankAngle: perf.maxBankAngleDeg,
+    verticalSpeed: -perf.normalDescentRateFpm,
     expediteAltitude: Boolean(options.isEmergency),
     turnRate: 0,
     status: 'Inbound',
@@ -451,12 +625,94 @@ export function generateInboundFlight(
       x: x >= 0 ? -72 : 30,
       y: y >= 0 ? 24 : -26,
     },
-    history: buildOrganicEntryHistory(x, y, heading, altitude),
+    history: buildOrganicEntryHistory(
+      x,
+      y,
+      heading,
+      altitude,
+      indicatedAirspeed,
+      perf.normalDescentRateFpm,
+      perf.serviceCeilingFt
+    ),
+  };
+}
+
+export interface DepartureExitAssignment {
+  assignedSidId: string;
+  assignedSidName: string;
+  assignedExitWaypoint: string;
+  departureRouteWaypoints: string[];
+  exitClimbMinAltitudeFt: number;
+  exitClimbMinSpeedKt: number;
+}
+
+/**
+ * Resolves a mandatory departure SID/Exit route matching the departure runway and airport
+ * waypoint catalog so every generated departure has a filed radar exit destination.
+ */
+export function resolveDepartureExitAssignment(
+  airport: Airport,
+  departureRwy: Runway,
+  aircraftType: string
+): DepartureExitAssignment {
+  const perf = getAircraftPerformance(aircraftType);
+  const sids = airport.departureRoutes || [];
+  const matchingRwySids = sids.filter(
+    s => s.runwayIds.includes(departureRwy.id) && s.waypointNames.length > 0
+  );
+  const sidPool = matchingRwySids.length > 0 ? matchingRwySids : sids.filter(s => s.waypointNames.length > 0);
+
+  const minClimbAglFt = perf.aircraftClass === 'LIGHT_GA' ? 1000 : 1500;
+  const exitClimbMinAltitudeFt = Math.min(
+    perf.serviceCeilingFt,
+    Math.ceil(airport.elevationFeet / 500) * 500 + minClimbAglFt
+  );
+  const exitClimbMinSpeedKt =
+    perf.aircraftClass === 'LIGHT_GA'
+      ? Math.min(90, perf.cruiseAirspeedIAS)
+      : perf.aircraftClass === 'REGIONAL_TURBOPROP'
+      ? Math.min(150, perf.cruiseAirspeedIAS)
+      : Math.min(185, perf.cruiseAirspeedIAS);
+
+  if (sidPool.length > 0) {
+    const selectedSid = sidPool[Math.floor(Math.random() * sidPool.length)];
+    const routeWps = [...selectedSid.waypointNames];
+    const exitFix = routeWps[routeWps.length - 1];
+    return {
+      assignedSidId: selectedSid.id,
+      assignedSidName: selectedSid.name,
+      assignedExitWaypoint: exitFix,
+      departureRouteWaypoints: routeWps,
+      exitClimbMinAltitudeFt,
+      exitClimbMinSpeedKt,
+    };
+  }
+
+  // Fallback to published EXIT waypoints or outward radial fixes
+  const exitWaypoints = airport.waypoints.filter(
+    w => w.role === 'EXIT' || w.isDepartureExit
+  );
+  const outerFixes =
+    exitWaypoints.length > 0
+      ? exitWaypoints
+      : airport.waypoints.filter(w => Math.hypot(w.position.x, w.position.y) >= 8);
+  const pool = outerFixes.length > 0 ? outerFixes : airport.waypoints;
+  const chosenExit = pool[Math.floor(Math.random() * pool.length)];
+  const exitName = chosenExit?.name || 'EXIT';
+
+  return {
+    assignedSidId: `${airport.icao}_RADAR_${exitName}`,
+    assignedSidName: `${exitName}1D`,
+    assignedExitWaypoint: exitName,
+    departureRouteWaypoints: chosenExit ? [chosenExit.name] : [],
+    exitClimbMinAltitudeFt,
+    exitClimbMinSpeedKt,
   };
 }
 
 /**
- * Spawns a departure aircraft lined up or holding short on the configured departure runway
+ * Spawns a departure aircraft holding short on the configured departure runway
+ * with a mandatory filed SID/Exit route and model-matched climb parameters.
  */
 export function generateDepartureFlight(options: SpawnFlightOptions = {}): Aircraft {
   const airport = options.airport || HEATHROW_AIRPORT;
@@ -468,24 +724,34 @@ export function generateDepartureFlight(options: SpawnFlightOptions = {}): Aircr
     airport.runways[0];
 
   const existingAircraft = options.existingAircraft || [];
-  const { airline, aircraftSpec } = pickAirlineAndType(options.heavyRatio);
-  const callsign = generateUniqueCallsign(airline, existingAircraft, 201);
-  const validDests = airline.origins.filter(o => o !== airport.icao);
+  const { operator, aircraftSpec } = pickOperatorAndType(
+    options.heavyRatio,
+    departureRwy?.lengthFeet
+  );
+  const perf = getAircraftPerformance(aircraftSpec.model);
+  const callsign = generateUniqueCallsign(operator, existingAircraft, 201);
+  const validDests = operator.origins.filter(o => o !== airport.icao);
   const destination =
     validDests[Math.floor(Math.random() * validDests.length)] || 'LFPG';
+
+  const exitPlan = resolveDepartureExitAssignment(airport, departureRwy, aircraftSpec.model);
 
   const id = `ac_dep_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
   const startX = departureRwy.threshold.x;
   const startY = departureRwy.threshold.y;
-  const climbTarget = Math.ceil(airport.elevationFeet / 1000) * 1000 + 6000;
+  const climbTarget = Math.min(
+    perf.serviceCeilingFt,
+    Math.ceil(airport.elevationFeet / 1000) * 1000 + perf.initialDepartureClearanceAglFt
+  );
 
   return {
     id,
     callsign,
-    airline: airline.airline,
-    telephony: airline.telephony,
+    airline: operator.airline,
+    telephony: operator.telephony || callsign,
     aircraftType: aircraftSpec.model,
     category: aircraftSpec.category,
+    aircraftClass: aircraftSpec.aircraftClass,
     origin: airport.icao,
     destination,
     x: startX,
@@ -493,10 +759,11 @@ export function generateDepartureFlight(options: SpawnFlightOptions = {}): Aircr
     altitude: airport.elevationFeet,
     targetAltitude: climbTarget,
     indicatedAirspeed: 0,
-    targetAirspeed: 210,
+    targetAirspeed: Math.min(210, perf.cruiseAirspeedIAS),
     groundSpeed: 0,
     heading: departureRwy.heading,
     targetHeading: departureRwy.heading,
+    maxBankAngle: perf.maxBankAngleDeg,
     verticalSpeed: 0,
     expediteAltitude: false,
     turnRate: 0,
@@ -505,6 +772,13 @@ export function generateDepartureFlight(options: SpawnFlightOptions = {}): Aircr
     assignedRunway: departureRwy.id,
     transponder: getNextSquawk(),
     assignedWaypoint: null,
+    routeQueue: [],
+    assignedSidId: exitPlan.assignedSidId,
+    assignedSidName: exitPlan.assignedSidName,
+    assignedExitWaypoint: exitPlan.assignedExitWaypoint,
+    departureRouteWaypoints: exitPlan.departureRouteWaypoints,
+    exitClimbMinAltitudeFt: exitPlan.exitClimbMinAltitudeFt,
+    exitClimbMinSpeedKt: exitPlan.exitClimbMinSpeedKt,
     holdingWaypoint: null,
     holdingInboundHeading: departureRwy.heading,
     holdingLegTime: 60,

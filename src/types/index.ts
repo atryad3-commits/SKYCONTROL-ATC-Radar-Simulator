@@ -7,6 +7,21 @@ import type { RunwayGeometry } from '../engine/runwayGeometry';
 
 export type AircraftCategory = 'Heavy' | 'Large' | 'Small';
 
+export type AircraftClass =
+  | 'HEAVY_WIDEBODY'
+  | 'NARROWBODY_JET'
+  | 'REGIONAL_TURBOPROP'
+  | 'BIZJET'
+  | 'LIGHT_GA';
+
+export type RadarSilhouetteType =
+  | 'HEAVY_QUAD'
+  | 'HEAVY_TWIN'
+  | 'NARROWBODY'
+  | 'BIZJET'
+  | 'TURBOPROP'
+  | 'LIGHT_GA';
+
 export type AircraftStatus =
   | 'Inbound'
   | 'Outbound'
@@ -40,8 +55,9 @@ export interface Aircraft {
   callsign: string;           // e.g. "BAW142"
   airline: string;            // e.g. "British Airways"
   telephony: string;          // e.g. "Speedbird"
-  aircraftType: string;       // e.g. "A320", "B77W"
+  aircraftType: string;       // e.g. "A320", "B77W", "DH8D", "C172"
   category: AircraftCategory;
+  aircraftClass?: AircraftClass;
   origin: string;             // e.g. "KJFK"
   destination: string;        // e.g. "EGLL"
 
@@ -91,6 +107,14 @@ export interface Aircraft {
   localizerDeviation?: number;  // Angular deviation in degrees
   touchdownTime?: number;
   flightPhase?: string;        // Staged takeoff or landing flight phase
+
+  // Departure Exit Route & Center Handoff
+  assignedSidId?: string;
+  assignedSidName?: string;
+  assignedExitWaypoint?: string;
+  departureRouteWaypoints?: string[];
+  exitClimbMinAltitudeFt?: number;
+  exitClimbMinSpeedKt?: number;
 
   // UI & Radar Tagging
   tagOffset: { x: number; y: number }; // Vector leader line offset in screen px
@@ -230,7 +254,7 @@ export interface AirportProfile {
   airport: Airport;
   runwayGeometries: RunwayGeometry[];
   reciprocalPairs: Array<[string, string]>;
-  category: 'International' | 'Training';
+  category: 'International' | 'Regional' | 'Training';
   runwayLayoutLabel: string;
   difficultyLabel: 'Standard' | 'Moderate' | 'Challenging' | 'High Crosswind';
   summary: string;

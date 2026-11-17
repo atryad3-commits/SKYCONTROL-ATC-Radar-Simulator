@@ -22,6 +22,7 @@ import {
   Radio,
   RotateCcw,
   Save,
+  Search,
   Trash2,
   Wind,
 } from 'lucide-react';
@@ -139,6 +140,12 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
   const [selectedMissionId, setSelectedMissionId] = useState<MissionId>('mission_1');
   const [selectedCustomId, setSelectedCustomId] = useState<string>(scenarios[0]?.id || '');
 
+  // Airport catalog search & filter
+  const [airportSearch, setAirportSearch] = useState<string>('');
+  const [airportCategoryFilter, setAirportCategoryFilter] = useState<
+    'ALL' | 'International' | 'Regional' | 'Training'
+  >('ALL');
+
   // Sector & Runways Draft State
   const [airportIcao, setAirportIcao] = useState<string>(storeAirport.icao || 'EGLL');
   const [landingRwyId, setLandingRwyId] = useState<string>(storeLandingRwy || '27R');
@@ -220,6 +227,31 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
     () => getAirportProfile(draft.airportIcao),
     [draft.airportIcao]
   );
+
+  const airportCategoryCounts = useMemo(() => {
+    const counts = { ALL: ALL_AIRPORT_PROFILES.length, International: 0, Regional: 0, Training: 0 };
+    for (const prof of ALL_AIRPORT_PROFILES) {
+      counts[prof.category] = (counts[prof.category] || 0) + 1;
+    }
+    return counts;
+  }, []);
+
+  const filteredAirports = useMemo(() => {
+    const q = airportSearch.trim().toLowerCase();
+    return ALL_AIRPORT_PROFILES.filter(prof => {
+      if (airportCategoryFilter !== 'ALL' && prof.category !== airportCategoryFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        prof.airport.icao.toLowerCase().includes(q) ||
+        prof.airport.iata.toLowerCase().includes(q) ||
+        prof.airport.name.toLowerCase().includes(q) ||
+        prof.airport.country.toLowerCase().includes(q) ||
+        prof.runwayLayoutLabel.toLowerCase().includes(q)
+      );
+    });
+  }, [airportSearch, airportCategoryFilter]);
 
   const currentAirportVis: AirportNavVisibility = useMemo(() => {
     return draftVisMap[airportIcao] || computeDefaultAirportVisibility(selectedProfile.airport);
@@ -682,44 +714,102 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
                   })}
                 </div>
               ) : (
-                <div className="divide-y divide-[#143020] border border-[#163826] rounded bg-[#08130d]">
+                <div className="flex flex-col gap-3">
                   {mode === 'custom' && scenarios.length === 0 && (
-                    <div className="p-3.5 text-[#ffd166]">
+                    <div className="p-3 bg-[#08130d] border border-[#163826] rounded text-[#ffd166]">
                       No saved scenarios yet. Create one in Scenario Studio or pick an airport below:
                     </div>
                   )}
-                  {ALL_AIRPORT_PROFILES.map(prof => {
-                    const isSel = prof.airport.icao === airportIcao;
-                    const starCount = prof.airport.approachRoutes?.length || 0;
-                    const sidCount = prof.airport.departureRoutes?.length || 0;
-                    const fixCount = prof.airport.waypoints.length;
-                    return (
-                      <button
-                        key={prof.airport.icao}
-                        type="button"
-                        onClick={() => handleAirportPick(prof.airport.icao)}
-                        className={`w-full text-left p-3.5 transition-colors flex flex-col gap-1 border-l-2 ${
-                          isSel
-                            ? 'bg-[#0d2618] border-l-[#00ff66]'
-                            : 'border-l-transparent hover:bg-[#0b1b13]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 w-full">
-                          <div className="flex items-center gap-2 font-mono">
-                            <span className="text-sm font-bold text-[#00ff66]">{prof.airport.icao}</span>
-                            <span className="text-white font-semibold">{prof.airport.name}</span>
-                          </div>
-                          <span className="text-[11px] text-[#a2f5bf]">
-                            {prof.category} · {prof.difficultyLabel}
-                          </span>
-                        </div>
-                        <p className="text-[#85cca1] leading-relaxed">{prof.summary}</p>
-                        <div className="text-[11px] text-[#5da87d] font-mono tabular-nums">
-                          {prof.runwayLayoutLabel} · ELEV {prof.airport.elevationFeet}ft · {starCount} STAR / {sidCount} SID / {fixCount} FIX
-                        </div>
-                      </button>
-                    );
-                  })}
+
+                  {/* Search & Category Filter Toolbar */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-[#08130d] border border-[#163826] rounded px-3 py-2">
+                    <div className="relative flex-1 min-w-0">
+                      <Search className="w-3.5 h-3.5 text-[#5da87d] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={airportSearch}
+                        onChange={e => setAirportSearch(e.target.value)}
+                        placeholder="Search ICAO, airport, country, or runway layout..."
+                        className="w-full bg-[#050d09] border border-[#163826] focus:border-[#00ff66] rounded pl-8 pr-3 py-1 text-white placeholder-[#4b8563] outline-none font-mono text-[11px]"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-3 text-[11px] shrink-0 overflow-x-auto">
+                      {(
+                        [
+                          { id: 'ALL', label: `All (${airportCategoryCounts.ALL})` },
+                          { id: 'International', label: `Intl (${airportCategoryCounts.International})` },
+                          { id: 'Regional', label: `Regional (${airportCategoryCounts.Regional})` },
+                          { id: 'Training', label: `Training (${airportCategoryCounts.Training})` },
+                        ] as const
+                      ).map(tab => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => setAirportCategoryFilter(tab.id)}
+                          className={`pb-0.5 border-b-2 transition-colors whitespace-nowrap ${
+                            airportCategoryFilter === tab.id
+                              ? 'border-[#00ff66] text-[#00ff66] font-semibold'
+                              : 'border-transparent text-[#6ba885] hover:text-white'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Scrollable Airport Catalog */}
+                  <div className="divide-y divide-[#143020] border border-[#163826] rounded bg-[#08130d] max-h-[540px] overflow-y-auto">
+                    {filteredAirports.length === 0 ? (
+                      <div className="p-6 text-center text-[#6ba885]">
+                        No airports match "{airportSearch}".
+                      </div>
+                    ) : (
+                      filteredAirports.map(prof => {
+                        const isSel = prof.airport.icao === airportIcao;
+                        const starCount = prof.airport.approachRoutes?.length || 0;
+                        const sidCount = prof.airport.departureRoutes?.length || 0;
+                        const fixCount = prof.airport.waypoints.length;
+                        const stripCount = prof.reciprocalPairs.length;
+                        return (
+                          <button
+                            key={prof.airport.icao}
+                            type="button"
+                            onClick={() => handleAirportPick(prof.airport.icao)}
+                            className={`w-full text-left p-3.5 transition-colors flex flex-col gap-1 border-l-2 ${
+                              isSel
+                                ? 'bg-[#0d2618] border-l-[#00ff66]'
+                                : 'border-l-transparent hover:bg-[#0b1b13]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 w-full">
+                              <div className="flex items-center gap-2 font-mono min-w-0">
+                                <span className="text-sm font-bold text-[#00ff66] shrink-0">
+                                  {prof.airport.icao}
+                                </span>
+                                <span className="text-white font-semibold truncate">
+                                  {prof.airport.name}
+                                </span>
+                                <span className="text-[11px] text-[#5da87d] hidden sm:inline shrink-0">
+                                  · {prof.airport.country}
+                                </span>
+                              </div>
+                              <span className="text-[11px] text-[#a2f5bf] shrink-0">
+                                {prof.category} · {prof.difficultyLabel}
+                              </span>
+                            </div>
+                            <p className="text-[#85cca1] leading-relaxed">{prof.summary}</p>
+                            <div className="text-[11px] text-[#5da87d] font-mono tabular-nums">
+                              {prof.runwayLayoutLabel} · {stripCount} {stripCount === 1 ? 'Strip' : 'Strips'} /{' '}
+                              {prof.airport.runways.length} Ends · ELEV {prof.airport.elevationFeet}ft ·{' '}
+                              {starCount} STAR / {sidCount} SID / {fixCount} FIX
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -1635,7 +1725,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
                   >
                     {ALL_AIRPORT_PROFILES.map(p => (
                       <option key={p.airport.icao} value={p.airport.icao}>
-                        {p.airport.icao} – {p.airport.name}
+                        {p.airport.icao} – {p.airport.name} ({p.airport.country})
                       </option>
                     ))}
                   </select>

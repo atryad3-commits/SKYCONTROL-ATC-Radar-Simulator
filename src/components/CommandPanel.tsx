@@ -11,6 +11,12 @@ import { useSimulationStore } from '../store/simulationStore';
 import { calculateLocalizerDeviation, calculateGlideslopeDeviation } from '../engine/ils';
 import { calculateBearing, calculateDistance, getHeadingDelta } from '../engine/physics';
 import {
+  getAircraftClassPresets,
+  getAircraftOperationalBounds,
+  getAircraftPerformance,
+} from '../engine/aircraftPerformance';
+import { evaluateDepartureGates } from '../engine/takeoff';
+import {
   AlertOctagon,
   AlertTriangle,
   X,
@@ -27,6 +33,8 @@ export const CommandPanel: React.FC = () => {
   const activeRunwayGeometries = useSimulationStore(state => state.activeRunwayGeometries);
   const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
   const selectAircraft = useSimulationStore(state => state.selectAircraft);
+  const envelopeWarning = useSimulationStore(state => state.envelopeWarning);
+  const clearEnvelopeWarning = useSimulationStore(state => state.clearEnvelopeWarning);
 
   // Command store actions
   const setHeading = useSimulationStore(state => state.setHeading);
@@ -46,6 +54,8 @@ export const CommandPanel: React.FC = () => {
   const lineUpAndWait = useSimulationStore(state => state.lineUpAndWait);
   const clearTakeoff = useSimulationStore(state => state.clearTakeoff);
   const abortTakeoff = useSimulationStore(state => state.abortTakeoff);
+  const proceedDepartureOnExit = useSimulationStore(state => state.proceedDepartureOnExit);
+  const handoffDeparture = useSimulationStore(state => state.handoffDeparture);
 
   const [activeTab, setActiveTab] = useState<CommandTab>('vector');
   const [routingMode, setRoutingMode] = useState<RoutingMode>('DIRECT');
@@ -55,29 +65,37 @@ export const CommandPanel: React.FC = () => {
 
   const aircraft = aircraftList.find(a => a.id === selectedAircraftId);
 
-  // Default to Departure tab when selecting a holding-short departure, else Vector
+  // Default to Departure tab when selecting a departure flight, else Vector
   useEffect(() => {
     if (!aircraft) return;
-    if (
-      aircraft.status === 'Departing' &&
-      aircraft.indicatedAirspeed === 0 &&
-      (!aircraft.flightPhase || aircraft.flightPhase === 'HOLD_SHORT' || aircraft.flightPhase === 'LINEUP')
-    ) {
+    const isDep = aircraft.status === 'Departing' || aircraft.status === 'Outbound';
+    if (isDep) {
       setActiveTab('approach');
-    } else if (activeTab === 'approach' && aircraft.status !== 'Departing' && !aircraft.ilsArmed) {
+    } else if (activeTab === 'approach' && !isDep && !aircraft.ilsArmed) {
       setActiveTab('vector');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aircraft?.id]);
 
-  const altitudePresets = useMemo(() => {
-    const elev = airport.elevationFeet || 0;
-    if (elev < 500) {
-      return [2000, 3000, 4000, 6000];
+  const modelPerf = useMemo(
+    () => (aircraft ? getAircraftPerformance(aircraft.aircraftType) : null),
+    [aircraft?.aircraftType]
+  );
+
+  const modelBounds = useMemo(
+    () =>
+      aircraft
+        ? getAircraftOperationalBounds(aircraft.aircraftType, airport.elevationFeet || 0)
+        : null,
+    [aircraft?.aircraftType, airport.elevationFeet]
+  );
+
+  const { speedPresetsKt, altitudePresetsFt } = useMemo(() => {
+    if (!aircraft) {
+      return { speedPresetsKt: [160, 190, 220, 250], altitudePresetsFt: [2000, 3000, 4000, 6000] };
     }
-    const base = Math.ceil(elev / 1000) * 1000;
-    return [base + 2000, base + 3000, base + 4000, base + 6000];
-  }, [airport.elevationFeet]);
+    return getAircraftClassPresets(aircraft.aircraftType, airport.elevationFeet || 0);
+  }, [aircraft?.aircraftType, airport.elevationFeet]);
 
   const approachRunways = useMemo(() => {
     const activeFirst = [...airport.runways].sort((a, b) => {
@@ -92,6 +110,8 @@ export const CommandPanel: React.FC = () => {
     return null;
   }
 
+  const isDepartureFlight =
+    aircraft.status === 'Departing' || aircraft.status === 'Outbound';
   const isHoldingShort =
     aircraft.status === 'Departing' &&
     aircraft.indicatedAirspeed === 0 &&
@@ -100,6 +120,9 @@ export const CommandPanel: React.FC = () => {
     aircraft.status === 'Departing' &&
     aircraft.indicatedAirspeed === 0 &&
     aircraft.flightPhase === 'LINEUP';
+  const departureGates = isDepartureFlight
+    ? evaluateDepartureGates(aircraft, airport.elevationFeet || 0, airport.waypoints)
+    : null;
 
   const rwyGeom =
     activeRunwayGeometries.find(r => r.id === aircraft.assignedRunway) ||
@@ -167,12 +190,18 @@ export const CommandPanel: React.FC = () => {
               {aircraft.callsign}
             </span>
             <span className="text-[11px] text-[#85cca1]">
-              {aircraft.aircraftType} · {aircraft.category}
+              {aircraft.aircraftType} · {modelPerf?.classLabel || aircraft.category}
             </span>
           </div>
           <div className="text-[11px] text-[#558f6e] truncate mt-0.5">
             {aircraft.airline} · {aircraft.origin} → {aircraft.destination} · RWY {aircraft.assignedRunway}
           </div>
+          {modelBounds && modelPerf && (
+            <div className="text-[10px] text-[#45785b] tabular-nums mt-0.5 truncate">
+              ENV {modelBounds.minSpeedKt}–{modelBounds.maxSpeedKt} kt · MAX{' '}
+              {modelBounds.maxAltitudeFt.toLocaleString()} ft · Vref {modelPerf.typicalApproachSpeedIAS} kt
+            </div>
+          )}
         </div>
 
         <button
@@ -196,6 +225,26 @@ export const CommandPanel: React.FC = () => {
               {activeLandingRunwayId}
             </span>
           </div>
+        </div>
+      )}
+
+      {/* Soft-Limit Envelope Advisory Warning */}
+      {envelopeWarning && envelopeWarning.aircraftId === aircraft.id && (
+        <div className="px-3.5 py-2 bg-[#2a200b] border-b border-[#ffb703]/60 flex items-start justify-between gap-2 text-[#ffd166] shrink-0">
+          <div className="flex items-start gap-2 min-w-0">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-[#ffb703] mt-0.5" />
+            <span className="text-[10px] leading-snug tabular-nums">
+              {envelopeWarning.message}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={clearEnvelopeWarning}
+            className="text-[#ffb703] hover:text-white shrink-0"
+            title="Dismiss warning"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
@@ -234,7 +283,7 @@ export const CommandPanel: React.FC = () => {
             { id: 'route', label: 'Route' },
             {
               id: 'approach',
-              label: aircraft.status === 'Departing' ? 'Departure' : 'Approach',
+              label: isDepartureFlight ? 'Departure' : 'Approach',
             },
           ] as const
         ).map(tab => {
@@ -360,7 +409,14 @@ export const CommandPanel: React.FC = () => {
             {/* Altitude Section */}
             <div className="p-3.5 space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[#00ff66]">ALTITUDE</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-[#00ff66]">ALTITUDE</span>
+                  {modelBounds && (
+                    <span className="text-[10px] text-[#4e8b69] tabular-nums">
+                      ≤{(modelBounds.maxAltitudeFt / 1000).toFixed(modelBounds.maxAltitudeFt % 1000 === 0 ? 0 : 1)}k
+                    </span>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => setAltitude(aircraft.id, aircraft.targetAltitude, true)}
@@ -372,7 +428,7 @@ export const CommandPanel: React.FC = () => {
               </div>
 
               <div className="grid grid-cols-4 gap-1 text-[10px] tabular-nums">
-                {altitudePresets.map(alt => (
+                {altitudePresetsFt.map(alt => (
                   <button
                     type="button"
                     key={alt}
@@ -383,7 +439,7 @@ export const CommandPanel: React.FC = () => {
                         : 'bg-[#0b1f15] hover:bg-[#133322] text-[#a2f5bf] border-[#19402b]'
                     }`}
                   >
-                    {alt / 1000}k
+                    {alt % 1000 === 0 ? `${alt / 1000}k` : `${(alt / 1000).toFixed(1)}k`}
                   </button>
                 ))}
               </div>
@@ -403,10 +459,13 @@ export const CommandPanel: React.FC = () => {
 
               <input
                 type="range"
-                min={Math.max(1000, Math.ceil((airport.elevationFeet || 0) / 500) * 500)}
-                max="15000"
+                min={modelBounds?.minAltitudeFt ?? 1000}
+                max={modelBounds?.maxAltitudeFt ?? 20000}
                 step="500"
-                value={Math.round(aircraft.targetAltitude)}
+                value={Math.max(
+                  modelBounds?.minAltitudeFt ?? 1000,
+                  Math.min(modelBounds?.maxAltitudeFt ?? 20000, Math.round(aircraft.targetAltitude))
+                )}
                 onChange={e => setAltitude(aircraft.id, Number(e.target.value))}
                 className="w-full accent-[#00ff66] bg-[#050e09] h-1.5 rounded cursor-pointer"
               />
@@ -424,13 +483,11 @@ export const CommandPanel: React.FC = () => {
               >
                 <input
                   type="number"
-                  min={Math.ceil(airport.elevationFeet / 100) * 100}
-                  max="20000"
-                  step="500"
-                  placeholder="Altitude (ft)"
+                  step="100"
+                  placeholder={`Alt (max ${(modelBounds?.maxAltitudeFt ?? 20000).toLocaleString()} ft)`}
                   value={altitudeInput}
                   onChange={e => setAltitudeInput(e.target.value)}
-                  className="flex-1 bg-[#050d09] border border-[#163826] rounded px-2 py-1 text-white placeholder-[#346147] outline-none"
+                  className="flex-1 bg-[#050d09] border border-[#163826] rounded px-2 py-1 text-white placeholder-[#346147] outline-none tabular-nums"
                 />
                 <button
                   type="submit"
@@ -444,7 +501,14 @@ export const CommandPanel: React.FC = () => {
             {/* Airspeed Section */}
             <div className="p-3.5 space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[#00e5ff]">AIRSPEED</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-[#00e5ff]">AIRSPEED</span>
+                  {modelBounds && (
+                    <span className="text-[10px] text-[#4e8b69] tabular-nums">
+                      {modelBounds.minSpeedKt}–{modelBounds.maxSpeedKt}kt
+                    </span>
+                  )}
+                </div>
                 <div className="flex gap-1 text-[10px]">
                   <button
                     type="button"
@@ -464,7 +528,7 @@ export const CommandPanel: React.FC = () => {
               </div>
 
               <div className="grid grid-cols-4 gap-1 text-[10px] tabular-nums">
-                {[160, 180, 210, 240].map(spd => (
+                {speedPresetsKt.map(spd => (
                   <button
                     type="button"
                     key={spd}
@@ -482,10 +546,13 @@ export const CommandPanel: React.FC = () => {
 
               <input
                 type="range"
-                min="140"
-                max="280"
+                min={modelBounds?.minSpeedKt ?? 140}
+                max={modelBounds?.maxSpeedKt ?? 280}
                 step="5"
-                value={Math.round(aircraft.targetAirspeed)}
+                value={Math.max(
+                  modelBounds?.minSpeedKt ?? 140,
+                  Math.min(modelBounds?.maxSpeedKt ?? 280, Math.round(aircraft.targetAirspeed))
+                )}
                 onChange={e => setSpeed(aircraft.id, Number(e.target.value))}
                 className="w-full accent-[#00e5ff] bg-[#050e09] h-1.5 rounded cursor-pointer"
               />
@@ -503,13 +570,11 @@ export const CommandPanel: React.FC = () => {
               >
                 <input
                   type="number"
-                  min="140"
-                  max="280"
                   step="5"
-                  placeholder="Speed (140-280kt)"
+                  placeholder={`Speed (${modelBounds?.minSpeedKt ?? 140}-${modelBounds?.maxSpeedKt ?? 280} kt)`}
                   value={speedInput}
                   onChange={e => setSpeedInput(e.target.value)}
-                  className="flex-1 bg-[#050d09] border border-[#163826] rounded px-2 py-1 text-white placeholder-[#346147] outline-none"
+                  className="flex-1 bg-[#050d09] border border-[#163826] rounded px-2 py-1 text-white placeholder-[#346147] outline-none tabular-nums"
                 />
                 <button
                   type="submit"
@@ -603,178 +668,267 @@ export const CommandPanel: React.FC = () => {
 
         {activeTab === 'approach' && (
           <div className="divide-y divide-[#122e1f]">
-            {/* Departure Clearances when status === 'Departing' */}
-            {aircraft.status === 'Departing' && (
-              <div className="p-3.5 space-y-2">
-                <div className="text-[11px] font-bold text-[#ffd166]">
-                  DEPARTURE CLEARANCE · RWY {aircraft.assignedRunway}
+            {/* Staged Departure, Exit Routing & Center Handoff Pipeline */}
+            {isDepartureFlight && departureGates && (
+              <div className="p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-[#ffd166]">
+                    DEPARTURE · RWY {aircraft.assignedRunway}
+                  </span>
+                  <span className="text-[10px] font-semibold text-[#00e5ff] tabular-nums">
+                    {aircraft.assignedSidName || 'RADAR SID'}
+                  </span>
                 </div>
 
+                {/* Filed Exit Route & Initial Climb Gate Readout */}
+                <div className="p-2.5 bg-[#060f0a] border border-[#163826] space-y-1 text-[10px] tabular-nums">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#5da87d]">FILED EXIT</span>
+                    <span className="text-[#00e5ff] font-bold">
+                      {departureGates.exitWaypointName || '—'}
+                      {departureGates.exitFixDistNM !== null
+                        ? ` · ${departureGates.exitFixDistNM.toFixed(1)} NM`
+                        : ''}
+                    </span>
+                  </div>
+
+                  {aircraft.departureRouteWaypoints && aircraft.departureRouteWaypoints.length > 0 && (
+                    <div className="text-[#9de8bc] truncate">
+                      {aircraft.departureRouteWaypoints.join(' → ')}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1 border-t border-[#122e1f]">
+                    <span className="text-[#5da87d]">CLIMB GATE</span>
+                    <span
+                      className={
+                        departureGates.isClimbGateMet
+                          ? 'text-[#00ff66] font-bold'
+                          : 'text-[#ffd166]'
+                      }
+                    >
+                      {departureGates.aglFt.toLocaleString()}/{departureGates.minClimbAglFt.toLocaleString()}ft ·{' '}
+                      {Math.round(aircraft.indicatedAirspeed)}/{departureGates.minClimbSpeedKt}kt
+                    </span>
+                  </div>
+                </div>
+
+                {/* Step 1: Line Up & Wait */}
                 <button
                   type="button"
                   disabled={!isHoldingShort}
                   onClick={() => lineUpAndWait(aircraft.id, aircraft.assignedRunway)}
-                  className={`w-full py-2 rounded font-bold border transition-colors ${
+                  className={`w-full py-2 font-bold border transition-colors ${
                     isHoldingShort
                       ? 'bg-[#173b27] hover:bg-[#215438] text-[#00ff66] border-[#00ff66]'
                       : 'bg-[#0a1710] text-[#356147] border-[#143020] cursor-not-allowed'
                   }`}
                 >
-                  1. Line Up &amp; Wait {aircraft.assignedRunway}
+                  {isHoldingShort
+                    ? `1. Line Up & Wait ${aircraft.assignedRunway}`
+                    : `1. Lined Up ${aircraft.assignedRunway} ✓`}
                 </button>
 
+                {/* Step 2: Cleared for Takeoff */}
                 <button
                   type="button"
                   disabled={!isLinedUp}
                   onClick={() => clearTakeoff(aircraft.id)}
-                  className={`w-full py-2 rounded font-bold border transition-colors ${
+                  className={`w-full py-2 font-bold border transition-colors ${
                     isLinedUp
                       ? 'bg-[#0d3340] hover:bg-[#144b5e] text-[#00e5ff] border-[#00e5ff]'
                       : 'bg-[#0a1710] text-[#356147] border-[#143020] cursor-not-allowed'
                   }`}
                 >
-                  2. Cleared for Takeoff
+                  {aircraft.status === 'Outbound' ||
+                  aircraft.indicatedAirspeed > 0 ||
+                  aircraft.flightPhase === 'TAKEOFF_ROLL' ||
+                  aircraft.flightPhase === 'ROTATION' ||
+                  aircraft.flightPhase === 'LIFTOFF' ||
+                  aircraft.flightPhase === 'INITIAL_CLIMB'
+                    ? `2. Airborne RWY ${aircraft.assignedRunway} ✓`
+                    : '2. Cleared for Takeoff'}
                 </button>
 
-                {aircraft.indicatedAirspeed > 80 && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setAltitude(
-                        aircraft.id,
-                        Math.ceil(airport.elevationFeet / 1000) * 1000 + 10000,
-                        true
-                      )
-                    }
-                    className="w-full py-2 bg-[#0f2e24] hover:bg-[#184738] text-[#00ff66] rounded font-bold border border-[#1d5e46] transition-colors"
-                  >
-                    Climb SID FL100+
-                  </button>
-                )}
+                {/* Step 3: Proceed on Assigned Exit Route */}
+                {(() => {
+                  const canProceedExit =
+                    departureGates.isClimbGateMet && !departureGates.isExitRouteActive;
+                  return (
+                    <button
+                      type="button"
+                      disabled={!canProceedExit}
+                      onClick={() => proceedDepartureOnExit(aircraft.id)}
+                      className={`w-full py-2 font-bold border transition-colors ${
+                        departureGates.isExitRouteActive
+                          ? 'bg-[#0c261c] text-[#00ff66] border-[#1c593a] cursor-default'
+                          : canProceedExit
+                          ? 'bg-[#0e3240] hover:bg-[#154c61] text-[#00e5ff] border-[#00e5ff]'
+                          : 'bg-[#0a1710] text-[#356147] border-[#143020] cursor-not-allowed'
+                      }`}
+                    >
+                      {departureGates.isExitRouteActive
+                        ? `3. Proceeding via ${departureGates.exitWaypointName || 'Exit'} ✓`
+                        : `3. Proceed on Exit ${departureGates.exitWaypointName || 'SID'}`}
+                    </button>
+                  );
+                })()}
 
-                <button
-                  type="button"
-                  onClick={() => abortTakeoff(aircraft.id)}
-                  className="w-full py-2 bg-[#361114] hover:bg-[#4d181c] text-[#ff6b6b] rounded font-bold border border-[#ff3344]/70 transition-colors"
-                >
-                  Abort Takeoff (Reject)
-                </button>
+                {/* Step 4: Center Handoff ("Goodbye") */}
+                {(() => {
+                  const canHandoff =
+                    departureGates.isHandoffReady ||
+                    (departureGates.isClimbGateMet &&
+                      (departureGates.exitFixDistNM === null ||
+                        departureGates.exitFixDistNM <= 5.0));
+                  return (
+                    <button
+                      type="button"
+                      disabled={!canHandoff}
+                      onClick={() => handoffDeparture(aircraft.id)}
+                      className={`w-full py-2 font-bold border transition-colors ${
+                        departureGates.isHandoffReady
+                          ? 'bg-[#124529] hover:bg-[#1a633b] text-[#00ff66] border-[#00ff66]'
+                          : canHandoff
+                          ? 'bg-[#0f3322] hover:bg-[#164d33] text-[#85f5b0] border-[#298050]'
+                          : 'bg-[#0a1710] text-[#356147] border-[#143020] cursor-not-allowed'
+                      }`}
+                    >
+                      4. Center Handoff (Goodbye)
+                    </button>
+                  );
+                })()}
+
+                {/* Ground Abort Guard (only while rolling on runway before liftoff) */}
+                {aircraft.status === 'Departing' &&
+                  departureGates.aglFt <= 15 &&
+                  aircraft.indicatedAirspeed > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => abortTakeoff(aircraft.id)}
+                      className="w-full py-2 bg-[#361114] hover:bg-[#4d181c] text-[#ff6b6b] font-bold border border-[#ff3344]/70 transition-colors"
+                    >
+                      Abort Takeoff (Reject)
+                    </button>
+                  )}
               </div>
             )}
 
-            {/* ILS & Approach Guidance */}
-            <div className="p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-[#00e5ff]">ILS &amp; RUNWAY</span>
-                <span className="text-[10px] text-[#558f6e]">ELEV {airport.elevationFeet}ft</span>
-              </div>
+            {/* ILS & Approach Guidance (shown for arrivals or emergency returns) */}
+            {(!isDepartureFlight || aircraft.isEmergency) && (
+              <div className="p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-[#00e5ff]">ILS &amp; RUNWAY</span>
+                  <span className="text-[10px] text-[#558f6e]">ELEV {airport.elevationFeet}ft</span>
+                </div>
 
-              {aircraft.status !== 'Departing' && rwyGeom && (
-                <div className="px-2.5 py-1.5 bg-[#060f0a] border border-[#143020] rounded flex items-center justify-between text-[10px] tabular-nums">
-                  <span className="text-[#7ec29a]">
-                    {distToRwyNM.toFixed(1)} NM · Δ{interceptOffsetDeg}°
-                  </span>
-                  <span
-                    className={`font-bold ${
-                      aircraft.ilsLocalizerCaptured
-                        ? 'text-[#00ff66]'
+                {!isDepartureFlight && rwyGeom && (
+                  <div className="px-2.5 py-1.5 bg-[#060f0a] border border-[#143020] flex items-center justify-between text-[10px] tabular-nums">
+                    <span className="text-[#7ec29a]">
+                      {distToRwyNM.toFixed(1)} NM · Δ{interceptOffsetDeg}°
+                    </span>
+                    <span
+                      className={`font-bold ${
+                        aircraft.ilsLocalizerCaptured
+                          ? 'text-[#00ff66]'
+                          : courseAligned
+                          ? 'text-[#00e5ff]'
+                          : 'text-[#ffb703]'
+                      }`}
+                    >
+                      {aircraft.ilsLocalizerCaptured
+                        ? 'LOC CAPTURED'
                         : courseAligned
-                        ? 'text-[#00e5ff]'
-                        : 'text-[#ffb703]'
-                    }`}
+                        ? 'CAPTURE READY'
+                        : 'NEEDS VECTOR'}
+                    </span>
+                  </div>
+                )}
+
+                {isApproaching && locDev && gsDev && (
+                  <div className="grid grid-cols-2 gap-2 text-[10px] tabular-nums bg-[#060f0a] border border-[#1a4859] p-2">
+                    <div>
+                      <span className="text-[#5da87d]">LOC </span>
+                      <span
+                        className={
+                          Math.abs(locDev.dots) <= 0.5
+                            ? 'text-[#00ff66] font-bold'
+                            : 'text-[#ffb703]'
+                        }
+                      >
+                        {locDev.dots > 0 ? `+${locDev.dots}` : locDev.dots} dots
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[#5da87d]">G/S </span>
+                      <span
+                        className={
+                          Math.abs(gsDev.dots) <= 0.5
+                            ? 'text-[#00ff66] font-bold'
+                            : 'text-[#ffb703]'
+                        }
+                      >
+                        {gsDev.dots > 0 ? `+${gsDev.dots}` : gsDev.dots} dots
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {!isDepartureFlight && (
+                  <button
+                    type="button"
+                    onClick={() => vectorToIntercept(aircraft.id, aircraft.assignedRunway)}
+                    className="w-full py-2 bg-[#0b2f38] hover:bg-[#114552] text-[#00e5ff] border border-[#00e5ff]/60 font-bold flex items-center justify-center gap-1.5 transition-colors"
                   >
-                    {aircraft.ilsLocalizerCaptured
-                      ? 'LOC CAPTURED'
-                      : courseAligned
-                      ? 'CAPTURE READY'
-                      : 'NEEDS VECTOR'}
-                  </span>
+                    <RotateCw className="w-3.5 h-3.5" />
+                    <span>Vector to Final ILS {aircraft.assignedRunway}</span>
+                  </button>
+                )}
+
+                <div className="grid grid-cols-2 gap-1.5">
+                  {approachRunways.map(rwy => (
+                    <div key={rwy.id} className="flex gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => clearILS(aircraft.id, rwy.id)}
+                        className={`flex-1 py-1.5 px-1.5 border font-semibold transition-colors text-[10px] ${
+                          aircraft.ilsArmed && aircraft.assignedRunway === rwy.id
+                            ? 'bg-[#113d2e] border-[#00e5ff] text-white'
+                            : rwy.id === activeLandingRunwayId
+                            ? 'bg-[#0d2a20] hover:bg-[#144232] text-[#00e5ff] border-[#1f634a]'
+                            : 'bg-[#091c15] hover:bg-[#123326] text-[#7ccfb0] border-[#163826]'
+                        }`}
+                      >
+                        ILS {rwy.id}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => assignRunway(aircraft.id, rwy.id)}
+                        className={`px-2 py-1.5 border text-[9px] font-bold transition-colors ${
+                          aircraft.assignedRunway === rwy.id && !aircraft.ilsArmed
+                            ? 'bg-[#1b442d] border-[#00ff66] text-[#00ff66]'
+                            : 'bg-[#07150e] hover:bg-[#102c1e] text-[#5da87d] border-[#163826]'
+                        }`}
+                        title={`Assign Runway ${rwy.id}`}
+                      >
+                        RWY
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              )}
 
-              {isApproaching && locDev && gsDev && (
-                <div className="grid grid-cols-2 gap-2 text-[10px] tabular-nums bg-[#060f0a] border border-[#1a4859] rounded p-2">
-                  <div>
-                    <span className="text-[#5da87d]">LOC </span>
-                    <span
-                      className={
-                        Math.abs(locDev.dots) <= 0.5
-                          ? 'text-[#00ff66] font-bold'
-                          : 'text-[#ffb703]'
-                      }
-                    >
-                      {locDev.dots > 0 ? `+${locDev.dots}` : locDev.dots} dots
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[#5da87d]">G/S </span>
-                    <span
-                      className={
-                        Math.abs(gsDev.dots) <= 0.5
-                          ? 'text-[#00ff66] font-bold'
-                          : 'text-[#ffb703]'
-                      }
-                    >
-                      {gsDev.dots > 0 ? `+${gsDev.dots}` : gsDev.dots} dots
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {aircraft.status !== 'Departing' && (
-                <button
-                  type="button"
-                  onClick={() => vectorToIntercept(aircraft.id, aircraft.assignedRunway)}
-                  className="w-full py-2 bg-[#0b2f38] hover:bg-[#114552] text-[#00e5ff] rounded border border-[#00e5ff]/60 font-bold flex items-center justify-center gap-1.5 transition-colors"
-                >
-                  <RotateCw className="w-3.5 h-3.5" />
-                  <span>Vector to Final ILS {aircraft.assignedRunway}</span>
-                </button>
-              )}
-
-              <div className="grid grid-cols-2 gap-1.5">
-                {approachRunways.map(rwy => (
-                  <div key={rwy.id} className="flex gap-0.5">
-                    <button
-                      type="button"
-                      onClick={() => clearILS(aircraft.id, rwy.id)}
-                      className={`flex-1 py-1.5 px-1.5 rounded-l border font-semibold transition-colors text-[10px] ${
-                        aircraft.ilsArmed && aircraft.assignedRunway === rwy.id
-                          ? 'bg-[#113d2e] border-[#00e5ff] text-white'
-                          : rwy.id === activeLandingRunwayId
-                          ? 'bg-[#0d2a20] hover:bg-[#144232] text-[#00e5ff] border-[#1f634a]'
-                          : 'bg-[#091c15] hover:bg-[#123326] text-[#7ccfb0] border-[#163826]'
-                      }`}
-                    >
-                      ILS {rwy.id}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => assignRunway(aircraft.id, rwy.id)}
-                      className={`px-2 py-1.5 rounded-r border text-[9px] font-bold transition-colors ${
-                        aircraft.assignedRunway === rwy.id && !aircraft.ilsArmed
-                          ? 'bg-[#1b442d] border-[#00ff66] text-[#00ff66]'
-                          : 'bg-[#07150e] hover:bg-[#102c1e] text-[#5da87d] border-[#163826]'
-                      }`}
-                      title={`Assign Runway ${rwy.id}`}
-                    >
-                      RWY
-                    </button>
-                  </div>
-                ))}
+                {!isDepartureFlight && (
+                  <button
+                    type="button"
+                    onClick={() => goAround(aircraft.id)}
+                    className="w-full py-2 bg-[#361114] hover:bg-[#4d181c] text-[#ff6b6b] border border-[#ff3344]/70 font-bold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <AlertOctagon className="w-3.5 h-3.5" />
+                    <span>Mandatory Go-Around</span>
+                  </button>
+                )}
               </div>
-
-              {aircraft.status !== 'Departing' && (
-                <button
-                  type="button"
-                  onClick={() => goAround(aircraft.id)}
-                  className="w-full py-2 bg-[#361114] hover:bg-[#4d181c] text-[#ff6b6b] rounded border border-[#ff3344]/70 font-bold flex items-center justify-center gap-1.5 transition-colors"
-                >
-                  <AlertOctagon className="w-3.5 h-3.5" />
-                  <span>Mandatory Go-Around</span>
-                </button>
-              )}
-            </div>
+            )}
           </div>
         )}
       </div>
