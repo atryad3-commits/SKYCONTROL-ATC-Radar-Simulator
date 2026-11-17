@@ -38,7 +38,7 @@ export const MissionHudOverlay: React.FC<MissionHudOverlayProps> = ({
   const nextMission = ACADEMY_MISSIONS.find(m => m.number === msn.number + 1);
 
   return (
-    <div className="absolute bottom-20 left-3 z-20 w-80 bg-[#08150f]/95 backdrop-blur-md border border-[#1c4a31] rounded-md shadow-2xl p-3 text-xs select-none pointer-events-auto">
+    <div className="absolute bottom-10 left-3 z-20 w-80 bg-[#08150f]/95 backdrop-blur-md border border-[#1c4a31] rounded-md shadow-2xl p-3 text-xs select-none pointer-events-auto">
       {/* Header */}
       <div className="flex items-start justify-between gap-2 pb-2 border-b border-[#163826]">
         <div>

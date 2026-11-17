@@ -16,21 +16,19 @@ import { useSimulationStore } from '../store/simulationStore';
 import { computeDefaultAirportVisibility } from '../airports/procedures';
 import { calculateBearing, calculateDistance, normalizeHeading } from '../engine/physics';
 import { TrackStatus, RadarTrack } from '../engine/radarTracker';
-import { getAltitudeColor, getAltitudeRgba, ALTITUDE_BANDS } from '../utils/altitudeColor';
-import { 
-  MousePointer, 
-  Compass, 
-  Navigation, 
-  Ruler, 
-  ZoomIn, 
-  ZoomOut, 
-  Crosshair, 
-  Plane,
-  Radio,
+import { getAltitudeColor, getAltitudeRgba } from '../utils/altitudeColor';
+import {
+  MousePointer,
+  Compass,
+  Navigation,
+  Ruler,
+  ZoomIn,
+  ZoomOut,
+  Crosshair,
   Eye,
   EyeOff,
   Layers,
-  Mountain
+  ArrowUpRight,
 } from 'lucide-react';
 import type { RadarLayers } from '../store/simulationStore';
 
@@ -45,8 +43,14 @@ interface HoldingStackDef {
 
 export type RadarTool = 'SELECT' | 'HEADING_VECTOR' | 'DIRECT_TO' | 'MEASURE';
 
-export const RadarCanvas: React.FC = () => {
+interface RadarCanvasProps {
+  onOpenSetupRoutes?: () => void;
+}
+
+export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [canvasSize, setCanvasSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
 
   // Store bindings
   const aircraft = useSimulationStore(state => state.aircraft);
@@ -114,6 +118,22 @@ export const RadarCanvas: React.FC = () => {
   const [rangeNM, setRangeNM] = useState<number>(35);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [showScopeControls, setShowScopeControls] = useState<boolean>(false);
+  const [showRangeMenu, setShowRangeMenu] = useState<boolean>(false);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setCanvasSize({ w: Math.round(width), h: Math.round(height) });
+        }
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const zoomInStep = useCallback((prev: number) => {
     const step = prev <= 6 ? 0.5 : prev <= 15 ? 2.5 : prev <= 45 ? 5 : 15;
@@ -156,14 +176,14 @@ export const RadarCanvas: React.FC = () => {
   const getScreenMetrics = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return { width: 800, height: 600, centerX: 400, centerY: 300, pxPerNM: 10 };
-    const width = canvas.width;
-    const height = canvas.height;
+    const width = canvas.clientWidth || canvasSize.w || 800;
+    const height = canvas.clientHeight || canvasSize.h || 600;
     const centerX = width / 2 + panOffset.x;
     const centerY = height / 2 + panOffset.y;
     const minDim = Math.min(width, height);
     const pxPerNM = (minDim * 0.44) / rangeNM;
     return { width, height, centerX, centerY, pxPerNM };
-  }, [panOffset, rangeNM]);
+  }, [panOffset, rangeNM, canvasSize]);
 
   const worldToScreen = useCallback((wx: number, wy: number) => {
     const { centerX, centerY, pxPerNM } = getScreenMetrics();
@@ -1765,6 +1785,7 @@ export const RadarCanvas: React.FC = () => {
     hoveredWaypointName,
     hoveredIlsGate,
     chainRouteMode,
+    canvasSize,
   ]);
 
   // Mouse Interaction Handlers
@@ -1989,7 +2010,7 @@ export const RadarCanvas: React.FC = () => {
   };
 
   return (
-    <div className="relative w-full h-full flex flex-col bg-[#030805] overflow-hidden">
+    <div ref={containerRef} className="relative w-full h-full flex flex-col bg-[#030805] overflow-hidden">
       {/* 2D High-Precision Canvas */}
       <canvas
         ref={canvasRef}
@@ -2005,231 +2026,157 @@ export const RadarCanvas: React.FC = () => {
       {/* CRT Scanline & Phosphor Vignette Overlay */}
       <div className="absolute inset-0 radar-crt-overlay pointer-events-none" />
 
-      {/* Professional Floating Radar Toolbar */}
-      <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-[#08150f]/95 backdrop-blur-md px-2.5 py-1.5 border border-[#163826] rounded-md text-xs font-mono text-[#a2f5bf] shadow-xl pointer-events-auto whitespace-nowrap">
-        <span className="font-bold text-[#00ff66] pr-1">{airport.icao} RADAR</span>
-        <span className="text-[#204a32]">|</span>
-
-        {/* Pointer / Select tool */}
-        <button
-          onClick={() => setActiveTool('SELECT')}
-          className={`p-1.5 rounded transition-colors ${
-            activeTool === 'SELECT'
-              ? 'bg-[#1b442d] text-[#00ff66] border border-[#00ff66]/50'
-              : 'hover:bg-[#12281b] text-[#5da87d]'
-          }`}
-          title="Select Aircraft [Pointer]"
-        >
-          <MousePointer className="w-3.5 h-3.5" />
-        </button>
-
-        {/* Heading Vector tool */}
-        <button
-          onClick={() => setActiveTool('HEADING_VECTOR')}
-          className={`p-1.5 rounded transition-colors ${
-            activeTool === 'HEADING_VECTOR'
-              ? 'bg-[#1b442d] text-[#00e5ff] border border-[#00e5ff]/50'
-              : 'hover:bg-[#12281b] text-[#5da87d]'
-          }`}
-          title="Heading Vector Tool [H]"
-        >
-          <Compass className="w-3.5 h-3.5" />
-        </button>
-
-        {/* Direct-To tool */}
-        <button
-          onClick={() => setActiveTool('DIRECT_TO')}
-          className={`p-1.5 rounded transition-colors ${
-            activeTool === 'DIRECT_TO'
-              ? 'bg-[#1b442d] text-[#00ff66] border border-[#00ff66]/50'
-              : 'hover:bg-[#12281b] text-[#5da87d]'
-          }`}
-          title="Direct-To Fix [D] (Shift+Click to chain route)"
-        >
-          <Navigation className="w-3.5 h-3.5" />
-        </button>
-
-        {/* Chain multi-leg route toggle when in DIRECT_TO mode */}
-        {activeTool === 'DIRECT_TO' && (
+      {/* Minimal Top-Left Pointer & Display Popover Control */}
+      <div className="absolute top-3 left-3 z-20 flex flex-col items-start gap-1.5 font-mono pointer-events-auto select-none">
+        <div className="flex items-center gap-1 bg-[#07130d]/92 backdrop-blur-md px-1.5 py-1 border border-[#163826] rounded-md shadow-lg whitespace-nowrap">
           <button
-            onClick={() => setChainRouteMode(prev => !prev)}
-            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors ${
-              chainRouteMode
-                ? 'bg-[#362c0b] text-[#ffd166] border-[#ffd166]'
-                : 'bg-[#0a1d13] text-[#7ccfb0] border-[#1c4830] hover:bg-[#123020]'
+            type="button"
+            onClick={() => setActiveTool('SELECT')}
+            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
+              activeTool === 'SELECT'
+                ? 'bg-[#173d28] text-[#00ff66]'
+                : 'hover:bg-[#10261a] text-[#7cc29a]'
             }`}
-            title="Append waypoints into multi-leg route"
+            title="Select Target & Drag Tag"
           >
-            +LEG
+            <MousePointer className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Select</span>
           </button>
-        )}
 
-        {/* Measure tool */}
-        <button
-          onClick={() => setActiveTool('MEASURE')}
-          className={`p-1.5 rounded transition-colors ${
-            activeTool === 'MEASURE'
-              ? 'bg-[#1b442d] text-[#ffd166] border border-[#ffd166]/50'
-              : 'hover:bg-[#12281b] text-[#5da87d]'
-          }`}
-          title="Measure NM and Bearing [M]"
-        >
-          <Ruler className="w-3.5 h-3.5" />
-        </button>
+          <button
+            type="button"
+            onClick={() => setActiveTool('HEADING_VECTOR')}
+            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
+              activeTool === 'HEADING_VECTOR'
+                ? 'bg-[#113542] text-[#00e5ff]'
+                : 'hover:bg-[#10261a] text-[#7cc29a]'
+            }`}
+            title="Drag Heading Vector [H]"
+          >
+            <Compass className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Vector</span>
+          </button>
 
-        <span className="text-[#204a32]">|</span>
+          <button
+            type="button"
+            onClick={() => setActiveTool('DIRECT_TO')}
+            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
+              activeTool === 'DIRECT_TO'
+                ? 'bg-[#173d28] text-[#00ff66]'
+                : 'hover:bg-[#10261a] text-[#7cc29a]'
+            }`}
+            title="Direct-To Fix [D] (Shift+Click to chain)"
+          >
+            <Navigation className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Direct</span>
+          </button>
 
-        {/* Range preset buttons (Approach close-up to Enroute wide area) */}
-        <div className="flex items-center gap-0.5">
-          {[5, 15, 35, 60, 100, 140].map(r => (
+          {activeTool === 'DIRECT_TO' && (
             <button
-              key={r}
-              onClick={() => setRangeNM(r)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-                Math.abs(rangeNM - r) < 0.6
-                  ? 'bg-[#1b442d] text-[#00ff66] border border-[#00ff66]/40'
-                  : 'hover:bg-[#12281b] text-[#5da87d]'
+              type="button"
+              onClick={() => setChainRouteMode(prev => !prev)}
+              className={`px-1.5 py-1 rounded text-[10px] font-bold transition-colors ${
+                chainRouteMode
+                  ? 'bg-[#362c0b] text-[#ffd166]'
+                  : 'bg-[#0b1f14] text-[#7ccfb0] hover:bg-[#123020]'
               }`}
-              title={`Set radar scope range to ${r} NM`}
+              title="Append waypoints into multi-leg route"
             >
-              {r}
+              +Leg
             </button>
-          ))}
-        </div>
+          )}
 
-        <span className="text-[10px] font-bold text-[#00e5ff] px-1 tabular-nums">
-          {rangeNM < 10 ? rangeNM.toFixed(1) : Math.round(rangeNM)}NM
-        </span>
-
-        <span className="text-[#204a32]">|</span>
-
-        {/* Zoom controls (2.5 NM - 140 NM) */}
-        <button
-          onClick={() => setRangeNM(zoomInStep)}
-          className="p-1 hover:bg-[#12281b] text-[#00ff66] rounded transition-colors"
-          title="Zoom In [+] (Down to 2.5 NM)"
-        >
-          <ZoomIn className="w-3.5 h-3.5" />
-        </button>
-        <button
-          onClick={() => setRangeNM(zoomOutStep)}
-          className="p-1 hover:bg-[#12281b] text-[#00ff66] rounded transition-colors"
-          title="Zoom Out [-] (Up to 140 NM)"
-        >
-          <ZoomOut className="w-3.5 h-3.5" />
-        </button>
-
-        {/* Center Radar */}
-        <button
-          onClick={handleResetView}
-          className="p-1 hover:bg-[#12281b] text-[#a2f5bf] rounded transition-colors"
-          title="Center Radar View [C]"
-        >
-          <Crosshair className="w-3.5 h-3.5" />
-        </button>
-      </div>
-
-      {/* On-Screen Quick Show / Hide Scope Items & Declutter Control */}
-      <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-1.5 font-mono pointer-events-auto select-none">
-        <div className="flex items-center gap-1 bg-[#08150f]/95 backdrop-blur-md px-2 py-1 border border-[#163826] rounded-md shadow-xl">
           <button
-            onClick={() => toggleLayer('terrain')}
-            className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border transition-colors ${
-              radarLayers.terrain
-                ? 'bg-[#123822] text-[#00ff66] border-[#00ff66]/40'
-                : 'bg-[#07110c] text-[#527d63] border-[#143322] hover:text-[#9ce8be]'
+            type="button"
+            onClick={() => setActiveTool('MEASURE')}
+            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
+              activeTool === 'MEASURE'
+                ? 'bg-[#362c0b] text-[#ffd166]'
+                : 'hover:bg-[#10261a] text-[#7cc29a]'
             }`}
-            title="Show/Hide Topographical Terrain"
+            title="Measure Distance & Bearing [M]"
           >
-            <Mountain className="w-3 h-3" />
-            <span>TERRAIN</span>
+            <Ruler className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Measure</span>
           </button>
 
-          <button
-            onClick={() => applyRadarDeclutter('full')}
-            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#0b2015] hover:bg-[#133524] text-[#8be0ad] border border-[#19422b] transition-colors"
-            title="Show all radar items"
-          >
-            Full
-          </button>
-          <button
-            onClick={() => applyRadarDeclutter('tactical')}
-            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#0b2015] hover:bg-[#133524] text-[#00e5ff] border border-[#19422b] transition-colors"
-            title="Tactical vectoring declutter"
-          >
-            Tactical
-          </button>
-          <button
-            onClick={() => applyRadarDeclutter('minimal')}
-            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#0b2015] hover:bg-[#133524] text-[#ffd166] border border-[#19422b] transition-colors"
-            title="Minimal clean scope"
-          >
-            Min
-          </button>
+          <span className="h-4 w-px bg-[#19402b] mx-0.5" aria-hidden="true" />
 
           <button
+            type="button"
             onClick={() => setShowScopeControls(prev => !prev)}
-            className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border transition-colors ${
+            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
               showScopeControls
-                ? 'bg-[#16422b] text-[#00ff66] border-[#00ff66]'
-                : 'bg-[#0c2317] text-[#a2f5bf] border-[#1f5135] hover:bg-[#133422]'
+                ? 'bg-[#173d28] text-[#00ff66]'
+                : 'hover:bg-[#10261a] text-[#9de3ba]'
             }`}
-            title="Toggle individual radar display items"
+            title="Radar Display Layers & Declutter"
           >
-            <Layers className="w-3 h-3" />
-            <span>
-              Items ({Object.values(radarLayers).filter(Boolean).length}/{Object.keys(radarLayers).length})
-            </span>
+            <Layers className="w-3.5 h-3.5" />
+            <span>Display</span>
           </button>
         </div>
 
+        {/* Clean Collapsible Display Popover */}
         {showScopeControls && (
-          <div className="w-72 bg-[#07140d]/96 backdrop-blur-md border border-[#1e5035] rounded-md p-2.5 shadow-2xl">
-            <div className="flex items-center justify-between pb-2 mb-2 border-b border-[#143724]">
-              <span className="text-[11px] font-bold text-[#00ff66]">RADAR DISPLAY ITEMS</span>
-              <div className="flex items-center gap-1">
+          <div className="w-72 bg-[#07130d]/96 backdrop-blur-md border border-[#1b462e] rounded-md p-3 shadow-2xl flex flex-col gap-3">
+            {/* Declutter Modes */}
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#143724]">
+              <span className="text-[11px] font-semibold text-white">Scope Density</span>
+              <div className="flex items-center gap-1 bg-[#050c08] p-0.5 rounded border border-[#143724] text-[10px]">
                 <button
-                  onClick={() => setAllRadarLayers(true)}
-                  className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#113522] text-[#00ff66] border border-[#1d5a39] hover:bg-[#18482f]"
+                  type="button"
+                  onClick={() => applyRadarDeclutter('full')}
+                  className="px-2 py-0.5 rounded hover:bg-[#153624] text-[#00ff66] transition-colors"
                 >
-                  Show All
+                  Full
                 </button>
                 <button
-                  onClick={() => setAllRadarLayers(false)}
-                  className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#281214] text-[#ff7b7b] border border-[#592429] hover:bg-[#3a191c]"
+                  type="button"
+                  onClick={() => applyRadarDeclutter('tactical')}
+                  className="px-2 py-0.5 rounded hover:bg-[#123340] text-[#00e5ff] transition-colors"
                 >
-                  Hide All
+                  Tactical
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyRadarDeclutter('minimal')}
+                  className="px-2 py-0.5 rounded hover:bg-[#2b220d] text-[#ffd166] transition-colors"
+                >
+                  Min
                 </button>
               </div>
             </div>
 
+            {/* Layer Toggles */}
             <div className="grid grid-cols-2 gap-1.5">
               {(
                 [
                   { key: 'terrain', label: 'Terrain Relief' },
                   { key: 'rangeRings', label: 'Range Rings' },
                   { key: 'runways', label: 'Runways' },
-                  { key: 'extendedCenterlines', label: 'ILS Centerlines' },
+                  { key: 'extendedCenterlines', label: 'ILS Feathers' },
                   { key: 'tmaBoundary', label: 'TMA Sector' },
                   { key: 'starCorridors', label: 'STAR Routes' },
                   { key: 'sidCorridors', label: 'SID Routes' },
-                  { key: 'waypointLabels', label: 'Fixes / Names' },
+                  { key: 'waypointLabels', label: 'Fixes' },
                   { key: 'procedureRestrictions', label: 'Alt/Spd Limits' },
-                  { key: 'holdingStacks', label: 'Holding Stacks' },
-                  { key: 'trails', label: 'History Trails' },
-                  { key: 'speedVectors', label: 'Speed Vectors' },
-                  { key: 'extendedTargetTags', label: 'Ext Target Tags' },
-                  { key: 'radarSweep', label: 'PPI Sweep' },
+                  { key: 'holdingStacks', label: 'Holds' },
+                  { key: 'trails', label: 'Trails' },
+                  { key: 'speedVectors', label: 'Vectors' },
+                  { key: 'extendedTargetTags', label: 'Ext Tags' },
+                  { key: 'radarSweep', label: 'Sweep' },
                 ] as Array<{ key: keyof RadarLayers; label: string }>
               ).map(item => {
                 const active = radarLayers[item.key];
                 return (
                   <button
+                    type="button"
                     key={item.key}
                     onClick={() => toggleLayer(item.key)}
                     className={`flex items-center justify-between px-2 py-1 rounded text-[10px] border transition-colors ${
                       active
-                        ? 'bg-[#0e2c1c] text-[#a2f5bf] border-[#1f5c3a]'
+                        ? 'bg-[#0e2a1b] text-[#b4f2cc] border-[#1f5c3a]'
                         : 'bg-[#050e09] text-[#4e735d] border-[#11281b] hover:text-[#86b89b]'
                     }`}
                   >
@@ -2237,111 +2184,123 @@ export const RadarCanvas: React.FC = () => {
                     {active ? (
                       <Eye className="w-3 h-3 text-[#00ff66] shrink-0" />
                     ) : (
-                      <EyeOff className="w-3 h-3 text-[#557763] shrink-0" />
+                      <EyeOff className="w-3 h-3 text-[#4d6e5a] shrink-0" />
                     )}
                   </button>
                 );
               })}
             </div>
+
+            {/* Compact Altitude Color Reference */}
+            <div className="pt-2 border-t border-[#143724]">
+              <div className="text-[10px] text-[#6cb68d] mb-1">Altitude Color Key</div>
+              <div className="grid grid-cols-5 gap-1 text-center text-[9px] tabular-nums">
+                <div className="text-[#00e5ff]">≥FL100</div>
+                <div className="text-[#00ff66]">7–10k</div>
+                <div className="text-[#ffd166]">4.5–7k</div>
+                <div className="text-[#ff9233]">2.5–4.5</div>
+                <div className="text-[#ff4d6d]">&lt;2.5k</div>
+              </div>
+            </div>
+
+            {/* Footer Link to Full Routes & Layers Setup Page */}
+            <div className="pt-2 border-t border-[#143724] flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setAllRadarLayers(false)}
+                className="text-[10px] text-[#ff858d] hover:underline"
+              >
+                Hide All
+              </button>
+              {onOpenSetupRoutes && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowScopeControls(false);
+                    onOpenSetupRoutes();
+                  }}
+                  className="text-[10px] text-[#00e5ff] hover:text-white flex items-center gap-1 font-semibold"
+                >
+                  <span>Per-Airport Routes</span>
+                  <ArrowUpRight className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Selected Aircraft Tactical Route HUD Banner */}
-      {selectedAircraft && (
-        <div className="hidden lg:flex absolute top-12 left-3 z-10 bg-[#06140d]/92 backdrop-blur border border-[#163826] hover:border-[#00ff66]/50 rounded-md px-3 py-1 shadow-[0_4px_24px_rgba(0,0,0,0.65)] font-mono text-xs items-center gap-2.5 text-white pointer-events-auto transition-all select-none whitespace-nowrap">
-          <div className="flex items-center gap-1.5 font-bold text-[#00ff66]">
-            <Plane className="w-3.5 h-3.5 text-[#00e5ff]" />
-            <span>{selectedAircraft.callsign}</span>
-            <span className="text-[10px] text-[#4e8b69] font-normal">· {selectedAircraft.aircraftType}</span>
-          </div>
-
-          <div className="h-3 w-px bg-[#1e4832]" />
-
-          <div className="flex items-center gap-1.5 text-[11px]">
-            <span className="text-[#a2f5bf] font-semibold">{selectedAircraft.origin}</span>
-            <span className="text-[#00e5ff] text-[10px]">──▶</span>
-            <span className="text-[#00ff66] font-semibold">{selectedAircraft.destination}</span>
-            <span className="text-[#4e8b69]">·</span>
-            <span className="text-[10px] text-[#74d89b] font-semibold">
-              RWY {selectedAircraft.assignedRunway}
-            </span>
-          </div>
-
-          <div className="h-3 w-px bg-[#1e4832]" />
-
-          <div className="flex items-center gap-2.5 text-[10px] text-[#a2f5bf] tabular-nums">
-            <span>ALT: <b style={{ color: getAltitudeColor(selectedAircraft.altitude) }}>{Math.round(selectedAircraft.altitude).toLocaleString()}ft</b></span>
-            <span>CLRD: <b style={{ color: getAltitudeColor(selectedAircraft.targetAltitude) }}>{selectedAircraft.targetAltitude.toLocaleString()}ft</b></span>
-            {selectedAircraft.assignedWaypoint && (
-              <span>
-                {selectedAircraft.status === 'Holding' ? 'HOLD: ' : 'ROUTE: '}
-                <b className="text-[#ffd166]">
-                  {[selectedAircraft.assignedWaypoint, ...(selectedAircraft.routeQueue || [])].join(' ➔ ')}
-                </b>
-              </span>
-            )}
-          </div>
+      {/* Subtle Cursor World Coordinate Readout (Bottom-Left) */}
+      {cursorWorldPos && (
+        <div className="absolute bottom-3 left-3 text-[10px] font-mono text-[#528f6c] pointer-events-none tabular-nums">
+          {cursorWorldPos.x >= 0 ? '+' : ''}
+          {cursorWorldPos.x.toFixed(1)}, {cursorWorldPos.y >= 0 ? '+' : ''}
+          {cursorWorldPos.y.toFixed(1)} NM
         </div>
       )}
 
-      {/* Active Radio Transmission Live Indicator */}
-      {activeTransmission && (
-        <div className="absolute bottom-12 left-1/2 -translate-x-1/2 z-20 bg-[#031d12]/95 border border-[#00ff66] shadow-[0_0_16px_rgba(0,255,102,0.35)] rounded px-3 py-1 font-mono text-[11px] flex items-center gap-2 text-white pointer-events-none select-none whitespace-nowrap">
-          <Radio className="w-3.5 h-3.5 text-[#00ff66]" />
-          <span className="font-bold text-[#00ff66]">
-            {activeTransmission.speaker === 'PILOT' ? 'PILOT TX:' : 'ATC TX:'}
-          </span>
-          <span className="text-white font-bold">
-            {activeTransmission.callsign}
-          </span>
-        </div>
-      )}
-
-      {/* Operational Information & Position Overlay */}
-      <div className="absolute bottom-3 left-3 flex items-center gap-3 text-[11px] font-mono text-[#4e8b69] pointer-events-none tabular-nums">
-        {cursorWorldPos && (
-          <div className="bg-[#08150f]/85 px-2 py-1 border border-[#163826] rounded">
-            REL: {cursorWorldPos.x >= 0 ? '+' : ''}{cursorWorldPos.x.toFixed(1)} NM, {cursorWorldPos.y >= 0 ? '+' : ''}{cursorWorldPos.y.toFixed(1)} NM
+      {/* Compact Bottom-Right Range & Center Control */}
+      <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-1.5 font-mono pointer-events-auto select-none">
+        {showRangeMenu && (
+          <div className="bg-[#07130d]/96 backdrop-blur-md border border-[#1b462e] rounded-md p-1 flex items-center gap-1 shadow-xl">
+            {[5, 15, 35, 60, 100, 140].map(r => (
+              <button
+                type="button"
+                key={r}
+                onClick={() => {
+                  setRangeNM(r);
+                  setShowRangeMenu(false);
+                }}
+                className={`px-2 py-1 rounded text-[10px] font-semibold tabular-nums transition-colors ${
+                  Math.abs(rangeNM - r) < 0.6
+                    ? 'bg-[#173d28] text-[#00ff66]'
+                    : 'hover:bg-[#10261a] text-[#7cc29a]'
+                }`}
+              >
+                {r} NM
+              </button>
+            ))}
           </div>
         )}
-        <div className="hidden md:flex items-center gap-2 text-[#3f7055]">
-          <span>[L-Click] Select / Tag Drag</span>
-          <span>·</span>
-          <span>[H / Alt-Drag] Vector</span>
-          <span>·</span>
-          <span>[D / Shift-Click] Route</span>
-          <span>·</span>
-          <span>[R-Drag] Measure</span>
-        </div>
-      </div>
 
-      {/* Altitude Spectrum Legend */}
-      <div className="absolute bottom-3 right-3 z-10 bg-[#05140d]/90 backdrop-blur border border-[#163826] rounded px-3 py-1.5 font-mono text-[9px] pointer-events-none select-none shadow-lg">
-        <div className="text-[10px] font-bold text-[#4e8b69] mb-1">
-          ALTITUDE COLOR PROFILE
-        </div>
-        <div className="grid grid-cols-5 gap-2 text-center">
-          <div className="flex flex-col items-center">
-            <span className="w-4 h-1.5 rounded-sm bg-[#00e5ff] mb-0.5 shadow-[0_0_4px_#00e5ff]" />
-            <span className="text-[#00e5ff] font-semibold">≥FL100</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="w-4 h-1.5 rounded-sm bg-[#00ff66] mb-0.5 shadow-[0_0_4px_#00ff66]" />
-            <span className="text-[#00ff66] font-semibold">7k-10k</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="w-4 h-1.5 rounded-sm bg-[#ffd166] mb-0.5 shadow-[0_0_4px_#ffd166]" />
-            <span className="text-[#ffd166] font-semibold">4.5-7k</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="w-4 h-1.5 rounded-sm bg-[#ff9233] mb-0.5 shadow-[0_0_4px_#ff9233]" />
-            <span className="text-[#ff9233] font-semibold">2.5-4.5k</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <span className="w-4 h-1.5 rounded-sm bg-[#ff4d6d] mb-0.5 shadow-[0_0_4px_#ff4d6d]" />
-            <span className="text-[#ff4d6d] font-semibold">&lt;2.5k</span>
-          </div>
+        <div className="flex items-center gap-1 bg-[#07130d]/92 backdrop-blur-md px-1.5 py-1 border border-[#163826] rounded-md shadow-lg">
+          <button
+            type="button"
+            onClick={() => setRangeNM(zoomOutStep)}
+            className="p-1 hover:bg-[#10261a] text-[#8ad8a8] rounded transition-colors"
+            title="Zoom Out [-]"
+          >
+            <ZoomOut className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowRangeMenu(prev => !prev)}
+            className="px-2 py-0.5 text-[11px] font-semibold text-[#00e5ff] hover:text-white rounded hover:bg-[#10261a] tabular-nums transition-colors"
+            title="Select Radar Range Preset"
+          >
+            {rangeNM < 10 ? rangeNM.toFixed(1) : Math.round(rangeNM)} NM
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setRangeNM(zoomInStep)}
+            className="p-1 hover:bg-[#10261a] text-[#8ad8a8] rounded transition-colors"
+            title="Zoom In [+]"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="h-3.5 w-px bg-[#19402b] mx-0.5" aria-hidden="true" />
+
+          <button
+            type="button"
+            onClick={handleResetView}
+            className="p-1 hover:bg-[#10261a] text-[#8ad8a8] rounded transition-colors"
+            title="Center Scope [C]"
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
     </div>

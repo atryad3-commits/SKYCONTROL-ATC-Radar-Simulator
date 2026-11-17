@@ -94,9 +94,10 @@ export type AudioStudioTab =
   | 'settings';
 
 interface AudioStudioModalProps {
-  isOpen: boolean;
+  isOpen?: boolean;
+  mode?: 'modal' | 'page';
   initialTab?: AudioStudioTab;
-  onClose: () => void;
+  onClose?: () => void;
 }
 
 const NAV_ITEMS: Array<{
@@ -155,22 +156,24 @@ function normalizeControllerId(val: string, role: AtcStationRole): string {
 }
 
 export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
-  isOpen,
+  isOpen = true,
+  mode = 'modal',
   initialTab = 'voices',
   onClose,
 }) => {
+  const isActive = mode === 'page' ? true : isOpen;
   const [activeTab, setActiveTab] = useState<AudioStudioTab>(initialTab);
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [bannerNotice, setBannerNotice] = useState<string | null>(null);
 
   // Sync external initialTab when opened from deep-links
   useEffect(() => {
-    if (isOpen) {
+    if (isActive) {
       setActiveTab(initialTab);
       setBannerError(null);
       setBannerNotice(null);
     }
-  }, [isOpen, initialTab]);
+  }, [isActive, initialTab]);
 
   // Shared Audio Engine & Profile State
   const [profiles, setProfiles] = useState<VoiceProfile[]>(localTtsClient.getProfilesSync());
@@ -318,7 +321,7 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isActive) return;
     void refreshCoreState();
     void refreshDiagnostics();
 
@@ -334,20 +337,20 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
     }, 2000);
 
     return () => clearInterval(timer);
-  }, [isOpen, activeTab, refreshCoreState, refreshDiagnostics]);
+  }, [isActive, activeTab, refreshCoreState, refreshDiagnostics]);
 
   useEffect(() => {
-    if (!isOpen || activeTab !== 'library') return;
+    if (!isActive || activeTab !== 'library') return;
     void refreshLibrary();
-  }, [isOpen, activeTab, refreshLibrary]);
+  }, [isActive, activeTab, refreshLibrary]);
 
   useEffect(() => {
-    if (!isOpen || activeTab !== 'library' || libSummary?.bulkJob.status !== 'running') return;
+    if (!isActive || activeTab !== 'library' || libSummary?.bulkJob.status !== 'running') return;
     const timer = setInterval(() => {
       void refreshLibrary();
     }, 1800);
     return () => clearInterval(timer);
-  }, [isOpen, activeTab, libSummary?.bulkJob.status, refreshLibrary]);
+  }, [isActive, activeTab, libSummary?.bulkJob.status, refreshLibrary]);
 
   const categoriesForSelectedGroup = useMemo(() => {
     const all = Object.entries(AUDIO_LIBRARY_CATEGORY_META) as Array<
@@ -357,7 +360,7 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
     return all.filter(([, meta]) => meta.group === groupFilter);
   }, [groupFilter]);
 
-  if (!isOpen) return null;
+  if (!isActive) return null;
 
   // ---------------------------------------------------------------------------
   // Voice Profiles Actions
@@ -807,45 +810,51 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
     })),
   ].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-2 sm:p-4 text-xs select-none">
-      <div className="w-full max-w-6xl h-[92vh] bg-[#07100b] border border-[#1d4b32] rounded-md flex flex-col overflow-hidden text-[#d1e7dd]">
-        {/* Studio Top Header */}
-        <header className="h-12 px-4 bg-[#08150f] border-b border-[#163826] flex items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-3 min-w-0">
-            <Radio className="w-4 h-4 text-[#00ff66] shrink-0" />
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <h2 className="font-mono text-sm font-bold text-[#00ff66] tracking-wide truncate">
-                  SKYCONTROL Audio Studio
-                </h2>
-                <span className="hidden sm:inline text-[#296343]" aria-hidden="true">·</span>
-                <span className="hidden sm:inline font-mono text-[11px] text-[#7ec99b] whitespace-nowrap">
-                  Offline Kokoro-82M Neural Audio
-                </span>
-              </div>
+  const contentShell = (
+    <div
+      className={
+        mode === 'page'
+          ? 'w-full h-full bg-[#07100b] flex flex-col overflow-hidden text-[#d1e7dd] text-xs select-none'
+          : 'w-full max-w-6xl h-[92vh] bg-[#07100b] border border-[#1d4b32] rounded-md flex flex-col overflow-hidden text-[#d1e7dd]'
+      }
+    >
+      {/* Studio Top Header */}
+      <header className="h-12 px-4 bg-[#08150f] border-b border-[#163826] flex items-center justify-between gap-3 shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <Radio className="w-4 h-4 text-[#00ff66] shrink-0" />
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <h2 className="font-mono text-sm font-bold text-[#00ff66] tracking-wide truncate">
+                SKYCONTROL Audio Studio
+              </h2>
+              <span className="hidden sm:inline text-[#296343]" aria-hidden="true">·</span>
+              <span className="hidden sm:inline font-mono text-[11px] text-[#7ec99b] whitespace-nowrap">
+                Offline Kokoro-82M Neural Audio
+              </span>
             </div>
           </div>
+        </div>
 
-          <div className="flex items-center gap-2.5 font-mono text-[11px] shrink-0 tabular-nums">
-            <span className="hidden md:inline text-[#7cc99c]">
-              Profiles: <b className="text-[#e2f5ea]">{profiles.length}/{MAX_VOICE_PROFILES}</b>
-            </span>
-            <span className="hidden md:inline text-[#214f36]">|</span>
-            <span className="hidden sm:inline text-[#7cc99c]">
-              Engine:{' '}
-              <b
-                className={
-                  modelState === 'ready'
-                    ? 'text-[#00ff66]'
-                    : modelState === 'error'
-                      ? 'text-[#ff7070]'
-                      : 'text-[#ffd166]'
-                }
-              >
-                {modelState.toUpperCase()}
-              </b>
-            </span>
+        <div className="flex items-center gap-2.5 font-mono text-[11px] shrink-0 tabular-nums">
+          <span className="hidden md:inline text-[#7cc99c]">
+            Profiles: <b className="text-[#e2f5ea]">{profiles.length}/{MAX_VOICE_PROFILES}</b>
+          </span>
+          <span className="hidden md:inline text-[#214f36]">|</span>
+          <span className="hidden sm:inline text-[#7cc99c]">
+            Engine:{' '}
+            <b
+              className={
+                modelState === 'ready'
+                  ? 'text-[#00ff66]'
+                  : modelState === 'error'
+                    ? 'text-[#ff7070]'
+                    : 'text-[#ffd166]'
+              }
+            >
+              {modelState.toUpperCase()}
+            </b>
+          </span>
+          {mode === 'modal' && onClose && (
             <button
               onClick={onClose}
               className="p-1.5 rounded bg-[#0c1e14] hover:bg-[#153423] text-[#87d6a6] border border-[#1d4b32]"
@@ -853,8 +862,9 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
             >
               <X className="w-4 h-4" />
             </button>
-          </div>
-        </header>
+          )}
+        </div>
+      </header>
 
         {/* Body: Left Navigation Rail + Main Content Workspace */}
         <div className="flex-1 min-h-0 flex flex-col md:flex-row">
@@ -3045,6 +3055,15 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
           </main>
         </div>
       </div>
+  );
+
+  if (mode === 'page') {
+    return contentShell;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-2 sm:p-4 text-xs select-none">
+      {contentShell}
     </div>
   );
 };

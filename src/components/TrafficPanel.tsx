@@ -1,46 +1,75 @@
 /**
- * SKYCONTROL - Collapsible Left Traffic Panel (Part 1.B)
- * High-density ATC flight list with track freshness states,
- * flight phase badges, distance to reference, STCA conflict monitoring,
- * and comprehensive filtering/sorting.
+ * SKYCONTROL - Collapsible Left Operations Dock
+ * Consolidates Traffic List, Vertical Flight Progress Strips, VHF Comms Log,
+ * and Live Simulation Controls into a clean, hairline-divided workstation rail.
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
-import { 
-  ShieldAlert, 
-  AlertTriangle, 
-  Radio, 
-  Plane, 
-  ChevronLeft, 
-  ChevronRight, 
-  Filter, 
-  ArrowUpDown, 
-  Wifi, 
-  WifiOff 
+import {
+  ShieldAlert,
+  AlertTriangle,
+  Radio,
+  Plane,
+  PlaneLanding,
+  PlaneTakeoff,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  RotateCcw,
+  Mic,
+  CloudSun,
+  ArrowUpRight,
 } from 'lucide-react';
 import { calculateDistance } from '../engine/physics';
 import { TrackStatus } from '../engine/radarTracker';
+import { radioAudio } from '../audio/radioAudio';
 
-type FilterCategory = 'ALL' | 'ARRIVALS' | 'DEPARTURES' | 'CONFLICTS' | 'STALE';
+type DockTab = 'traffic' | 'strips' | 'comms';
+type FilterCategory = 'ALL' | 'ARRIVALS' | 'DEPARTURES' | 'CONFLICTS';
 type SortField = 'DISTANCE' | 'ALTITUDE' | 'CALLSIGN' | 'SPEED';
 
-export const TrafficPanel: React.FC = () => {
+interface TrafficPanelProps {
+  onOpenAudioStudio?: () => void;
+}
+
+export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio }) => {
   const aircraftList = useSimulationStore(state => state.aircraft);
   const selectedAircraftId = useSimulationStore(state => state.selectedAircraftId);
   const selectAircraft = useSimulationStore(state => state.selectAircraft);
   const conflicts = useSimulationStore(state => state.conflicts);
   const radarTracks = useSimulationStore(state => state.radarTracks);
+  const radioMessages = useSimulationStore(state => state.radioMessages);
+  const activeTransmission = useSimulationStore(state => state.activeTransmission);
+  const airportProfile = useSimulationStore(state => state.airportProfile);
+  const simSpeed = useSimulationStore(state => state.simSpeed);
 
-  // Panel state
+  const spawnInbound = useSimulationStore(state => state.spawnInbound);
+  const spawnDeparture = useSimulationStore(state => state.spawnDeparture);
+  const triggerEmergency = useSimulationStore(state => state.triggerEmergency);
+  const setSimSpeed = useSimulationStore(state => state.setSimSpeed);
+  const resetSimulation = useSimulationStore(state => state.resetSimulation);
+  const broadcastWeatherAdvisory = useSimulationStore(state => state.broadcastWeatherAdvisory);
+
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<DockTab>('traffic');
   const [filter, setFilter] = useState<FilterCategory>('ALL');
   const [sortBy, setSortBy] = useState<SortField>('DISTANCE');
+  const [stripFilter, setStripFilter] = useState<'all' | 'arrivals' | 'departures'>('all');
+
+  const logTopRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (activeTab === 'comms') {
+      logTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [radioMessages.length, activeTab]);
 
   const criticalConflicts = conflicts.filter(c => c.severity === 'Critical');
-  const warningConflicts = conflicts.filter(c => c.severity === 'Warning' || c.severity === 'Caution');
+  const warningConflicts = conflicts.filter(
+    c => c.severity === 'Warning' || c.severity === 'Caution'
+  );
 
-  // Map of radar track by aircraft ID for fast freshness lookup
   const trackMap = useMemo(() => {
     const map = new Map<string, TrackStatus>();
     for (const trk of radarTracks) {
@@ -49,72 +78,132 @@ export const TrafficPanel: React.FC = () => {
     return map;
   }, [radarTracks]);
 
-  // Filter & sort logic
   const filteredAircraft = useMemo(() => {
+    return aircraftList
+      .filter(ac => {
+        const isConflict = conflicts.some(
+          c => c.aircraft1Id === ac.id || c.aircraft2Id === ac.id
+        );
+        if (filter === 'ARRIVALS') return ac.status !== 'Departing' && ac.status !== 'Outbound';
+        if (filter === 'DEPARTURES') return ac.status === 'Departing' || ac.status === 'Outbound';
+        if (filter === 'CONFLICTS') return isConflict || Boolean(ac.isEmergency);
+        return true;
+      })
+      .sort((a, b) => {
+        const distA = calculateDistance(a.x, a.y, 0, 0);
+        const distB = calculateDistance(b.x, b.y, 0, 0);
+        if (sortBy === 'DISTANCE') return distA - distB;
+        if (sortBy === 'ALTITUDE') return a.altitude - b.altitude;
+        if (sortBy === 'SPEED') return b.groundSpeed - a.groundSpeed;
+        return a.callsign.localeCompare(b.callsign);
+      });
+  }, [aircraftList, filter, sortBy, conflicts]);
+
+  const filteredStrips = useMemo(() => {
     return aircraftList.filter(ac => {
-      const isConflict = conflicts.some(c => c.aircraft1Id === ac.id || c.aircraft2Id === ac.id);
-      const trackStatus = trackMap.get(ac.id) || 'CONFIRMED';
-
-      if (filter === 'ARRIVALS') {
-        return ac.status !== 'Departing';
-      }
-      if (filter === 'DEPARTURES') {
-        return ac.status === 'Departing';
-      }
-      if (filter === 'CONFLICTS') {
-        return isConflict;
-      }
-      if (filter === 'STALE') {
-        return trackStatus === 'STALE' || trackStatus === 'LOST';
-      }
+      if (stripFilter === 'arrivals') return ac.status !== 'Departing' && ac.status !== 'Outbound';
+      if (stripFilter === 'departures') return ac.status === 'Departing' || ac.status === 'Outbound';
       return true;
-    }).sort((a, b) => {
-      const distA = calculateDistance(a.x, a.y, 0, 0);
-      const distB = calculateDistance(b.x, b.y, 0, 0);
-
-      if (sortBy === 'DISTANCE') return distA - distB;
-      if (sortBy === 'ALTITUDE') return a.altitude - b.altitude;
-      if (sortBy === 'SPEED') return b.groundSpeed - a.groundSpeed;
-      if (sortBy === 'CALLSIGN') return a.callsign.localeCompare(b.callsign);
-      return 0;
     });
-  }, [aircraftList, filter, sortBy, conflicts, trackMap]);
+  }, [aircraftList, stripFilter]);
+
+  const handleRadioCheck = () => {
+    radioAudio.initAudioContext();
+    const targetAc = aircraftList[0];
+    const targetCallsign = targetAc?.callsign || 'BAW452';
+    const targetTelephony = targetAc?.telephony || 'Speedbird';
+    const flightNum = targetCallsign.slice(3) || '452';
+    const freq = airportProfile.vhfFrequency;
+    const dir = airportProfile.directorCallsign;
+
+    const nowTime = new Date().toTimeString().split(' ')[0];
+    const atcText = `${targetCallsign}, ${airportProfile.airport.name} Director, radio check on ${freq}`;
+    const pilotPhrase = 'Readability five, loud and clear';
+
+    useSimulationStore.setState(state => ({
+      radioMessages: [
+        {
+          id: `atc_check_${Date.now()}`,
+          timestamp: nowTime,
+          sender: 'ATC' as const,
+          callsign: dir,
+          text: atcText,
+          frequency: freq,
+        },
+        ...state.radioMessages.slice(0, 49),
+      ],
+    }));
+
+    radioAudio.speakRadioExchange(
+      atcText,
+      targetCallsign,
+      pilotPhrase,
+      () => {
+        const pilotTime = new Date().toTimeString().split(' ')[0];
+        useSimulationStore.setState(state => ({
+          radioMessages: [
+            {
+              id: `pilot_check_${Date.now()}`,
+              timestamp: pilotTime,
+              sender: 'PILOT' as const,
+              callsign: targetCallsign,
+              text: `${pilotPhrase}, ${targetTelephony} ${flightNum}`,
+              frequency: freq,
+            },
+            ...state.radioMessages.slice(0, 49),
+          ],
+        }));
+      },
+      {
+        airportIcao: airportProfile.airport.icao,
+        aircraftId: targetAc?.id,
+        airline: targetAc?.airline,
+        telephony: targetAc?.telephony,
+        aircraftType: targetAc?.aircraftType,
+        frequency: freq,
+        priority: 'ATC_CLEARANCE',
+        atcRole: 'APPROACH',
+        isHeavy: targetAc?.category === 'Heavy',
+        pilotHasCallsign: false,
+        activeCallsigns: aircraftList.map(f => f.callsign),
+      }
+    );
+  };
 
   if (isCollapsed) {
     return (
-      <aside className="w-10 h-full bg-[#08130e] border-r border-[#163826] flex flex-col items-center py-2 select-none z-20 shrink-0">
+      <aside className="w-10 h-full bg-[#07110c] border-r border-[#163826] flex flex-col items-center py-2 select-none z-20 shrink-0">
         <button
+          type="button"
           onClick={() => setIsCollapsed(false)}
-          className="p-1.5 rounded hover:bg-[#153424] text-[#00ff66] transition-colors mb-4"
-          title="Expand Traffic Panel"
+          className="p-1.5 rounded hover:bg-[#143322] text-[#00ff66] transition-colors mb-3"
+          title="Expand Operations Dock"
         >
           <ChevronRight className="w-4 h-4" />
         </button>
 
-        <div className="flex-1 flex flex-col items-center gap-2 overflow-y-auto w-full px-1">
+        <div className="flex-1 flex flex-col items-center gap-1.5 overflow-y-auto w-full px-1">
           {aircraftList.map(ac => {
             const isSelected = ac.id === selectedAircraftId;
-            const hasConflict = conflicts.some(c => c.aircraft1Id === ac.id || c.aircraft2Id === ac.id);
-            const status = trackMap.get(ac.id) || 'CONFIRMED';
+            const hasConflict = conflicts.some(
+              c => c.aircraft1Id === ac.id || c.aircraft2Id === ac.id
+            );
 
             return (
               <button
+                type="button"
                 key={ac.id}
                 onClick={() => selectAircraft(ac.id)}
-                className={`w-8 h-8 rounded flex flex-col items-center justify-center text-[9px] font-mono border transition-all ${
+                className={`w-8 h-7 rounded flex items-center justify-center text-[9px] font-mono border transition-colors ${
                   isSelected
-                    ? 'bg-[#15422a] border-[#00ff66] text-[#00ff66]'
-                    : hasConflict
-                    ? 'bg-[#3b1212] border-[#ff3344] text-[#ff4d4d]'
-                    : status === 'STALE'
-                    ? 'bg-[#2b2413] border-[#ffb703] text-[#ffe6a0]'
-                    : status === 'LOST'
-                    ? 'bg-[#3b1515] border-[#ff3344] text-[#ff6b6b]'
-                    : 'bg-[#0a1711] border-[#163826] text-[#a2f5bf] hover:bg-[#12281c]'
+                    ? 'bg-[#143d27] border-[#00ff66] text-[#00ff66] font-bold'
+                    : hasConflict || ac.isEmergency
+                    ? 'bg-[#361114] border-[#ff3344] text-[#ff6b6b]'
+                    : 'bg-[#0a1711] border-[#163826] text-[#9de8bc] hover:bg-[#11261b]'
                 }`}
-                title={`${ac.callsign} (${ac.aircraftType}) - ${Math.round(ac.altitude)}ft`}
+                title={`${ac.callsign} (${ac.aircraftType}) · ${Math.round(ac.altitude)}ft`}
               >
-                <span>{ac.callsign.slice(0, 3)}</span>
+                {ac.callsign.slice(0, 3)}
               </button>
             );
           })}
@@ -124,186 +213,470 @@ export const TrafficPanel: React.FC = () => {
   }
 
   return (
-    <aside className="w-76 h-full bg-[#08130e] border-r border-[#163826] flex flex-col font-mono text-xs select-none z-20 shrink-0">
-      {/* 1. Header & Collapse Toggle */}
-      <div className="h-9 px-3 bg-[#0a1710] border-b border-[#163826] flex items-center justify-between text-[#a2f5bf]">
-        <div className="flex items-center gap-2">
-          <Plane className="w-3.5 h-3.5 text-[#00ff66]" />
-          <span className="font-bold text-[11px] text-white tracking-wide">
-            TRAFFIC LIST ({aircraftList.length})
-          </span>
+    <aside className="w-72 h-full bg-[#07110c] border-r border-[#163826] flex flex-col font-mono text-xs select-none z-20 shrink-0">
+      {/* 1. Dock Tab Bar + Collapse */}
+      <div className="h-9 px-2 bg-[#09150f] border-b border-[#163826] flex items-center justify-between gap-1 shrink-0">
+        <div className="flex items-center h-full gap-1">
+          {(
+            [
+              { id: 'traffic', label: `Traffic (${aircraftList.length})` },
+              { id: 'strips', label: 'Strips' },
+              { id: 'comms', label: 'Comms' },
+            ] as const
+          ).map(tab => {
+            const active = activeTab === tab.id;
+            return (
+              <button
+                type="button"
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`h-full px-2 text-[11px] border-b-2 transition-colors whitespace-nowrap ${
+                  active
+                    ? 'border-[#00ff66] text-[#00ff66] font-semibold'
+                    : 'border-transparent text-[#69a683] hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
+
         <button
+          type="button"
           onClick={() => setIsCollapsed(true)}
-          className="p-1 rounded hover:bg-[#153424] text-[#5da87d] hover:text-[#00ff66] transition-colors"
-          title="Collapse Panel"
+          className="p-1 rounded hover:bg-[#143322] text-[#5da87d] hover:text-[#00ff66] transition-colors shrink-0"
+          title="Collapse Dock"
         >
           <ChevronLeft className="w-4 h-4" />
         </button>
       </div>
 
-      {/* 2. STCA Safety Banner */}
+      {/* 2. Conditional STCA Safety Banner */}
       {criticalConflicts.length > 0 ? (
-        <div className="p-2 bg-[#381111] border-b border-[#ff3344] text-[#ff3344] flex items-center gap-2 animate-pulse">
-          <ShieldAlert className="w-4 h-4 shrink-0" />
-          <div className="flex-1 text-[11px] font-bold leading-tight">
+        <div className="px-3 py-1.5 bg-[#361114] border-b border-[#ff3344]/60 text-[#ff6b6b] flex items-center gap-2 shrink-0">
+          <ShieldAlert className="w-3.5 h-3.5 text-[#ff3344] shrink-0" />
+          <span className="text-[11px] font-bold">
             LOSS OF SEPARATION ({criticalConflicts.length})
-          </div>
+          </span>
         </div>
       ) : warningConflicts.length > 0 ? (
-        <div className="p-1.5 bg-[#2d220b] border-b border-[#ffb703] text-[#ffb703] flex items-center gap-1.5">
+        <div className="px-3 py-1.5 bg-[#2a200b] border-b border-[#ffb703]/50 text-[#ffb703] flex items-center gap-2 shrink-0">
           <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          <div className="flex-1 text-[10px] font-bold leading-tight">
+          <span className="text-[10px] font-bold">
             STCA CONVERGENCE ({warningConflicts.length})
-          </div>
+          </span>
         </div>
-      ) : (
-        <div className="px-3 py-1.5 bg-[#091610] border-b border-[#163826] flex items-center justify-between text-[10px]">
-          <div className="flex items-center gap-1.5 text-[#00ff66]">
-            <Radio className="w-3 h-3" />
-            <span className="font-semibold">SEPARATION NOMINAL</span>
+      ) : null}
+
+      {/* 3. Active Dock Tab Body */}
+      {activeTab === 'traffic' && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          {/* Quiet Filter & Sort Bar */}
+          <div className="px-2.5 py-1.5 bg-[#060f0a] border-b border-[#143020] flex items-center justify-between gap-2 text-[10px] shrink-0">
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  { id: 'ALL', label: 'All' },
+                  { id: 'ARRIVALS', label: 'Arr' },
+                  { id: 'DEPARTURES', label: 'Dep' },
+                  { id: 'CONFLICTS', label: 'Alert' },
+                ] as const
+              ).map(opt => (
+                <button
+                  type="button"
+                  key={opt.id}
+                  onClick={() => setFilter(opt.id)}
+                  className={`px-1.5 py-0.5 rounded transition-colors ${
+                    filter === opt.id
+                      ? 'bg-[#143322] text-[#00ff66] font-semibold'
+                      : 'text-[#558f6e] hover:text-[#a2f5bf]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value as SortField)}
+              aria-label="Sort traffic by"
+              className="bg-transparent text-[#8ad8a8] outline-none cursor-pointer text-[10px]"
+            >
+              <option value="DISTANCE" className="bg-[#07110c]">
+                Dist
+              </option>
+              <option value="ALTITUDE" className="bg-[#07110c]">
+                Alt
+              </option>
+              <option value="SPEED" className="bg-[#07110c]">
+                Spd
+              </option>
+              <option value="CALLSIGN" className="bg-[#07110c]">
+                Call
+              </option>
+            </select>
           </div>
-          <span className="text-[#3b6d4e]">3.0NM / 1000FT</span>
+
+          {/* Hairline-Divided Traffic List */}
+          <div className="flex-1 overflow-y-auto divide-y divide-[#112c1d]">
+            {filteredAircraft.length === 0 ? (
+              <div className="p-6 text-center text-[#45785b] text-[11px]">
+                No matching traffic
+              </div>
+            ) : (
+              filteredAircraft.map(ac => {
+                const isSelected = ac.id === selectedAircraftId;
+                const distFromAirport = calculateDistance(ac.x, ac.y, 0, 0);
+                const hasCritical = conflicts.some(
+                  c =>
+                    (c.aircraft1Id === ac.id || c.aircraft2Id === ac.id) &&
+                    c.severity === 'Critical'
+                );
+                const hasWarning = conflicts.some(
+                  c =>
+                    (c.aircraft1Id === ac.id || c.aircraft2Id === ac.id) &&
+                    c.severity === 'Warning'
+                );
+                const trackStatus: TrackStatus = trackMap.get(ac.id) || 'CONFIRMED';
+
+                return (
+                  <button
+                    type="button"
+                    key={ac.id}
+                    onClick={() => selectAircraft(ac.id)}
+                    className={`w-full text-left px-3 py-2 transition-colors border-l-2 ${
+                      isSelected
+                        ? 'bg-[#0f291b] border-l-[#00ff66]'
+                        : hasCritical || ac.isEmergency
+                        ? 'bg-[#2a1012] border-l-[#ff3344] hover:bg-[#361416]'
+                        : hasWarning
+                        ? 'bg-[#241b09] border-l-[#ffb703] hover:bg-[#2e230c]'
+                        : 'border-l-transparent hover:bg-[#0b1b13]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className={`font-bold text-[12px] ${
+                            isSelected
+                              ? 'text-[#00ff66]'
+                              : ac.isEmergency
+                              ? 'text-[#ff6b6b]'
+                              : 'text-white'
+                          }`}
+                        >
+                          {ac.callsign}
+                        </span>
+                        <span className="text-[10px] text-[#558f6e]">
+                          {ac.aircraftType}
+                          {ac.category === 'Heavy' ? '/H' : ''}
+                        </span>
+                      </div>
+
+                      <span
+                        className={`text-[10px] font-semibold ${
+                          ac.isEmergency
+                            ? 'text-[#ff4d4d]'
+                            : ac.status === 'Established' || ac.status === 'FinalApproach'
+                            ? 'text-[#00e5ff]'
+                            : trackStatus === 'STALE' || trackStatus === 'LOST'
+                            ? 'text-[#ffb703]'
+                            : 'text-[#77bd94]'
+                        }`}
+                      >
+                        {ac.isEmergency
+                          ? '7700'
+                          : ac.status === 'FinalApproach'
+                          ? 'FINAL'
+                          : ac.flightPhase || ac.status.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] text-[#85cca1] mt-1 tabular-nums">
+                      <span>
+                        {Math.round(ac.heading).toString().padStart(3, '0')}° ·{' '}
+                        {Math.round(ac.groundSpeed || ac.indicatedAirspeed)}kt
+                      </span>
+                      <span>
+                        <span className="text-white">{distFromAirport.toFixed(1)} NM</span> ·{' '}
+                        <span className="text-[#00ff66] font-semibold">
+                          {Math.round(ac.altitude)}ft
+                        </span>
+                      </span>
+                    </div>
+
+                    {(ac.assignedWaypoint || ac.ilsArmed || ac.assignedRunway) && (
+                      <div className="flex items-center justify-between text-[10px] text-[#558f6e] mt-0.5 tabular-nums">
+                        <span className="truncate">
+                          {ac.assignedWaypoint
+                            ? `DIR ${ac.assignedWaypoint}`
+                            : `RWY ${ac.assignedRunway}${ac.ilsArmed ? ' ILS' : ''}`}
+                        </span>
+                        <span>TGT {ac.targetAltitude}ft</span>
+                      </div>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
 
-      {/* 3. Filter Category Tabs */}
-      <div className="grid grid-cols-5 p-1 bg-[#06100b] border-b border-[#163826] text-[10px] text-center gap-0.5">
-        {(['ALL', 'ARRIVALS', 'DEPARTURES', 'CONFLICTS', 'STALE'] as FilterCategory[]).map(cat => (
-          <button
-            key={cat}
-            onClick={() => setFilter(cat)}
-            className={`py-1 rounded transition-colors truncate ${
-              filter === cat
-                ? 'bg-[#153826] text-[#00ff66] font-bold shadow-sm'
-                : 'text-[#4e8b69] hover:text-[#a2f5bf] hover:bg-[#0a1711]'
-            }`}
-          >
-            {cat === 'ARRIVALS' ? 'ARR' : cat === 'DEPARTURES' ? 'DEP' : cat === 'CONFLICTS' ? 'STCA' : cat}
-          </button>
-        ))}
-      </div>
-
-      {/* 4. Sort Options Subheader */}
-      <div className="px-3 py-1 bg-[#091510] border-b border-[#163826] flex items-center justify-between text-[10px] text-[#4e8b69]">
-        <div className="flex items-center gap-1">
-          <Filter className="w-2.5 h-2.5" />
-          <span>FILTER: <b className="text-[#a2f5bf]">{filter}</b></span>
-        </div>
-        <div className="flex items-center gap-1">
-          <ArrowUpDown className="w-2.5 h-2.5" />
-          <select
-            value={sortBy}
-            onChange={e => setSortBy(e.target.value as SortField)}
-            className="bg-transparent text-[#a2f5bf] outline-none cursor-pointer"
-          >
-            <option value="DISTANCE" className="bg-[#08130e]">DIST</option>
-            <option value="ALTITUDE" className="bg-[#08130e]">ALT</option>
-            <option value="SPEED" className="bg-[#08130e]">SPD</option>
-            <option value="CALLSIGN" className="bg-[#08130e]">CALL</option>
-          </select>
-        </div>
-      </div>
-
-      {/* 5. Scrollable Aircraft Card List */}
-      <div className="flex-1 overflow-y-auto p-1.5 flex flex-col gap-1.5">
-        {filteredAircraft.length === 0 ? (
-          <div className="p-6 text-center text-[#3b6d4e] text-xs">
-            No matching aircraft
+      {activeTab === 'strips' && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="px-2.5 py-1.5 bg-[#060f0a] border-b border-[#143020] flex items-center justify-between text-[10px] shrink-0">
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  { id: 'all', label: `All (${aircraftList.length})` },
+                  {
+                    id: 'arrivals',
+                    label: `Arr (${
+                      aircraftList.filter(
+                        a => a.status !== 'Departing' && a.status !== 'Outbound'
+                      ).length
+                    })`,
+                  },
+                  {
+                    id: 'departures',
+                    label: `Dep (${
+                      aircraftList.filter(
+                        a => a.status === 'Departing' || a.status === 'Outbound'
+                      ).length
+                    })`,
+                  },
+                ] as const
+              ).map(opt => (
+                <button
+                  type="button"
+                  key={opt.id}
+                  onClick={() => setStripFilter(opt.id)}
+                  className={`px-1.5 py-0.5 rounded transition-colors ${
+                    stripFilter === opt.id
+                      ? 'bg-[#143322] text-[#00ff66] font-semibold'
+                      : 'text-[#558f6e] hover:text-[#a2f5bf]'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[#45785b]">STRIP BAY</span>
           </div>
-        ) : (
-          filteredAircraft.map(ac => {
-            const isSelected = ac.id === selectedAircraftId;
-            const distFromAirport = calculateDistance(ac.x, ac.y, 0, 0);
 
-            const hasCritical = conflicts.some(
-              c => (c.aircraft1Id === ac.id || c.aircraft2Id === ac.id) && c.severity === 'Critical'
-            );
-            const hasWarning = conflicts.some(
-              c => (c.aircraft1Id === ac.id || c.aircraft2Id === ac.id) && c.severity === 'Warning'
-            );
+          <div className="flex-1 overflow-y-auto divide-y divide-[#122e1f]">
+            {filteredStrips.length === 0 ? (
+              <div className="p-6 text-center text-[#45785b] text-[11px]">No active flight strips</div>
+            ) : (
+              filteredStrips.map(ac => {
+                const isSelected = ac.id === selectedAircraftId;
+                const isArrival = ac.status !== 'Departing' && ac.status !== 'Outbound';
+                const isEmergency = Boolean(ac.isEmergency) || ac.transponder === '7700';
 
-            const trackStatus: TrackStatus = trackMap.get(ac.id) || 'CONFIRMED';
+                return (
+                  <button
+                    type="button"
+                    key={ac.id}
+                    onClick={() => selectAircraft(ac.id)}
+                    className={`w-full text-left px-3 py-2.5 transition-colors border-l-2 tabular-nums ${
+                      isSelected
+                        ? 'bg-[#0f291b] border-l-[#00ff66]'
+                        : isEmergency
+                        ? 'bg-[#2a1012] border-l-[#ff3344]'
+                        : isArrival
+                        ? 'border-l-[#1b4a30] hover:bg-[#0b1b13]'
+                        : 'border-l-[#1b4b63] hover:bg-[#0b1721]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        {isArrival ? (
+                          <PlaneLanding className="w-3 h-3 text-[#00ff66]" />
+                        ) : (
+                          <PlaneTakeoff className="w-3 h-3 text-[#00e5ff]" />
+                        )}
+                        <span className="font-bold text-white">{ac.callsign}</span>
+                        <span className="text-[10px] text-[#6ca885]">{ac.aircraftType}</span>
+                      </div>
+                      <span
+                        className={`text-[10px] font-bold ${
+                          isEmergency ? 'text-[#ff4d4d]' : 'text-[#00e5ff]'
+                        }`}
+                      >
+                        {isEmergency ? 'SQ 7700' : `SQ ${ac.transponder}`}
+                      </span>
+                    </div>
 
-            return (
-              <div
-                key={ac.id}
-                onClick={() => selectAircraft(ac.id)}
-                className={`p-2 rounded border cursor-pointer transition-all ${
-                  isSelected
-                    ? 'bg-[#102b1d] border-[#00ff66] shadow-[0_0_10px_rgba(0,255,102,0.25)]'
-                    : hasCritical
-                    ? 'bg-[#3b1212] border-[#ff3344]'
-                    : hasWarning
-                    ? 'bg-[#2b200b] border-[#ffb703]'
-                    : 'bg-[#0a1711] hover:bg-[#12281c] border-[#163826]'
+                    <div className="flex items-center justify-between text-[11px] text-[#9de8bc] mt-1">
+                      <span>
+                        {ac.origin} → {ac.destination}
+                      </span>
+                      <span>
+                        FL{Math.round(ac.altitude / 100).toString().padStart(3, '0')} →{' '}
+                        <b className="text-[#00ff66]">
+                          c{Math.round(ac.targetAltitude / 100).toString().padStart(3, '0')}
+                        </b>
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] text-[#5c9474] mt-0.5">
+                      <span>
+                        HDG {Math.round(ac.targetHeading).toString().padStart(3, '0')}° ·{' '}
+                        {Math.round(ac.indicatedAirspeed)}kt
+                      </span>
+                      <span className="text-[#00ff66]">RWY {ac.assignedRunway}</span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'comms' && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          {/* Frequency & Quick VHF Actions */}
+          <div className="px-2.5 py-2 bg-[#060f0a] border-b border-[#143020] flex flex-col gap-1.5 shrink-0">
+            <div className="flex items-center justify-between text-[10px] tabular-nums">
+              <span className="text-[#00e5ff] font-semibold flex items-center gap-1.5">
+                <Radio className="w-3 h-3" />
+                <span>VHF {airportProfile.vhfFrequency} MHz</span>
+              </span>
+              {onOpenAudioStudio && (
+                <button
+                  type="button"
+                  onClick={onOpenAudioStudio}
+                  className="text-[#7ec99b] hover:text-[#00ff66] flex items-center gap-0.5 transition-colors"
+                >
+                  <span>Audio Studio</span>
+                  <ArrowUpRight className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+              <button
+                type="button"
+                onClick={() => {
+                  radioAudio.initAudioContext();
+                  broadcastWeatherAdvisory();
+                }}
+                className="py-1 px-2 bg-[#0b1f26] hover:bg-[#112f3b] text-[#7ae8ff] border border-[#1a4859] rounded flex items-center justify-center gap-1 transition-colors"
+              >
+                <CloudSun className="w-3 h-3" />
+                <span>ATIS / WX</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleRadioCheck}
+                className="py-1 px-2 bg-[#0d2417] hover:bg-[#153824] text-[#9de8bc] border border-[#1c4830] rounded flex items-center justify-center gap-1 transition-colors"
+              >
+                <Mic className="w-3 h-3 text-[#00ff66]" />
+                <span>Radio Check</span>
+              </button>
+            </div>
+
+            {activeTransmission && (
+              <div className="text-[10px] font-semibold text-[#00ff66] truncate">
+                TX ·{' '}
+                {activeTransmission.speaker === 'ATC'
+                  ? airportProfile.directorCallsign
+                  : activeTransmission.callsign}
+              </div>
+            )}
+          </div>
+
+          {/* Radio Transcript Stream */}
+          <div className="flex-1 overflow-y-auto px-3 py-2 flex flex-col gap-2 text-[11px] tabular-nums">
+            <div ref={logTopRef} />
+            {radioMessages.length === 0 ? (
+              <div className="text-[#45785b] text-center py-6">No radio traffic logged</div>
+            ) : (
+              radioMessages.map(msg => (
+                <div key={msg.id} className="leading-snug border-b border-[#0f2419] pb-1.5">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span
+                      className={`font-bold ${
+                        msg.sender === 'ATC' ? 'text-[#00e5ff]' : 'text-[#00ff66]'
+                      }`}
+                    >
+                      {msg.sender === 'ATC'
+                        ? msg.callsign || airportProfile.directorCallsign
+                        : msg.callsign}
+                    </span>
+                    <span className="text-[#45785b]">{msg.timestamp}</span>
+                  </div>
+                  <div className="text-[#d1e7dd] mt-0.5">{msg.text}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 4. Compact Simulation Controls Footer (Moved out of TopBar) */}
+      <div className="p-2 bg-[#08150f] border-t border-[#163826] flex flex-col gap-1.5 shrink-0">
+        <div className="grid grid-cols-3 gap-1 text-[10px]">
+          <button
+            type="button"
+            onClick={spawnInbound}
+            className="py-1 px-1.5 bg-[#0d2418] hover:bg-[#153825] text-[#00ff66] border border-[#1d4a31] rounded flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+            title="Spawn Inbound Arrival"
+          >
+            <Plus className="w-3 h-3" />
+            <span>Arr</span>
+          </button>
+          <button
+            type="button"
+            onClick={spawnDeparture}
+            className="py-1 px-1.5 bg-[#0b2029] hover:bg-[#11313d] text-[#00e5ff] border border-[#1a4859] rounded flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+            title="Spawn Departure Flight"
+          >
+            <Plane className="w-3 h-3" />
+            <span>Dep</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => triggerEmergency()}
+            className="py-1 px-1.5 bg-[#2b1113] hover:bg-[#3d171a] text-[#ff6b6b] border border-[#592125] rounded font-semibold transition-colors whitespace-nowrap"
+            title="Trigger Squawk 7700 Emergency"
+          >
+            7700
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-1.5 text-[10px]">
+          <div className="flex items-center bg-[#060f0a] border border-[#163826] rounded p-0.5">
+            {[1, 2, 5].map(spd => (
+              <button
+                type="button"
+                key={spd}
+                onClick={() => setSimSpeed(spd)}
+                className={`px-2 py-0.5 rounded font-semibold transition-colors ${
+                  simSpeed === spd
+                    ? 'bg-[#173f29] text-[#00ff66]'
+                    : 'text-[#558f6e] hover:text-white'
                 }`}
               >
-                {/* Line 1: Callsign, Type, and Track Freshness Indicator */}
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-1.5">
-                    <Plane className={`w-3 h-3 ${isSelected ? 'text-[#00ff66]' : 'text-[#4e8b69]'}`} />
-                    <span className="font-bold text-white text-[12px]">{ac.callsign}</span>
-                    <span className="text-[10px] text-[#4e8b69]">{ac.aircraftType}</span>
-                  </div>
+                {spd}x
+              </button>
+            ))}
+          </div>
 
-                  <div className="flex items-center gap-1">
-                    {/* Track Freshness Pill */}
-                    <span className={`text-[9px] px-1 py-0.2 rounded font-semibold ${
-                      trackStatus === 'CONFIRMED'
-                        ? 'bg-[#00ff66]/15 text-[#00ff66]'
-                        : trackStatus === 'PREDICTED'
-                        ? 'bg-[#00e5ff]/15 text-[#00e5ff]'
-                        : trackStatus === 'STALE'
-                        ? 'bg-[#ffb703]/20 text-[#ffb703]'
-                        : 'bg-[#ff3344]/20 text-[#ff3344] animate-pulse'
-                    }`}>
-                      {trackStatus === 'CONFIRMED' ? 'SCAN' : trackStatus}
-                    </span>
-
-                    {/* Flight Phase Pill */}
-                    <span className={`text-[9px] font-semibold px-1 py-0.2 rounded ${
-                      ac.status === 'Established' || ac.status === 'FinalApproach'
-                        ? 'bg-[#00e5ff]/20 text-[#00e5ff]'
-                        : ac.status === 'GoAround'
-                        ? 'bg-[#ff3344]/20 text-[#ff3344]'
-                        : 'bg-[#153322] text-[#85cca1]'
-                    }`}>
-                      {ac.status === 'FinalApproach' ? 'FINAL' : ac.status}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Line 2: Spatial Navigation Metrics */}
-                <div className="flex items-center justify-between text-[11px] text-[#85cca1]">
-                  <div>
-                    <span>HDG: <b className="text-white">{Math.round(ac.heading).toString().padStart(3, '0')}°</b></span>
-                    {' · '}
-                    <span>{Math.round(ac.groundSpeed || ac.indicatedAirspeed)}kt</span>
-                  </div>
-
-                  <div className="text-right">
-                    <span className="font-semibold text-white">{distFromAirport.toFixed(1)} NM</span>
-                    {' · '}
-                    <span className="text-[#00ff66] font-bold">{Math.round(ac.altitude)}ft</span>
-                  </div>
-                </div>
-
-                {/* Sub-line for ILS or Waypoint */}
-                {(ac.assignedWaypoint || ac.ilsArmed || ac.assignedRunway) && (
-                  <div className="mt-1 pt-1 border-t border-[#163826]/60 flex items-center justify-between text-[10px] text-[#4e8b69]">
-                    <span>
-                      {ac.assignedWaypoint ? `DIR TO: ${ac.assignedWaypoint}` : `RWY: ${ac.assignedRunway}`}
-                    </span>
-                    <span>
-                      TGT: <b className="text-[#a2f5bf]">{ac.targetAltitude}ft</b>
-                    </span>
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
+          <button
+            type="button"
+            onClick={() => resetSimulation()}
+            className="px-2 py-1 bg-[#0a1b12] hover:bg-[#132e1f] text-[#7cc29a] hover:text-white border border-[#163826] rounded flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Reset Active Sector Traffic"
+          >
+            <RotateCcw className="w-3 h-3" />
+            <span>Reset</span>
+          </button>
+        </div>
       </div>
     </aside>
   );
