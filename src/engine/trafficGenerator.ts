@@ -533,7 +533,7 @@ export function generateInboundFlight(
     !options.isEmergency &&
     !options.initialScopeDistribution &&
     starAssignment.arrivalRouteWaypoints.length > 0 &&
-    Math.random() < 0.32
+    Math.random() < 0.14
   ) {
     // Some inbound flights check in already transitioning along their assigned STAR
     assignedWaypoint = starAssignment.arrivalRouteWaypoints[0];
@@ -541,7 +541,7 @@ export function generateInboundFlight(
   } else if (
     !options.isEmergency &&
     !options.initialScopeDistribution &&
-    Math.random() < 0.18 &&
+    Math.random() < 0.1 &&
     airport.waypoints.length > 0
   ) {
     const frontCandidates = airport.waypoints.filter(wp => {

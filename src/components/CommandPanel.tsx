@@ -8,7 +8,13 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { useSimulationStore } from '../store/simulationStore';
-import { calculateLocalizerDeviation, calculateGlideslopeDeviation } from '../engine/ils';
+import {
+  calculateLocalizerDeviation,
+  calculateGlideslopeDeviation,
+  evaluateArrivalGates,
+  computeBaseLegVector,
+  computeFinalInterceptVector,
+} from '../engine/ils';
 import { calculateBearing, calculateDistance, getHeadingDelta } from '../engine/physics';
 import {
   getAircraftClassPresets,
@@ -20,7 +26,6 @@ import {
   AlertOctagon,
   AlertTriangle,
   X,
-  RotateCw,
 } from 'lucide-react';
 
 type CommandTab = 'vector' | 'route' | 'approach';
@@ -47,8 +52,11 @@ export const CommandPanel: React.FC = () => {
   const appendWaypointRoute = useSimulationStore(state => state.appendWaypointRoute);
   const clearRoute = useSimulationStore(state => state.clearRoute);
   const assignRunway = useSimulationStore(state => state.assignRunway);
-  const vectorToIntercept = useSimulationStore(state => state.vectorToIntercept);
+  const clearArrivalStar = useSimulationStore(state => state.clearArrivalStar);
+  const vectorBaseLeg = useSimulationStore(state => state.vectorBaseLeg);
+  const vectorFinalIntercept = useSimulationStore(state => state.vectorFinalIntercept);
   const clearILS = useSimulationStore(state => state.clearILS);
+  const clearToLand = useSimulationStore(state => state.clearToLand);
   const goAround = useSimulationStore(state => state.goAround);
   const holdAt = useSimulationStore(state => state.holdAt);
   const lineUpAndWait = useSimulationStore(state => state.lineUpAndWait);
@@ -65,13 +73,20 @@ export const CommandPanel: React.FC = () => {
 
   const aircraft = aircraftList.find(a => a.id === selectedAircraftId);
 
-  // Default to Departure tab when selecting a departure flight, else Vector
+  // Default to Approach/Departure tab when selecting a departure or an arrival already on approach
   useEffect(() => {
     if (!aircraft) return;
     const isDep = aircraft.status === 'Departing' || aircraft.status === 'Outbound';
-    if (isDep) {
+    const isArrOnApproach =
+      aircraft.status === 'LocalizerIntercept' ||
+      aircraft.status === 'Established' ||
+      aircraft.status === 'FinalApproach' ||
+      aircraft.ilsArmed ||
+      Boolean(aircraft.landingClearanceRequested) ||
+      Boolean(aircraft.landingCleared);
+    if (isDep || isArrOnApproach) {
       setActiveTab('approach');
-    } else if (activeTab === 'approach' && !isDep && !aircraft.ilsArmed) {
+    } else if (activeTab === 'approach' && !isDep && !isArrOnApproach) {
       setActiveTab('vector');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -127,6 +142,15 @@ export const CommandPanel: React.FC = () => {
   const rwyGeom =
     activeRunwayGeometries.find(r => r.id === aircraft.assignedRunway) ||
     activeRunwayGeometries[0];
+  const arrivalGates =
+    !isDepartureFlight && rwyGeom
+      ? evaluateArrivalGates(aircraft, rwyGeom, airport.waypoints)
+      : null;
+  const baseVectorPreview =
+    !isDepartureFlight && rwyGeom ? computeBaseLegVector(aircraft, rwyGeom) : null;
+  const finalInterceptPreview =
+    !isDepartureFlight && rwyGeom ? computeFinalInterceptVector(aircraft, rwyGeom) : null;
+
   const isApproaching =
     aircraft.ilsArmed ||
     aircraft.ilsLocalizerCaptured ||
@@ -814,34 +838,62 @@ export const CommandPanel: React.FC = () => {
               </div>
             )}
 
-            {/* ILS & Approach Guidance (shown for arrivals or emergency returns) */}
+            {/* Staged Arrival STAR, 3-Stage Intercept & Tower Landing Clearance (shown for arrivals or emergency returns) */}
             {(!isDepartureFlight || aircraft.isEmergency) && (
               <div className="p-3.5 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-[#00e5ff]">ILS &amp; RUNWAY</span>
-                  <span className="text-[10px] text-[#558f6e]">ELEV {airport.elevationFeet}ft</span>
+                  <span className="text-[11px] font-bold text-[#00e5ff]">
+                    ARRIVAL · RWY {aircraft.assignedRunway}
+                  </span>
+                  <span className="text-[10px] text-[#558f6e] tabular-nums">
+                    {arrivalGates?.starName || `ELEV ${airport.elevationFeet}ft`}
+                  </span>
                 </div>
 
-                {!isDepartureFlight && rwyGeom && (
-                  <div className="px-2.5 py-1.5 bg-[#060f0a] border border-[#143020] flex items-center justify-between text-[10px] tabular-nums">
-                    <span className="text-[#7ec29a]">
-                      {distToRwyNM.toFixed(1)} NM · Δ{interceptOffsetDeg}°
-                    </span>
-                    <span
-                      className={`font-bold ${
-                        aircraft.ilsLocalizerCaptured
-                          ? 'text-[#00ff66]'
+                {/* Filed STAR, IAF/FAF & Approach Gate Telemetry */}
+                {!isDepartureFlight && rwyGeom && arrivalGates && (
+                  <div className="p-2.5 bg-[#060f0a] border border-[#143020] space-y-1 text-[10px] tabular-nums">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#5da87d]">IAF · FAF</span>
+                      <span className="text-[#00e5ff] font-bold">
+                        {arrivalGates.iafWaypointName || '—'} · {arrivalGates.fafWaypointName || '—'}
+                      </span>
+                    </div>
+
+                    {aircraft.arrivalRouteWaypoints && aircraft.arrivalRouteWaypoints.length > 0 && (
+                      <div className="text-[#9de8bc] truncate">
+                        {aircraft.arrivalRouteWaypoints.join(' → ')} → RWY {aircraft.assignedRunway}
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between pt-1 border-t border-[#122e1f]">
+                      <span className="text-[#7ec29a]">
+                        {distToRwyNM.toFixed(1)} NM · Δ{interceptOffsetDeg}°
+                      </span>
+                      <span
+                        className={`font-bold ${
+                          arrivalGates.isLandingClearanceAuthorized
+                            ? 'text-[#00ff66]'
+                            : aircraft.landingClearanceRequested
+                            ? 'text-[#ffd166]'
+                            : aircraft.ilsLocalizerCaptured
+                            ? 'text-[#00ff66]'
+                            : courseAligned
+                            ? 'text-[#00e5ff]'
+                            : 'text-[#ffb703]'
+                        }`}
+                      >
+                        {arrivalGates.isLandingClearanceAuthorized
+                          ? 'CLR TO LAND'
+                          : aircraft.landingClearanceRequested
+                          ? 'REQ LANDING'
+                          : aircraft.ilsLocalizerCaptured
+                          ? 'LOC CAPTURED'
                           : courseAligned
-                          ? 'text-[#00e5ff]'
-                          : 'text-[#ffb703]'
-                      }`}
-                    >
-                      {aircraft.ilsLocalizerCaptured
-                        ? 'LOC CAPTURED'
-                        : courseAligned
-                        ? 'CAPTURE READY'
-                        : 'NEEDS VECTOR'}
-                    </span>
+                          ? 'CAPTURE READY'
+                          : 'NEEDS VECTOR'}
+                      </span>
+                    </div>
                   </div>
                 )}
 
@@ -874,24 +926,110 @@ export const CommandPanel: React.FC = () => {
                   </div>
                 )}
 
-                {!isDepartureFlight && (
+                {/* Stage 1: Cleared STAR via IAF (Auto-Transition to ILS) */}
+                {!isDepartureFlight && arrivalGates && (
                   <button
                     type="button"
-                    onClick={() => vectorToIntercept(aircraft.id, aircraft.assignedRunway)}
-                    className="w-full py-2 bg-[#0b2f38] hover:bg-[#114552] text-[#00e5ff] border border-[#00e5ff]/60 font-bold flex items-center justify-center gap-1.5 transition-colors"
+                    disabled={!arrivalGates.starName && (!aircraft.arrivalRouteWaypoints || aircraft.arrivalRouteWaypoints.length === 0)}
+                    onClick={() => clearArrivalStar(aircraft.id, true)}
+                    className={`w-full py-2 px-2 font-bold border text-[11px] transition-colors whitespace-nowrap truncate ${
+                      arrivalGates.isStarActive
+                        ? 'bg-[#0c261c] text-[#00ff66] border-[#1c593a]'
+                        : 'bg-[#0b2f38] hover:bg-[#114552] text-[#00e5ff] border-[#00e5ff]/60'
+                    }`}
                   >
-                    <RotateCw className="w-3.5 h-3.5" />
-                    <span>Vector to Final ILS {aircraft.assignedRunway}</span>
+                    {arrivalGates.isStarActive
+                      ? `1. STAR ${arrivalGates.starName || ''} Active ✓`
+                      : `1. Cleared ${arrivalGates.starName || 'STAR'} via ${arrivalGates.iafWaypointName || 'IAF'}`}
                   </button>
                 )}
 
+                {/* Stage 2: Smart 3-Stage Intercept (Base Leg & 30° Final Intercept) */}
+                {!isDepartureFlight && baseVectorPreview && finalInterceptPreview && (
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => vectorBaseLeg(aircraft.id, aircraft.assignedRunway)}
+                      className={`py-2 px-1.5 font-bold border text-[10px] transition-colors whitespace-nowrap tabular-nums ${
+                        arrivalGates?.isBaseVectorActive
+                          ? 'bg-[#113d2e] border-[#00ff66] text-[#00ff66]'
+                          : 'bg-[#0b252d] hover:bg-[#103844] text-[#8fe9ff] border-[#1c5769]'
+                      }`}
+                    >
+                      2a. {baseVectorPreview.side === 'LEFT' ? 'L' : 'R'} Base{' '}
+                      {String(baseVectorPreview.heading).padStart(3, '0')}°
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => vectorFinalIntercept(aircraft.id, aircraft.assignedRunway)}
+                      className={`py-2 px-1.5 font-bold border text-[10px] transition-colors whitespace-nowrap tabular-nums ${
+                        arrivalGates?.isFinalInterceptActive
+                          ? 'bg-[#113d2e] border-[#00ff66] text-[#00ff66]'
+                          : 'bg-[#0b2f38] hover:bg-[#114552] text-[#00e5ff] border-[#00e5ff]/60'
+                      }`}
+                    >
+                      2b. Intercept {String(finalInterceptPreview.heading).padStart(3, '0')}°
+                    </button>
+                  </div>
+                )}
+
+                {/* Stage 3: Cleared ILS Approach (Primary Active Runway) */}
+                <button
+                  type="button"
+                  onClick={() => clearILS(aircraft.id, aircraft.assignedRunway)}
+                  className={`w-full py-2 px-2 font-bold border text-[11px] transition-colors whitespace-nowrap ${
+                    aircraft.ilsLocalizerCaptured
+                      ? 'bg-[#0c261c] text-[#00ff66] border-[#1c593a]'
+                      : aircraft.ilsArmed
+                      ? 'bg-[#113d2e] text-white border-[#00e5ff]'
+                      : 'bg-[#0d2a20] hover:bg-[#144232] text-[#00e5ff] border-[#1f634a]'
+                  }`}
+                >
+                  {aircraft.ilsLocalizerCaptured
+                    ? `3. ILS RWY ${aircraft.assignedRunway} Established ✓`
+                    : aircraft.ilsArmed
+                    ? `3. Cleared ILS RWY ${aircraft.assignedRunway} (Armed)`
+                    : `3. Cleared ILS Approach RWY ${aircraft.assignedRunway}`}
+                </button>
+
+                {/* Stage 4: Mandatory Tower Cleared to Land Gate */}
+                {(() => {
+                  const canClear = Boolean(arrivalGates?.canClearToLand || aircraft.isEmergency);
+                  const isAuthorized = Boolean(arrivalGates?.isLandingClearanceAuthorized);
+                  const isRequested = Boolean(aircraft.landingClearanceRequested) && !isAuthorized;
+                  return (
+                    <button
+                      type="button"
+                      disabled={!canClear || isAuthorized}
+                      onClick={() => clearToLand(aircraft.id, aircraft.assignedRunway)}
+                      className={`w-full py-2 px-2 font-bold border text-[11px] transition-colors whitespace-nowrap ${
+                        isAuthorized
+                          ? 'bg-[#124529] text-[#00ff66] border-[#00ff66] cursor-default'
+                          : isRequested && canClear
+                          ? 'bg-[#3b2c0a] hover:bg-[#523d0d] text-[#ffd166] border-[#ffb703]'
+                          : canClear
+                          ? 'bg-[#0f3322] hover:bg-[#164d33] text-[#85f5b0] border-[#298050]'
+                          : 'bg-[#0a1710] text-[#356147] border-[#143020] cursor-not-allowed'
+                      }`}
+                    >
+                      {isAuthorized
+                        ? `4. Cleared to Land RWY ${aircraft.assignedRunway} ✓`
+                        : isRequested
+                        ? `4. Cleared to Land RWY ${aircraft.assignedRunway} (REQ)`
+                        : `4. Cleared to Land RWY ${aircraft.assignedRunway}`}
+                    </button>
+                  );
+                })()}
+
+                {/* Runway & Alternate ILS Quick Selector */}
                 <div className="grid grid-cols-2 gap-1.5">
                   {approachRunways.map(rwy => (
                     <div key={rwy.id} className="flex gap-0.5">
                       <button
                         type="button"
                         onClick={() => clearILS(aircraft.id, rwy.id)}
-                        className={`flex-1 py-1.5 px-1.5 border font-semibold transition-colors text-[10px] ${
+                        className={`flex-1 py-1.5 px-1.5 border font-semibold transition-colors text-[10px] whitespace-nowrap ${
                           aircraft.ilsArmed && aircraft.assignedRunway === rwy.id
                             ? 'bg-[#113d2e] border-[#00e5ff] text-white'
                             : rwy.id === activeLandingRunwayId
@@ -921,7 +1059,7 @@ export const CommandPanel: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => goAround(aircraft.id)}
-                    className="w-full py-2 bg-[#361114] hover:bg-[#4d181c] text-[#ff6b6b] border border-[#ff3344]/70 font-bold flex items-center justify-center gap-1.5 transition-colors"
+                    className="w-full py-2 bg-[#361114] hover:bg-[#4d181c] text-[#ff6b6b] border border-[#ff3344]/70 font-bold flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
                   >
                     <AlertOctagon className="w-3.5 h-3.5" />
                     <span>Mandatory Go-Around</span>

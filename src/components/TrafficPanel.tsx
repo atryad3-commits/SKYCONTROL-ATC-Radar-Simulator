@@ -345,8 +345,24 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                 const isDeparture = ac.status === 'Departing' || ac.status === 'Outbound';
                 const phaseText = ac.isEmergency
                   ? '7700'
+                  : !isDeparture && ac.status === 'Landed'
+                  ? ac.flightPhase === 'TAXI_EXIT'
+                    ? 'VACATED'
+                    : 'ROLLOUT'
+                  : !isDeparture && ac.landingCleared
+                  ? 'CLR LAND'
+                  : !isDeparture && ac.landingClearanceRequested
+                  ? 'REQ LAND'
                   : ac.status === 'FinalApproach'
                   ? 'FINAL'
+                  : ac.flightPhase === 'LOCALIZER_ESTABLISHED' || ac.ilsLocalizerCaptured
+                  ? 'LOC'
+                  : ac.flightPhase === 'FINAL_INTERCEPT'
+                  ? 'INTCPT'
+                  : ac.flightPhase === 'BASE_VECTOR'
+                  ? 'BASE'
+                  : ac.flightPhase === 'STAR_ENROUTE'
+                  ? 'STAR'
                   : ac.flightPhase === 'HANDOFF_READY'
                   ? 'HANDOFF'
                   : ac.flightPhase === 'EXIT_ROUTING'
@@ -396,13 +412,21 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                         className={`text-[10px] font-semibold ${
                           ac.isEmergency
                             ? 'text-[#ff4d4d]'
-                            : ac.flightPhase === 'HANDOFF_READY'
+                            : ac.flightPhase === 'HANDOFF_READY' || (!isDeparture && ac.landingCleared)
                             ? 'text-[#00ff66]'
+                            : !isDeparture && ac.landingClearanceRequested
+                            ? 'text-[#ffd166]'
                             : ac.status === 'Established' ||
                               ac.status === 'FinalApproach' ||
-                              ac.flightPhase === 'EXIT_ROUTING'
+                              ac.flightPhase === 'EXIT_ROUTING' ||
+                              ac.flightPhase === 'STAR_ENROUTE' ||
+                              ac.flightPhase === 'FINAL_INTERCEPT'
                             ? 'text-[#00e5ff]'
-                            : trackStatus === 'STALE' || trackStatus === 'LOST' || ac.flightPhase === 'LINEUP' || ac.flightPhase === 'HOLD_SHORT'
+                            : trackStatus === 'STALE' ||
+                              trackStatus === 'LOST' ||
+                              ac.flightPhase === 'LINEUP' ||
+                              ac.flightPhase === 'HOLD_SHORT' ||
+                              ac.flightPhase === 'BASE_VECTOR'
                             ? 'text-[#ffd166]'
                             : 'text-[#77bd94]'
                         }`}
@@ -424,14 +448,20 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                       </span>
                     </div>
 
-                    {(ac.assignedWaypoint || ac.assignedExitWaypoint || ac.ilsArmed || ac.assignedRunway) && (
+                    {(ac.assignedWaypoint ||
+                      ac.assignedExitWaypoint ||
+                      ac.assignedStarName ||
+                      ac.ilsArmed ||
+                      ac.assignedRunway) && (
                       <div className="flex items-center justify-between text-[10px] text-[#558f6e] mt-0.5 tabular-nums">
                         <span className="truncate">
                           {isDeparture && ac.assignedExitWaypoint
                             ? `${ac.assignedWaypoint ? `DIR ${ac.assignedWaypoint}` : `EXIT ${ac.assignedExitWaypoint}`} · RWY ${ac.assignedRunway}`
                             : ac.assignedWaypoint
-                            ? `DIR ${ac.assignedWaypoint}`
-                            : `RWY ${ac.assignedRunway}${ac.ilsArmed ? ' ILS' : ''}`}
+                            ? `${ac.assignedStarName ? `${ac.assignedStarName} → ` : 'DIR '}${ac.assignedWaypoint}`
+                            : `${ac.assignedStarName ? `${ac.assignedStarName} · ` : ''}RWY ${ac.assignedRunway}${
+                                ac.landingCleared ? ' CLR' : ac.ilsArmed ? ' ILS' : ''
+                              }`}
                         </span>
                         <span>TGT {ac.targetAltitude}ft</span>
                       </div>
@@ -536,6 +566,8 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                         {ac.origin} → {ac.destination}
                         {!isArrival && ac.assignedExitWaypoint
                           ? ` · EXIT ${ac.assignedExitWaypoint}`
+                          : isArrival && ac.assignedIafWaypoint
+                          ? ` · IAF ${ac.assignedIafWaypoint}`
                           : ''}
                       </span>
                       <span>
@@ -553,13 +585,17 @@ export const TrafficPanel: React.FC<TrafficPanelProps> = ({ onOpenAudioStudio })
                       </span>
                       <span
                         className={
-                          !isArrival && ac.flightPhase === 'HANDOFF_READY'
-                            ? 'text-[#00ff66] font-bold'
+                          isArrival && ac.landingClearanceRequested && !ac.landingCleared
+                            ? 'text-[#ffd166] font-bold'
                             : 'text-[#00ff66]'
                         }
                       >
                         {!isArrival && ac.assignedSidName
                           ? `${ac.assignedSidName} · RWY ${ac.assignedRunway}`
+                          : isArrival && ac.assignedStarName
+                          ? `${ac.assignedStarName} · RWY ${ac.assignedRunway}${
+                              ac.landingCleared ? ' CLR' : ac.landingClearanceRequested ? ' REQ' : ''
+                            }`
                           : `RWY ${ac.assignedRunway}`}
                       </span>
                     </div>

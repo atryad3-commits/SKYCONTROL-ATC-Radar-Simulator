@@ -1152,7 +1152,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         }
 
         // Compute ordered waypoints along cleared route: assignedWaypoint + routeQueue,
-        // or filed SID exit preview for departures awaiting Proceed on Exit
+        // or filed SID exit preview / STAR arrival preview when no active route override is cleared
         const routeSteps: Array<{ x: number; y: number; label: string; isDestination?: boolean; isExitPreview?: boolean }> = [];
         const isDepartureAc = ac.status === 'Departing' || ac.status === 'Outbound';
         const queuedNames = [
@@ -1164,8 +1164,20 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           isDepartureAc &&
           ac.flightPhase !== 'HANDOFF_READY' &&
           Boolean(ac.departureRouteWaypoints && ac.departureRouteWaypoints.length > 0);
+        const useArrivalPreview =
+          queuedNames.length === 0 &&
+          !isDepartureAc &&
+          !ac.ilsArmed &&
+          !ac.ilsLocalizerCaptured &&
+          ac.flightPhase !== 'BASE_VECTOR' &&
+          ac.flightPhase !== 'FINAL_INTERCEPT' &&
+          ac.status !== 'Landed' &&
+          Boolean(ac.arrivalRouteWaypoints && ac.arrivalRouteWaypoints.length > 0);
+        const isProcedurePreview = useDeparturePreview || useArrivalPreview;
         const displayWaypointNames = useDeparturePreview
           ? ac.departureRouteWaypoints || []
+          : useArrivalPreview
+          ? ac.arrivalRouteWaypoints || []
           : queuedNames;
 
         for (let qIdx = 0; qIdx < displayWaypointNames.length; qIdx++) {
@@ -1173,6 +1185,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           const wp = airport.waypoints.find(w => w.name === wpName);
           if (wp) {
             const isExitEnd = isDepartureAc && wpName === ac.assignedExitWaypoint;
+            const isIaf = !isDepartureAc && wpName === ac.assignedIafWaypoint;
+            const isFaf = !isDepartureAc && wpName === ac.arrivalFafWaypoint;
             routeSteps.push({
               x: wp.position.x,
               y: wp.position.y,
@@ -1180,11 +1194,17 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
                 ? isExitEnd
                   ? `SID EXIT ${wp.name}`
                   : `SID ${wp.name}`
+                : useArrivalPreview
+                ? isFaf
+                  ? `FAF ${wp.name}`
+                  : isIaf
+                  ? `IAF ${wp.name}`
+                  : `STAR ${wp.name}`
                 : qIdx === 0
                 ? `FIX ${wp.name}`
                 : `LEG ${qIdx + 1}: ${wp.name}`,
               isDestination: isExitEnd,
-              isExitPreview: useDeparturePreview,
+              isExitPreview: isProcedurePreview,
             });
           }
         }
@@ -1204,8 +1224,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         }
 
         if (routeSteps.length > 0) {
-          ctx.lineWidth = useDeparturePreview ? 1.4 : 2.0;
-          ctx.setLineDash(useDeparturePreview ? [3, 5] : [6, 4]);
+          ctx.lineWidth = isProcedurePreview ? 1.4 : 2.0;
+          ctx.setLineDash(isProcedurePreview ? [3, 5] : [6, 4]);
 
           let prevWorld = { x: displayX, y: displayY };
           let currPos = pos;
@@ -1716,27 +1736,44 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           : ac.flightPhase === 'TAKEOFF_ROLL' || ac.flightPhase === 'ROTATION' || ac.flightPhase === 'LIFTOFF'
           ? 'T/O'
           : ac.status.slice(0, 3).toUpperCase();
-      const phaseTag = isEmergency
-        ? 'EMER'
+      const arrPhaseCode = ac.landingCleared
+        ? 'CLR'
+        : ac.landingClearanceRequested
+        ? 'REQ'
         : ac.ilsGlideslopeCaptured
         ? 'GS'
         : ac.ilsLocalizerCaptured
         ? 'LOC'
+        : ac.flightPhase === 'FINAL_INTERCEPT'
+        ? 'INT'
+        : ac.flightPhase === 'BASE_VECTOR'
+        ? 'BAS'
+        : ac.flightPhase === 'STAR_ENROUTE'
+        ? 'STR'
+        : ac.status.slice(0, 3).toUpperCase();
+      const phaseTag = isEmergency
+        ? 'EMER'
         : isDepTag
         ? depPhaseCode
-        : ac.status.slice(0, 3).toUpperCase();
+        : arrPhaseCode;
       const hdgStr = extTag && trkDeg !== hdg ? `${hdg}/${trkDeg}°` : `${hdg}°`;
       ctx.font = '9px "IBM Plex Mono", monospace';
       ctx.fillStyle = isEmergency
         ? '#ff6b6b'
-        : ac.flightPhase === 'HANDOFF_READY'
+        : ac.flightPhase === 'HANDOFF_READY' || (!isDepTag && ac.landingCleared)
         ? '#00ff66'
-        : ac.ilsGlideslopeCaptured || ac.flightPhase === 'EXIT_ROUTING'
+        : !isDepTag && (ac.landingClearanceRequested || ac.flightPhase === 'BASE_VECTOR')
+        ? '#ffd166'
+        : ac.ilsGlideslopeCaptured ||
+          ac.ilsLocalizerCaptured ||
+          ac.flightPhase === 'EXIT_ROUTING' ||
+          ac.flightPhase === 'STAR_ENROUTE' ||
+          ac.flightPhase === 'FINAL_INTERCEPT'
         ? '#00e5ff'
         : '#73b890';
       ctx.fillText(`${gs}kt ${hdgStr} ${phaseTag}`, tagX + 4, tagY + 25);
 
-      // Line 4: Tactical Route / Exit Gate / Runway / Distance Readout
+      // Line 4: Tactical Route / Exit Gate / Landing Clearance / Runway / Distance Readout
       const distStr =
         typeof ac.distanceToThreshold === 'number'
           ? `${ac.distanceToThreshold.toFixed(1)}NM`
@@ -1749,14 +1786,22 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           : ac.assignedExitWaypoint
           ? `EXIT ${ac.assignedExitWaypoint}`
           : `R${ac.assignedRunway}`;
+      const arrRouteChip = ac.landingCleared
+        ? `CLR LND ${ac.assignedRunway}`
+        : ac.landingClearanceRequested
+        ? `REQ LND ${ac.assignedRunway}`
+        : ac.assignedWaypoint
+        ? `→${ac.assignedWaypoint}`
+        : `R${ac.assignedRunway}`;
       if (isSelected) {
         ctx.font = 'bold 9px "IBM Plex Mono", monospace';
-        ctx.fillStyle = ac.flightPhase === 'HANDOFF_READY' ? '#00ff66' : '#00e5ff';
-        const routeChip = isDepTag
-          ? depRouteChip
-          : ac.assignedWaypoint
-          ? `→${ac.assignedWaypoint}`
-          : `R${ac.assignedRunway}`;
+        ctx.fillStyle =
+          ac.flightPhase === 'HANDOFF_READY' || (!isDepTag && ac.landingCleared)
+            ? '#00ff66'
+            : !isDepTag && ac.landingClearanceRequested
+            ? '#ffd166'
+            : '#00e5ff';
+        const routeChip = isDepTag ? depRouteChip : arrRouteChip;
         ctx.fillText(
           extTag
             ? `${ac.origin}→${ac.destination} [${routeChip} ${distStr}]`
@@ -1767,13 +1812,15 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       } else if (extTag) {
         ctx.font = '9px "IBM Plex Mono", monospace';
         ctx.fillStyle =
-          ac.flightPhase === 'HANDOFF_READY'
+          ac.flightPhase === 'HANDOFF_READY' || (!isDepTag && ac.landingCleared)
             ? '#00ff66'
-            : ac.status === 'Departing'
+            : ac.status === 'Departing' || (!isDepTag && ac.landingClearanceRequested)
             ? '#ffd166'
             : '#58b384';
         const navHint = isDepTag
           ? depRouteChip
+          : ac.landingCleared || ac.landingClearanceRequested
+          ? arrRouteChip
           : ac.assignedWaypoint
           ? `→${ac.assignedWaypoint}`
           : `RWY ${ac.assignedRunway}`;
