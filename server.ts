@@ -8,6 +8,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { createServer as createViteServer } from 'vite';
 import { localTtsService } from './server/localTtsService';
+import { LocalAccountManager } from './server/localAccountManager';
 import { VoiceProfileUpdatePatch } from './shared/ttsTypes';
 import {
   AudioLibraryAssetStatus,
@@ -21,6 +22,7 @@ const PORT = 3000;
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+  const localAccountManager = new LocalAccountManager();
 
   // Serve pre-generated voice profile WAV samples & pre-generated Audio Library statically
   app.use('/voice-samples', express.static(localTtsService.samplesDir));
@@ -369,6 +371,187 @@ async function startServer() {
 
   app.get('/api/audio/migrations', (_req, res) => {
     res.json(localTtsService.getDatabaseState());
+  });
+
+  // =========================================================================
+  // Offline Local Controller Auth & Isolated Storage (/api/local-auth/*)
+  // =========================================================================
+
+  const extractSessionToken = (req: express.Request): string | null => {
+    const header = req.header('x-local-session');
+    if (header) return header.trim();
+    const authHdr = req.header('authorization');
+    if (authHdr && authHdr.toLowerCase().startsWith('bearer ')) {
+      return authHdr.slice(7).trim();
+    }
+    return null;
+  };
+
+  app.post('/api/local-auth/register', (req, res) => {
+    try {
+      const { identifier, password, callsign } = req.body || {};
+      const out = localAccountManager.registerAccount({
+        identifier: String(identifier || ''),
+        password: String(password || ''),
+        callsign: String(callsign || ''),
+      });
+      res.status(201).json(out);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Offline registration failed.';
+      const status = message.includes('already exists') ? 409 : 400;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/local-auth/login', (req, res) => {
+    try {
+      const { identifier, password } = req.body || {};
+      const out = localAccountManager.loginAccount({
+        identifier: String(identifier || ''),
+        password: String(password || ''),
+      });
+      res.json(out);
+    } catch (err) {
+      res.status(401).json({
+        error: err instanceof Error ? err.message : 'Offline sign-in failed.',
+      });
+    }
+  });
+
+  app.post('/api/local-auth/logout', (req, res) => {
+    localAccountManager.logoutSession(extractSessionToken(req));
+    res.json({ ok: true });
+  });
+
+  app.get('/api/local-auth/session', (req, res) => {
+    const bundle = localAccountManager.getSessionBundle(extractSessionToken(req));
+    if (!bundle) {
+      res.status(401).json({ error: 'Offline session expired or not signed in.' });
+      return;
+    }
+    res.json(bundle);
+  });
+
+  app.patch('/api/local-auth/profile/callsign', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    try {
+      const profile = localAccountManager.updateCallsign(uid, String(req.body?.callsign || ''));
+      res.json({ profile });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update callsign.' });
+    }
+  });
+
+  app.get('/api/local-auth/preferences', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    res.json({ preferences: localAccountManager.getPreferences(uid) });
+  });
+
+  app.put('/api/local-auth/preferences', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    try {
+      const preferences = localAccountManager.savePreferences(uid, req.body);
+      res.json({ preferences });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save preferences.' });
+    }
+  });
+
+  app.get('/api/local-auth/activities', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    const maxItems = Number(req.query.limit) || 50;
+    res.json({ activities: localAccountManager.listActivities(uid, maxItems) });
+  });
+
+  app.post('/api/local-auth/activities', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    try {
+      const result = localAccountManager.recordActivityAndStats(uid, req.body);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to record activity.' });
+    }
+  });
+
+  app.delete('/api/local-auth/activities/:id', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    localAccountManager.deleteActivity(uid, req.params.id);
+    res.json({ deleted: true });
+  });
+
+  app.get('/api/local-auth/scenarios', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    res.json({ scenarios: localAccountManager.listScenarios(uid) });
+  });
+
+  app.post('/api/local-auth/scenarios', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    try {
+      const scenario = localAccountManager.saveScenario(uid, req.body, false);
+      res.status(201).json({ scenario });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to save scenario.' });
+    }
+  });
+
+  app.put('/api/local-auth/scenarios/:id', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    try {
+      const scenario = localAccountManager.saveScenario(
+        uid,
+        { ...req.body, id: req.params.id },
+        true
+      );
+      res.json({ scenario });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update scenario.' });
+    }
+  });
+
+  app.delete('/api/local-auth/scenarios/:id', (req, res) => {
+    const uid = localAccountManager.resolveSessionUid(extractSessionToken(req));
+    if (!uid) {
+      res.status(401).json({ error: 'Offline session required.' });
+      return;
+    }
+    localAccountManager.deleteScenario(uid, req.params.id);
+    res.json({ deleted: true });
   });
 
   // =========================================================================

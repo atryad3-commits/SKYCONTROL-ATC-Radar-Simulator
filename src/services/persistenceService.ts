@@ -1,13 +1,23 @@
 /**
- * SKYCONTROL - Hybrid Auth & Persistence Service
- * Supports both Cloud Accounts (Google Sign-In + Firestore) and Guest Mode (localStorage).
+ * SKYCONTROL - Per-User Firebase Auth & Cloud Firestore Persistence Service
+ * Enforces strict authenticated user isolation for:
+ *   - Email/Password & Google Sign-In credentials
+ *   - Controller Career Profile & Academy Certification (/users/{uid})
+ *   - Personal Radar, Route & Audio Preferences (/users/{uid}/settings/preferences)
+ *   - Immutable Activity Logbook (/users/{uid}/activities/{activityId})
+ *   - User-Owned Custom Scenarios (/scenarios/{scenarioId})
  */
 
 import {
   User,
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signOut,
+  updateProfile,
 } from 'firebase/auth';
 import {
   collection,
@@ -15,6 +25,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   query,
   serverTimestamp,
   setDoc,
@@ -22,10 +33,36 @@ import {
   where,
 } from 'firebase/firestore';
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase/config';
-import { CustomScenarioConfig, MissionId, UserProfileData } from '../types';
-
-const GUEST_PROFILE_KEY = 'skycontrol_guest_profile_v1';
-const GUEST_SCENARIOS_KEY = 'skycontrol_guest_scenarios_v1';
+import { ALL_AIRPORT_PROFILES, getAirportProfile } from '../airports/airportsRegistry';
+import { computeDefaultAirportVisibility } from '../airports/procedures';
+import { DEFAULT_RADAR_THEME_ID, normalizeRadarThemeId } from '../utils/radarThemes';
+import {
+  ActivityEntry,
+  ActivityKind,
+  AirportNavVisibility,
+  CustomScenarioConfig,
+  MissionId,
+  RadarLayersConfig,
+  RadioQualityPresetKey,
+  UserAuthProvider,
+  UserPreferencesData,
+  UserProfileData,
+} from '../types';
+import {
+  offlineDeleteActivity,
+  offlineDeleteScenario,
+  offlineLoadActivities,
+  offlineLoadOrCreatePreferences,
+  offlineLoadScenarios,
+  offlineRecordActivityAndStats,
+  offlineRegisterAccount,
+  offlineSavePreferences,
+  offlineSaveScenario,
+  offlineSignInAccount,
+  offlineSignOutAccount,
+  offlineUpdateCallsign,
+  restoreOfflineSessionBundle,
+} from './offlineAccountService';
 
 const ALL_MISSIONS: MissionId[] = [
   'mission_1',
@@ -35,9 +72,52 @@ const ALL_MISSIONS: MissionId[] = [
   'mission_5',
 ];
 
-const VALID_AIRPORTS = new Set(['EGLL', 'OIII', 'KJFK', 'TRN1', 'TRN2']);
+export const ALL_VALID_AIRPORT_ICAOS = [
+  'EGLL',
+  'OIII',
+  'KJFK',
+  'OIIE',
+  'OISS',
+  'OMDB',
+  'LFPG',
+  'EHAM',
+  'EDDF',
+  'LSZH',
+  'EGJJ',
+  'KORD',
+  'KSFO',
+  'RJTT',
+  'TRN1',
+  'TRN2',
+] as const;
+
+const VALID_AIRPORTS = new Set<string>(ALL_VALID_AIRPORT_ICAOS);
 const VALID_DIFFICULTIES = new Set(['Beginner', 'Intermediate', 'Advanced', 'Master']);
 const VALID_PRECIP = new Set(['None', 'Light Rain', 'Rain', 'Fog']);
+const VALID_RADIO_PRESETS = new Set<RadioQualityPresetKey>([
+  'clear_communication',
+  'normal_aviation',
+  'weak_signal',
+  'heavy_interference',
+  'emergency_transmission',
+]);
+
+export const DEFAULT_RADAR_LAYERS_CONFIG: RadarLayersConfig = {
+  terrain: true,
+  rangeRings: true,
+  runways: true,
+  holdingStacks: true,
+  waypointLabels: true,
+  extendedCenterlines: true,
+  trails: true,
+  speedVectors: true,
+  radarSweep: true,
+  starCorridors: true,
+  sidCorridors: true,
+  procedureRestrictions: true,
+  tmaBoundary: true,
+  extendedTargetTags: true,
+};
 
 function sanitizeId(raw: string): string {
   const cleaned = raw.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
@@ -56,107 +136,170 @@ export function generateCertificateId(uid: string): string {
   return `SKY-${stamp}-${suffix}-${seq}`;
 }
 
-// ---------------------------------------------------------------------------
-// Guest LocalStorage Persistence
-// ---------------------------------------------------------------------------
-export function loadGuestProfile(fallbackCallsign: string = 'GUEST-ATC'): UserProfileData | null {
-  try {
-    const raw = localStorage.getItem(GUEST_PROFILE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as UserProfileData;
-    return {
-      uid: parsed.uid || 'guest_local',
-      callsign: sanitizeCallsign(parsed.callsign || fallbackCallsign),
-      mode: 'guest',
-      certified: Boolean(parsed.certified),
-      certificateId: parsed.certificateId,
-      issuedAt: parsed.issuedAt,
-      completedMissions: Array.isArray(parsed.completedMissions)
-        ? parsed.completedMissions.filter(m => ALL_MISSIONS.includes(m)).slice(0, 5)
-        : [],
-      totalLandings: Math.max(0, Math.round(parsed.totalLandings || 0)),
-      totalDepartures: Math.max(0, Math.round(parsed.totalDepartures || 0)),
-      bestScore: Math.max(0, Math.min(100, Number(parsed.bestScore || 0))),
-    };
-  } catch {
-    return null;
-  }
+export function resolveAuthProvider(user: User): UserAuthProvider {
+  const hasPassword = user.providerData?.some(p => p.providerId === 'password');
+  const hasGoogle = user.providerData?.some(p => p.providerId === 'google.com');
+  if (hasGoogle && !hasPassword) return 'google';
+  if (hasPassword) return 'password';
+  return 'google';
 }
 
-export function createOrSaveGuestProfile(callsign: string, existing?: Partial<UserProfileData>): UserProfileData {
-  const prior = loadGuestProfile(callsign);
-  const completedMissions = Array.from(
-    new Set([...(prior?.completedMissions || []), ...(existing?.completedMissions || [])])
-  ).filter(m => ALL_MISSIONS.includes(m)).slice(0, 5);
+export function mapAuthErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string })?.code || '';
+  const combined = `${code} ${raw}`.toLowerCase();
 
-  const isCertified = ALL_MISSIONS.every(m => completedMissions.includes(m)) || Boolean(prior?.certified || existing?.certified);
-  const profile: UserProfileData = {
-    uid: prior?.uid || 'guest_local',
-    callsign: sanitizeCallsign(callsign || prior?.callsign || 'GUEST-ATC'),
-    mode: 'guest',
-    certified: isCertified,
-    certificateId: isCertified
-      ? existing?.certificateId || prior?.certificateId || generateCertificateId('GUEST')
-      : undefined,
-    issuedAt: isCertified
-      ? existing?.issuedAt || prior?.issuedAt || new Date().toISOString()
-      : undefined,
-    completedMissions,
-    totalLandings: Math.max(prior?.totalLandings || 0, existing?.totalLandings || 0),
-    totalDepartures: Math.max(prior?.totalDepartures || 0, existing?.totalDepartures || 0),
-    bestScore: Math.max(prior?.bestScore || 0, existing?.bestScore || 0),
+  if (combined.includes('auth/operation-not-allowed')) {
+    return 'Email/Password sign-in is not yet enabled in Firebase Console (Authentication -> Sign-in method -> Email/Password). Enable it there or use Google Sign-In.';
+  }
+  if (combined.includes('auth/popup-closed-by-user')) {
+    return 'Google sign-in popup was closed before completion. Please try again.';
+  }
+  if (combined.includes('auth/popup-blocked')) {
+    return 'Popup was blocked by your browser. Allow popups for this site and try again.';
+  }
+  if (combined.includes('auth/email-already-in-use')) {
+    return 'An account already exists for this email address. Switch to Sign In instead.';
+  }
+  if (combined.includes('auth/invalid-email')) {
+    return 'Please enter a valid email address.';
+  }
+  if (
+    combined.includes('auth/invalid-credential') ||
+    combined.includes('auth/wrong-password') ||
+    combined.includes('auth/user-not-found')
+  ) {
+    return 'Invalid email or password. Verify your credentials or reset your password.';
+  }
+  if (combined.includes('auth/weak-password')) {
+    return 'Password must be at least 6 characters long.';
+  }
+  if (combined.includes('auth/too-many-requests')) {
+    return 'Too many attempts. Please wait a moment before trying again.';
+  }
+  if (combined.includes('auth/network-request-failed')) {
+    return 'Network unreachable for Cloud Sign-In. Switch to Offline Local Mode below to sign in or register without internet.';
+  }
+  return err instanceof Error ? err.message : 'Authentication failed. Please try again.';
+}
+
+export function isNetworkAuthError(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string })?.code || '';
+  const combined = `${code} ${raw}`.toLowerCase();
+  return (
+    combined.includes('auth/network-request-failed') ||
+    combined.includes('the client is offline') ||
+    combined.includes('failed to fetch')
+  );
+}
+
+export function isOfflineUid(uid?: string | null): boolean {
+  return Boolean(uid && uid.startsWith('local_'));
+}
+
+export function isOfflineProfile(profile?: UserProfileData | null): boolean {
+  return Boolean(profile && (profile.authProvider === 'offline' || isOfflineUid(profile.uid)));
+}
+
+// ---------------------------------------------------------------------------
+// Offline Local Account Operations (Zero Internet Required)
+// ---------------------------------------------------------------------------
+export async function registerOfflineAccount(
+  callsign: string,
+  identifier: string,
+  password: string
+): Promise<UserProfileData> {
+  return offlineRegisterAccount(callsign, identifier, password);
+}
+
+export async function signInOfflineAccount(
+  identifier: string,
+  password: string
+): Promise<UserProfileData> {
+  return offlineSignInAccount(identifier, password);
+}
+
+export async function restoreOfflineAccountBundle(): Promise<{
+  profile: UserProfileData;
+  preferences: UserPreferencesData;
+  activities: ActivityEntry[];
+  scenarios: CustomScenarioConfig[];
+} | null> {
+  const bundle = await restoreOfflineSessionBundle();
+  if (!bundle) return null;
+  const prefs = bundle.preferences
+    ? sanitizeUserPreferences(bundle.profile.uid, bundle.preferences)
+    : buildDefaultUserPreferences(bundle.profile.uid);
+  return {
+    profile: bundle.profile,
+    preferences: prefs,
+    activities: bundle.activities,
+    scenarios: bundle.scenarios,
   };
-
-  try {
-    localStorage.setItem(GUEST_PROFILE_KEY, JSON.stringify(profile));
-  } catch {
-    // Ignore quota failures in private browsing
-  }
-  return profile;
-}
-
-export function loadGuestScenarios(): CustomScenarioConfig[] {
-  try {
-    const raw = localStorage.getItem(GUEST_SCENARIOS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as CustomScenarioConfig[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export function saveGuestScenarios(list: CustomScenarioConfig[]): void {
-  try {
-    localStorage.setItem(GUEST_SCENARIOS_KEY, JSON.stringify(list));
-  } catch {
-    // Ignore storage error
-  }
 }
 
 // ---------------------------------------------------------------------------
-// Cloud Firebase Auth & Firestore Operations
+// Firebase Auth Credentials Operations
 // ---------------------------------------------------------------------------
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
   return result.user;
 }
 
+export async function signInWithEmailPassword(email: string, password: string): Promise<User> {
+  const result = await signInWithEmailAndPassword(auth, email.trim(), password);
+  return result.user;
+}
+
+export async function registerWithEmailPassword(
+  callsign: string,
+  email: string,
+  password: string
+): Promise<User> {
+  const cleanCallsign = sanitizeCallsign(callsign);
+  const result = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  await updateProfile(result.user, { displayName: cleanCallsign }).catch(() => undefined);
+  await sendEmailVerification(result.user).catch(() => undefined);
+  return result.user;
+}
+
+export async function resendVerificationEmail(user: User): Promise<void> {
+  await sendEmailVerification(user);
+}
+
+export async function reloadCurrentUser(): Promise<User | null> {
+  if (!auth.currentUser) return null;
+  await auth.currentUser.reload();
+  return auth.currentUser;
+}
+
+export async function sendAccountPasswordReset(email: string): Promise<void> {
+  await sendPasswordResetEmail(auth, email.trim());
+}
+
 export async function signOutAccount(): Promise<void> {
-  await signOut(auth);
+  await offlineSignOutAccount();
+  if (auth.currentUser) {
+    await signOut(auth);
+  }
 }
 
 export function subscribeAuth(callback: (user: User | null) => void): () => void {
   return onAuthStateChanged(auth, callback);
 }
 
+// ---------------------------------------------------------------------------
+// Controller Career Profile (/users/{uid})
+// ---------------------------------------------------------------------------
 export async function loadOrCreateCloudProfile(
   user: User,
-  guestToMerge?: UserProfileData | null
+  preferredCallsign?: string
 ): Promise<UserProfileData> {
   const uid = sanitizeId(user.uid);
   const path = `users/${uid}`;
   const docRef = doc(db, 'users', uid);
+  const resolvedProvider = resolveAuthProvider(user);
 
   let snap;
   try {
@@ -171,47 +314,76 @@ export async function loadOrCreateCloudProfile(
       ? (data.completedMissions as MissionId[]).filter(m => ALL_MISSIONS.includes(m))
       : [];
 
-    return {
+    const legacyNeedsUpgrade =
+      !data.authProvider ||
+      typeof data.totalGoArounds !== 'number' ||
+      typeof data.totalViolations !== 'number' ||
+      typeof data.totalFlightSeconds !== 'number' ||
+      typeof data.sessionsCompleted !== 'number';
+
+    const profile: UserProfileData = {
       uid,
-      callsign: typeof data.callsign === 'string' ? data.callsign : sanitizeCallsign(user.displayName || 'CONTROLLER'),
-      mode: 'google',
+      callsign:
+        typeof data.callsign === 'string'
+          ? sanitizeCallsign(data.callsign)
+          : sanitizeCallsign(user.displayName || user.email?.split('@')[0] || 'CONTROLLER'),
+      authProvider:
+        data.authProvider === 'password' || data.authProvider === 'google'
+          ? data.authProvider
+          : resolvedProvider,
       email: user.email,
+      emailVerified: Boolean(user.emailVerified),
       certified: Boolean(data.certified),
       certificateId: typeof data.certificateId === 'string' ? data.certificateId : undefined,
       issuedAt: typeof data.issuedAt === 'string' ? data.issuedAt : undefined,
       completedMissions: completed,
       totalLandings: typeof data.totalLandings === 'number' ? data.totalLandings : 0,
       totalDepartures: typeof data.totalDepartures === 'number' ? data.totalDepartures : 0,
+      totalGoArounds: typeof data.totalGoArounds === 'number' ? data.totalGoArounds : 0,
+      totalViolations: typeof data.totalViolations === 'number' ? data.totalViolations : 0,
+      totalFlightSeconds: typeof data.totalFlightSeconds === 'number' ? data.totalFlightSeconds : 0,
+      sessionsCompleted: typeof data.sessionsCompleted === 'number' ? data.sessionsCompleted : 0,
       bestScore: typeof data.bestScore === 'number' ? data.bestScore : 0,
     };
+
+    if (legacyNeedsUpgrade) {
+      try {
+        await updateDoc(docRef, {
+          authProvider: profile.authProvider,
+          totalGoArounds: profile.totalGoArounds,
+          totalViolations: profile.totalViolations,
+          totalFlightSeconds: profile.totalFlightSeconds,
+          sessionsCompleted: profile.sessionsCompleted,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, path);
+      }
+    }
+
+    return profile;
   }
 
-  const mergedMissions: MissionId[] = Array.from(
-    new Set((guestToMerge?.completedMissions || []).filter(m => ALL_MISSIONS.includes(m)))
-  ).slice(0, 5);
-  const allDone = ALL_MISSIONS.every(m => mergedMissions.includes(m));
   const defaultCallsign = sanitizeCallsign(
-    guestToMerge?.callsign && guestToMerge.callsign !== 'GUEST-ATC'
-      ? guestToMerge.callsign
-      : user.displayName || user.email?.split('@')[0] || 'CONTROLLER'
+    preferredCallsign || user.displayName || user.email?.split('@')[0] || 'CONTROLLER'
   );
 
   const payload: Record<string, unknown> = {
     uid,
     callsign: defaultCallsign,
-    certified: allDone,
-    completedMissions: mergedMissions,
-    totalLandings: Math.max(0, Math.round(guestToMerge?.totalLandings || 0)),
-    totalDepartures: Math.max(0, Math.round(guestToMerge?.totalDepartures || 0)),
-    bestScore: Math.max(0, Math.min(100, Number(guestToMerge?.bestScore || 0))),
+    authProvider: resolvedProvider,
+    certified: false,
+    completedMissions: [],
+    totalLandings: 0,
+    totalDepartures: 0,
+    totalGoArounds: 0,
+    totalViolations: 0,
+    totalFlightSeconds: 0,
+    sessionsCompleted: 0,
+    bestScore: 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
-
-  if (allDone) {
-    payload.certificateId = guestToMerge?.certificateId || generateCertificateId(uid);
-    payload.issuedAt = guestToMerge?.issuedAt || new Date().toISOString();
-  }
 
   try {
     await setDoc(docRef, payload);
@@ -222,15 +394,18 @@ export async function loadOrCreateCloudProfile(
   return {
     uid,
     callsign: defaultCallsign,
-    mode: 'google',
+    authProvider: resolvedProvider,
     email: user.email,
-    certified: allDone,
-    certificateId: payload.certificateId as string | undefined,
-    issuedAt: payload.issuedAt as string | undefined,
-    completedMissions: mergedMissions,
-    totalLandings: payload.totalLandings as number,
-    totalDepartures: payload.totalDepartures as number,
-    bestScore: payload.bestScore as number,
+    emailVerified: Boolean(user.emailVerified),
+    certified: false,
+    completedMissions: [],
+    totalLandings: 0,
+    totalDepartures: 0,
+    totalGoArounds: 0,
+    totalViolations: 0,
+    totalFlightSeconds: 0,
+    sessionsCompleted: 0,
+    bestScore: 0,
   };
 }
 
@@ -238,11 +413,11 @@ export async function updateControllerCallsign(
   profile: UserProfileData,
   newCallsign: string
 ): Promise<UserProfileData> {
-  const callsign = sanitizeCallsign(newCallsign);
-  if (profile.mode === 'guest') {
-    return createOrSaveGuestProfile(callsign, profile);
+  if (isOfflineProfile(profile)) {
+    return offlineUpdateCallsign(profile, newCallsign);
   }
 
+  const callsign = sanitizeCallsign(newCallsign);
   const path = `users/${profile.uid}`;
   const docRef = doc(db, 'users', profile.uid);
   try {
@@ -250,6 +425,9 @@ export async function updateControllerCallsign(
       callsign,
       updatedAt: serverTimestamp(),
     });
+    if (auth.currentUser) {
+      await updateProfile(auth.currentUser, { displayName: callsign }).catch(() => undefined);
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, path);
   }
@@ -257,88 +435,468 @@ export async function updateControllerCallsign(
   return { ...profile, callsign };
 }
 
-export async function persistMissionCompletion(
+// ---------------------------------------------------------------------------
+// Per-User Preferences (/users/{uid}/settings/preferences)
+// ---------------------------------------------------------------------------
+export function buildDefaultPerAirportVisibilityMap(): Record<string, AirportNavVisibility> {
+  const map: Record<string, AirportNavVisibility> = {};
+  for (const prof of ALL_AIRPORT_PROFILES) {
+    map[prof.airport.icao] = computeDefaultAirportVisibility(prof.airport);
+  }
+  return map;
+}
+
+export function sanitizePerAirportVisibilityMap(
+  raw?: Record<string, Partial<AirportNavVisibility>> | null
+): Record<string, AirportNavVisibility> {
+  const defaults = buildDefaultPerAirportVisibilityMap();
+  if (!raw || typeof raw !== 'object') return defaults;
+
+  const result: Record<string, AirportNavVisibility> = { ...defaults };
+  for (const prof of ALL_AIRPORT_PROFILES) {
+    const icao = prof.airport.icao;
+    const saved = raw[icao];
+    if (!saved || typeof saved !== 'object') continue;
+    const validStars = new Set((prof.airport.approachRoutes || []).map(r => r.id));
+    const validSids = new Set((prof.airport.departureRoutes || []).map(r => r.id));
+    const validWps = new Set(prof.airport.waypoints.map(w => w.name));
+
+    result[icao] = {
+      visibleStarIds: Array.isArray(saved.visibleStarIds)
+        ? saved.visibleStarIds.filter(id => typeof id === 'string' && validStars.has(id)).slice(0, 64)
+        : defaults[icao].visibleStarIds,
+      visibleSidIds: Array.isArray(saved.visibleSidIds)
+        ? saved.visibleSidIds.filter(id => typeof id === 'string' && validSids.has(id)).slice(0, 64)
+        : defaults[icao].visibleSidIds,
+      visibleWaypoints: Array.isArray(saved.visibleWaypoints)
+        ? saved.visibleWaypoints.filter(n => typeof n === 'string' && validWps.has(n)).slice(0, 64)
+        : defaults[icao].visibleWaypoints,
+    };
+  }
+  return result;
+}
+
+export function sanitizeRadarLayers(raw?: Partial<RadarLayersConfig> | null): RadarLayersConfig {
+  const base = { ...DEFAULT_RADAR_LAYERS_CONFIG };
+  if (!raw || typeof raw !== 'object') return base;
+  return {
+    terrain: typeof raw.terrain === 'boolean' ? raw.terrain : base.terrain,
+    rangeRings: typeof raw.rangeRings === 'boolean' ? raw.rangeRings : base.rangeRings,
+    runways: typeof raw.runways === 'boolean' ? raw.runways : base.runways,
+    holdingStacks: typeof raw.holdingStacks === 'boolean' ? raw.holdingStacks : base.holdingStacks,
+    waypointLabels: typeof raw.waypointLabels === 'boolean' ? raw.waypointLabels : base.waypointLabels,
+    extendedCenterlines:
+      typeof raw.extendedCenterlines === 'boolean'
+        ? raw.extendedCenterlines
+        : base.extendedCenterlines,
+    trails: typeof raw.trails === 'boolean' ? raw.trails : base.trails,
+    speedVectors: typeof raw.speedVectors === 'boolean' ? raw.speedVectors : base.speedVectors,
+    radarSweep: typeof raw.radarSweep === 'boolean' ? raw.radarSweep : base.radarSweep,
+    starCorridors: typeof raw.starCorridors === 'boolean' ? raw.starCorridors : base.starCorridors,
+    sidCorridors: typeof raw.sidCorridors === 'boolean' ? raw.sidCorridors : base.sidCorridors,
+    procedureRestrictions:
+      typeof raw.procedureRestrictions === 'boolean'
+        ? raw.procedureRestrictions
+        : base.procedureRestrictions,
+    tmaBoundary: typeof raw.tmaBoundary === 'boolean' ? raw.tmaBoundary : base.tmaBoundary,
+    extendedTargetTags:
+      typeof raw.extendedTargetTags === 'boolean'
+        ? raw.extendedTargetTags
+        : base.extendedTargetTags,
+  };
+}
+
+export function buildDefaultUserPreferences(uid: string): UserPreferencesData {
+  const egll = getAirportProfile('EGLL');
+  return {
+    uid: sanitizeId(uid),
+    preferredAirportIcao: 'EGLL',
+    preferredLandingRunwayId: egll.airport.defaultArrivalRunway,
+    preferredDepartureRunwayId: egll.airport.defaultDepartureRunway,
+    simSpeed: 1,
+    audioMuted: false,
+    audioVolume: 0.8,
+    towerVoiceId: 'charon',
+    radioPreset: 'normal_aviation',
+    radarTheme: DEFAULT_RADAR_THEME_ID,
+    radarLayers: { ...DEFAULT_RADAR_LAYERS_CONFIG },
+    perAirportVisibility: buildDefaultPerAirportVisibilityMap(),
+  };
+}
+
+function sanitizeUserPreferences(uid: string, raw: Partial<UserPreferencesData>): UserPreferencesData {
+  const airportIcao =
+    typeof raw.preferredAirportIcao === 'string' && VALID_AIRPORTS.has(raw.preferredAirportIcao)
+      ? raw.preferredAirportIcao
+      : 'EGLL';
+  const prof = getAirportProfile(airportIcao);
+  const validRunways = new Set(prof.airport.runways.map(r => r.id));
+
+  const preferredLandingRunwayId =
+    typeof raw.preferredLandingRunwayId === 'string' &&
+    validRunways.has(raw.preferredLandingRunwayId)
+      ? raw.preferredLandingRunwayId
+      : prof.airport.defaultArrivalRunway;
+  const preferredDepartureRunwayId =
+    typeof raw.preferredDepartureRunwayId === 'string' &&
+    validRunways.has(raw.preferredDepartureRunwayId)
+      ? raw.preferredDepartureRunwayId
+      : prof.airport.defaultDepartureRunway;
+
+  const radioPreset: RadioQualityPresetKey =
+    raw.radioPreset && VALID_RADIO_PRESETS.has(raw.radioPreset)
+      ? raw.radioPreset
+      : 'normal_aviation';
+
+  const voice =
+    typeof raw.towerVoiceId === 'string' && raw.towerVoiceId.trim().length >= 2
+      ? raw.towerVoiceId.trim().slice(0, 64)
+      : 'charon';
+
+  return {
+    uid: sanitizeId(uid),
+    preferredAirportIcao: airportIcao,
+    preferredLandingRunwayId,
+    preferredDepartureRunwayId,
+    simSpeed: Math.max(1, Math.min(5, Math.round(Number(raw.simSpeed) || 1))),
+    audioMuted: Boolean(raw.audioMuted),
+    audioVolume: Math.max(0, Math.min(1, Number(raw.audioVolume ?? 0.8))),
+    towerVoiceId: voice,
+    radioPreset,
+    radarTheme: normalizeRadarThemeId(raw.radarTheme),
+    radarLayers: sanitizeRadarLayers(raw.radarLayers),
+    perAirportVisibility: sanitizePerAirportVisibilityMap(raw.perAirportVisibility),
+  };
+}
+
+export async function loadOrCreateUserPreferences(
+  userOrUid: User | string
+): Promise<UserPreferencesData> {
+  const rawUid = typeof userOrUid === 'string' ? userOrUid : userOrUid.uid;
+  const uid = sanitizeId(rawUid);
+
+  if (isOfflineUid(uid)) {
+    const prefs = await offlineLoadOrCreatePreferences(uid, buildDefaultUserPreferences(uid));
+    return sanitizeUserPreferences(uid, prefs);
+  }
+
+  const path = `users/${uid}/settings/preferences`;
+  const docRef = doc(db, 'users', uid, 'settings', 'preferences');
+
+  let snap;
+  try {
+    snap = await getDoc(docRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
+
+  if (snap && snap.exists()) {
+    return sanitizeUserPreferences(uid, snap.data() as Partial<UserPreferencesData>);
+  }
+
+  const defaults = buildDefaultUserPreferences(uid);
+  try {
+    await setDoc(docRef, {
+      ...defaults,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+  return defaults;
+}
+
+export async function saveUserPreferences(
+  uid: string,
+  prefsInput: Omit<UserPreferencesData, 'uid'>
+): Promise<UserPreferencesData> {
+  const safeUid = sanitizeId(uid);
+  const sanitized = sanitizeUserPreferences(safeUid, { ...prefsInput, uid: safeUid });
+
+  if (isOfflineUid(safeUid)) {
+    return offlineSavePreferences(safeUid, sanitized);
+  }
+
+  const path = `users/${safeUid}/settings/preferences`;
+  const docRef = doc(db, 'users', safeUid, 'settings', 'preferences');
+
+  try {
+    await updateDoc(docRef, {
+      preferredAirportIcao: sanitized.preferredAirportIcao,
+      preferredLandingRunwayId: sanitized.preferredLandingRunwayId,
+      preferredDepartureRunwayId: sanitized.preferredDepartureRunwayId,
+      simSpeed: sanitized.simSpeed,
+      audioMuted: sanitized.audioMuted,
+      audioVolume: sanitized.audioVolume,
+      towerVoiceId: sanitized.towerVoiceId,
+      radioPreset: sanitized.radioPreset,
+      radarTheme: sanitized.radarTheme,
+      radarLayers: sanitized.radarLayers,
+      perAirportVisibility: sanitized.perAirportVisibility,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Fallback to create if preferences document didn't exist yet
+    try {
+      await setDoc(docRef, {
+        ...sanitized,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  }
+
+  return sanitized;
+}
+
+// ---------------------------------------------------------------------------
+// Per-User Activity Logbook (/users/{uid}/activities/{activityId})
+// ---------------------------------------------------------------------------
+export async function loadUserActivities(
+  uid: string,
+  maxItems: number = 50
+): Promise<ActivityEntry[]> {
+  const safeUid = sanitizeId(uid);
+  if (isOfflineUid(safeUid)) {
+    return offlineLoadActivities(safeUid, maxItems);
+  }
+  const path = `users/${safeUid}/activities`;
+  try {
+    // Filter explicitly by uid to match security rule list constraint without requiring composite index
+    const q = query(
+      collection(db, 'users', safeUid, 'activities'),
+      where('uid', '==', safeUid),
+      limit(Math.max(1, Math.min(100, maxItems)))
+    );
+    const snap = await getDocs(q);
+    const items: ActivityEntry[] = [];
+    snap.forEach(docSnap => {
+      const d = docSnap.data();
+      const createdIso = d.createdAt?.toDate
+        ? d.createdAt.toDate().toISOString()
+        : typeof d.createdAt === 'string'
+        ? d.createdAt
+        : new Date(0).toISOString();
+      items.push({
+        id: d.id || docSnap.id,
+        uid: d.uid,
+        kind: d.kind,
+        title: d.title,
+        missionId: d.missionId,
+        airportIcao: d.airportIcao,
+        landingRunwayId: d.landingRunwayId,
+        departureRunwayId: d.departureRunwayId,
+        landings: typeof d.landings === 'number' ? d.landings : 0,
+        departures: typeof d.departures === 'number' ? d.departures : 0,
+        goArounds: typeof d.goArounds === 'number' ? d.goArounds : 0,
+        violations: typeof d.violations === 'number' ? d.violations : 0,
+        score: typeof d.score === 'number' ? d.score : 0,
+        durationSeconds: typeof d.durationSeconds === 'number' ? d.durationSeconds : 0,
+        createdAt: createdIso,
+      });
+    });
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+export interface RecordActivityInput {
+  kind: ActivityKind;
+  title: string;
+  missionId?: MissionId;
+  airportIcao: string;
+  landingRunwayId: string;
+  departureRunwayId: string;
+  landings: number;
+  departures: number;
+  goArounds: number;
+  violations: number;
+  score: number;
+  durationSeconds: number;
+}
+
+export async function recordControllerActivityAndStats(
   profile: UserProfileData,
-  missionId: MissionId,
-  sessionLandings: number,
-  sessionDepartures: number,
-  sessionScore: number
-): Promise<{ updatedProfile: UserProfileData; newlyCertified: boolean }> {
-  const nextMissions = Array.from(
-    new Set([...profile.completedMissions, missionId])
-  ).filter(m => ALL_MISSIONS.includes(m)).slice(0, 5);
+  input: RecordActivityInput
+): Promise<{ updatedProfile: UserProfileData; entry: ActivityEntry; newlyCertified: boolean }> {
+  const safeUid = sanitizeId(profile.uid);
+  const actId = sanitizeId(`act_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+  const airportIcao = VALID_AIRPORTS.has(input.airportIcao) ? input.airportIcao : 'EGLL';
+  const prof = getAirportProfile(airportIcao);
+  const landingRunwayId =
+    (input.landingRunwayId || prof.airport.defaultArrivalRunway).trim().slice(0, 4) || '27R';
+  const departureRunwayId =
+    (input.departureRunwayId || prof.airport.defaultDepartureRunway).trim().slice(0, 4) || '27L';
+
+  const landings = Math.max(0, Math.min(1000, Math.round(input.landings || 0)));
+  const departures = Math.max(0, Math.min(1000, Math.round(input.departures || 0)));
+  const goArounds = Math.max(0, Math.min(1000, Math.round(input.goArounds || 0)));
+  const violations = Math.max(0, Math.min(1000, Math.round(input.violations || 0)));
+  const score = Math.max(0, Math.min(100, Math.round(input.score || 0)));
+  const durationSeconds = Math.max(0, Math.min(86400, Math.round(input.durationSeconds || 0)));
+  const title = (input.title || 'Radar Operations').trim().slice(0, 100);
+  const safeTitle = title.length >= 2 ? title : 'Radar Operations';
+
+  if (isOfflineProfile(profile)) {
+    return offlineRecordActivityAndStats(profile, {
+      kind: input.kind,
+      title: safeTitle,
+      missionId: input.missionId && ALL_MISSIONS.includes(input.missionId) ? input.missionId : undefined,
+      airportIcao,
+      landingRunwayId,
+      departureRunwayId,
+      landings,
+      departures,
+      goArounds,
+      violations,
+      score,
+      durationSeconds,
+    });
+  }
+
+  const actPayload: Record<string, unknown> = {
+    id: actId,
+    uid: safeUid,
+    kind: input.kind,
+    title: safeTitle,
+    airportIcao,
+    landingRunwayId,
+    departureRunwayId,
+    landings,
+    departures,
+    goArounds,
+    violations,
+    score,
+    durationSeconds,
+    createdAt: serverTimestamp(),
+  };
+
+  if (input.missionId && ALL_MISSIONS.includes(input.missionId)) {
+    actPayload.missionId = input.missionId;
+  }
+
+  const actPath = `users/${safeUid}/activities/${actId}`;
+  try {
+    await setDoc(doc(db, 'users', safeUid, 'activities', actId), actPayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, actPath);
+  }
+
+  const isMissionPass = input.kind === 'mission_pass' && input.missionId;
+  const nextMissions = isMissionPass
+    ? Array.from(new Set([...profile.completedMissions, input.missionId!]))
+        .filter(m => ALL_MISSIONS.includes(m))
+        .slice(0, 5)
+    : profile.completedMissions;
 
   const wasCertified = profile.certified;
-  const allComplete = ALL_MISSIONS.every(m => nextMissions.includes(m));
+  const allComplete = ALL_MISSIONS.every(m => nextMissions.includes(m)) || wasCertified;
   const newlyCertified = !wasCertified && allComplete;
 
   const certId = allComplete
-    ? profile.certificateId || generateCertificateId(profile.uid)
+    ? profile.certificateId || generateCertificateId(safeUid)
     : profile.certificateId;
   const issuedAt = allComplete
     ? profile.issuedAt || new Date().toISOString()
     : profile.issuedAt;
 
-  const totalLandings = Math.min(100000, profile.totalLandings + Math.max(0, Math.round(sessionLandings)));
-  const totalDepartures = Math.min(100000, profile.totalDepartures + Math.max(0, Math.round(sessionDepartures)));
-  const bestScore = Math.max(profile.bestScore, Math.min(100, Math.max(0, Math.round(sessionScore))));
+  const totalLandings = Math.min(100000, profile.totalLandings + landings);
+  const totalDepartures = Math.min(100000, profile.totalDepartures + departures);
+  const totalGoArounds = Math.min(100000, profile.totalGoArounds + goArounds);
+  const totalViolations = Math.min(100000, profile.totalViolations + violations);
+  const totalFlightSeconds = Math.min(10000000, profile.totalFlightSeconds + durationSeconds);
+  const sessionsCompleted = Math.min(100000, profile.sessionsCompleted + 1);
+  const bestScore = Math.max(profile.bestScore, score);
 
-  if (profile.mode === 'guest') {
-    const updatedProfile = createOrSaveGuestProfile(profile.callsign, {
-      ...profile,
-      completedMissions: nextMissions,
-      certified: allComplete,
-      certificateId: certId,
-      issuedAt,
-      totalLandings,
-      totalDepartures,
-      bestScore,
-    });
-    return { updatedProfile, newlyCertified };
-  }
-
-  const path = `users/${profile.uid}`;
-  const docRef = doc(db, 'users', profile.uid);
-
+  const userPath = `users/${safeUid}`;
   const updatePayload: Record<string, unknown> = {
-    completedMissions: nextMissions,
-    certified: allComplete,
     totalLandings,
     totalDepartures,
+    totalGoArounds,
+    totalViolations,
+    totalFlightSeconds,
+    sessionsCompleted,
     bestScore,
     updatedAt: serverTimestamp(),
   };
 
-  if (allComplete && certId && issuedAt) {
-    updatePayload.certificateId = certId;
-    updatePayload.issuedAt = issuedAt;
+  if (isMissionPass) {
+    updatePayload.completedMissions = nextMissions;
+    updatePayload.certified = allComplete;
+    if (allComplete && certId && issuedAt) {
+      updatePayload.certificateId = certId;
+      updatePayload.issuedAt = issuedAt;
+    }
   }
 
   try {
-    await updateDoc(docRef, updatePayload);
+    await updateDoc(doc(db, 'users', safeUid), updatePayload);
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
+    handleFirestoreError(error, OperationType.UPDATE, userPath);
   }
 
-  return {
-    updatedProfile: {
-      ...profile,
-      completedMissions: nextMissions,
-      certified: allComplete,
-      certificateId: certId,
-      issuedAt,
-      totalLandings,
-      totalDepartures,
-      bestScore,
-    },
-    newlyCertified,
+  const entry: ActivityEntry = {
+    id: actId,
+    uid: safeUid,
+    kind: input.kind,
+    title: safeTitle,
+    missionId: input.missionId,
+    airportIcao,
+    landingRunwayId,
+    departureRunwayId,
+    landings,
+    departures,
+    goArounds,
+    violations,
+    score,
+    durationSeconds,
+    createdAt: new Date().toISOString(),
   };
+
+  const updatedProfile: UserProfileData = {
+    ...profile,
+    completedMissions: nextMissions,
+    certified: allComplete,
+    certificateId: certId,
+    issuedAt,
+    totalLandings,
+    totalDepartures,
+    totalGoArounds,
+    totalViolations,
+    totalFlightSeconds,
+    sessionsCompleted,
+    bestScore,
+  };
+
+  return { updatedProfile, entry, newlyCertified };
+}
+
+export async function deleteUserActivity(uid: string, activityId: string): Promise<void> {
+  const safeUid = sanitizeId(uid);
+  const safeActId = sanitizeId(activityId);
+  if (isOfflineUid(safeUid)) {
+    await offlineDeleteActivity(safeUid, safeActId);
+    return;
+  }
+  const path = `users/${safeUid}/activities/${safeActId}`;
+  try {
+    await deleteDoc(doc(db, 'users', safeUid, 'activities', safeActId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Custom Scenarios CRUD (Firestore or Guest LocalStorage)
+// Custom Scenarios CRUD (/scenarios/{scenarioId}) — Strictly User-Owned
 // ---------------------------------------------------------------------------
-function sanitizeScenarioInput(input: CustomScenarioConfig, ownerId: string): CustomScenarioConfig {
+export function sanitizeScenarioInput(
+  input: CustomScenarioConfig,
+  ownerId: string
+): CustomScenarioConfig {
   const airportIcao = VALID_AIRPORTS.has(input.airportIcao) ? input.airportIcao : 'EGLL';
   const difficulty = VALID_DIFFICULTIES.has(input.difficulty) ? input.difficulty : 'Intermediate';
   const precipitation = VALID_PRECIP.has(input.precipitation) ? input.precipitation : 'None';
@@ -372,10 +930,9 @@ function sanitizeScenarioInput(input: CustomScenarioConfig, ownerId: string): Cu
 }
 
 export async function loadUserScenarios(profile: UserProfileData): Promise<CustomScenarioConfig[]> {
-  if (profile.mode === 'guest') {
-    return loadGuestScenarios();
+  if (isOfflineProfile(profile)) {
+    return offlineLoadScenarios(profile.uid);
   }
-
   const path = 'scenarios';
   try {
     const q = query(collection(db, path), where('ownerId', '==', profile.uid));
@@ -424,22 +981,10 @@ export async function saveUserScenario(
   isEdit: boolean = false
 ): Promise<CustomScenarioConfig> {
   const sanitized = sanitizeScenarioInput(scenarioInput, profile.uid);
-  const nowIso = new Date().toISOString();
-
-  if (profile.mode === 'guest') {
-    const existing = loadGuestScenarios();
-    const record: CustomScenarioConfig = {
-      ...sanitized,
-      createdAt: isEdit ? scenarioInput.createdAt || nowIso : nowIso,
-      updatedAt: nowIso,
-    };
-    const nextList = isEdit
-      ? existing.map(s => (s.id === record.id ? record : s))
-      : [record, ...existing];
-    saveGuestScenarios(nextList);
-    return record;
+  if (isOfflineProfile(profile)) {
+    return offlineSaveScenario(profile.uid, sanitized, isEdit);
   }
-
+  const nowIso = new Date().toISOString();
   const path = `scenarios/${sanitized.id}`;
   const docRef = doc(db, 'scenarios', sanitized.id);
 
@@ -472,51 +1017,37 @@ export async function saveUserScenario(
       handleFirestoreError(error, OperationType.UPDATE, path);
     }
     return { ...sanitized, createdAt: scenarioInput.createdAt, updatedAt: nowIso };
-  } else {
-    const createPayload = {
-      ...sanitized,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
-    try {
-      await setDoc(docRef, createPayload);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
-    }
-    return { ...sanitized, createdAt: nowIso, updatedAt: nowIso };
   }
+
+  const createPayload = {
+    ...sanitized,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  try {
+    await setDoc(docRef, createPayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+  return { ...sanitized, createdAt: nowIso, updatedAt: nowIso };
 }
 
 export async function deleteUserScenario(profile: UserProfileData, scenarioId: string): Promise<void> {
   const safeId = sanitizeId(scenarioId);
-  if (profile.mode === 'guest') {
-    const remaining = loadGuestScenarios().filter(s => s.id !== safeId);
-    saveGuestScenarios(remaining);
+  if (isOfflineProfile(profile)) {
+    await offlineDeleteScenario(profile.uid, safeId);
     return;
   }
-
   const path = `scenarios/${safeId}`;
+  const docRef = doc(db, 'scenarios', safeId);
   try {
-    await deleteDoc(doc(db, 'scenarios', safeId));
+    // Ensure ownership matches before deleting
+    const existingSnap = await getDoc(docRef);
+    if (existingSnap.exists() && existingSnap.data().ownerId !== profile.uid) {
+      throw new Error('Cannot delete a scenario owned by another controller.');
+    }
+    await deleteDoc(docRef);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
   }
-}
-
-export async function migrateGuestScenariosToCloud(profile: UserProfileData): Promise<number> {
-  if (profile.mode !== 'google') return 0;
-  const guestScenarios = loadGuestScenarios();
-  if (guestScenarios.length === 0) return 0;
-
-  let migrated = 0;
-  for (const sc of guestScenarios) {
-    await saveUserScenario(
-      profile,
-      { ...sc, id: `mig_${sanitizeId(sc.id)}`, ownerId: profile.uid },
-      false
-    );
-    migrated++;
-  }
-  saveGuestScenarios([]);
-  return migrated;
 }

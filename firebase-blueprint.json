@@ -2,7 +2,7 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Controller profile, Academy certification progress, and cumulative flight handling statistics.",
+      "description": "Controller profile, Academy certification progress, authentication provider metadata, and cumulative flight handling statistics.",
       "type": "object",
       "properties": {
         "uid": {
@@ -17,6 +17,11 @@
           "description": "Controller display name or callsign.",
           "minLength": 2,
           "maxLength": 32
+        },
+        "authProvider": {
+          "type": "string",
+          "enum": ["password", "google"],
+          "description": "Primary authentication provider used by the controller."
         },
         "certified": {
           "type": "boolean",
@@ -47,6 +52,22 @@
           "type": "integer",
           "description": "Cumulative departures cleared."
         },
+        "totalGoArounds": {
+          "type": "integer",
+          "description": "Cumulative missed approaches and go-arounds handled."
+        },
+        "totalViolations": {
+          "type": "integer",
+          "description": "Cumulative critical STCA separation violations recorded."
+        },
+        "totalFlightSeconds": {
+          "type": "integer",
+          "description": "Cumulative radar sector simulation time controlled in seconds."
+        },
+        "sessionsCompleted": {
+          "type": "integer",
+          "description": "Total logged operational or Academy sessions completed."
+        },
         "bestScore": {
           "type": "number",
           "description": "Highest achieved efficiency score (0-100)."
@@ -65,13 +86,189 @@
       "required": [
         "uid",
         "callsign",
+        "authProvider",
         "certified",
         "completedMissions",
         "totalLandings",
         "totalDepartures",
+        "totalGoArounds",
+        "totalViolations",
+        "totalFlightSeconds",
+        "sessionsCompleted",
         "bestScore",
         "createdAt",
         "updatedAt"
+      ]
+    },
+    "UserPreferences": {
+      "title": "UserPreferences",
+      "description": "Personal controller radar display layers, per-airport route visibility, preferred airport/runways, and VHF audio settings.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "preferredAirportIcao": {
+          "type": "string",
+          "enum": ["EGLL", "OIII", "KJFK", "OIIE", "OISS", "OMDB", "LFPG", "EHAM", "EDDF", "LSZH", "EGJJ", "KORD", "KSFO", "RJTT", "TRN1", "TRN2"],
+          "minLength": 4,
+          "maxLength": 4
+        },
+        "preferredLandingRunwayId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "preferredDepartureRunwayId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "simSpeed": {
+          "type": "integer",
+          "description": "Preferred radar simulation speed multiplier (1-5)."
+        },
+        "audioMuted": {
+          "type": "boolean"
+        },
+        "audioVolume": {
+          "type": "number"
+        },
+        "towerVoiceId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64
+        },
+        "radioPreset": {
+          "type": "string",
+          "enum": ["clear_communication", "normal_aviation", "weak_signal", "heavy_interference", "emergency_transmission"]
+        },
+        "radarTheme": {
+          "type": "string",
+          "description": "Selected radar scope visual color palette preset.",
+          "enum": ["phosphor_crt", "amber_atc", "obsidian_blue", "tactical_stealth", "crimson_tactical", "daylight_paper"]
+        },
+        "radarLayers": {
+          "type": "object",
+          "description": "Boolean map toggling the 14 radar scope overlays."
+        },
+        "perAirportVisibility": {
+          "type": "object",
+          "description": "Per-airport STAR/SID/waypoint visibility selections keyed by ICAO."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "preferredAirportIcao",
+        "preferredLandingRunwayId",
+        "preferredDepartureRunwayId",
+        "simSpeed",
+        "audioMuted",
+        "audioVolume",
+        "towerVoiceId",
+        "radioPreset",
+        "radarLayers",
+        "perAirportVisibility",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ActivityEntry": {
+      "title": "ActivityEntry",
+      "description": "Immutable chronological controller logbook record for completed Academy missions or radar operations sessions.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["mission_pass", "mission_fail", "free_ops", "custom_ops"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "missionId": {
+          "type": "string",
+          "enum": ["mission_1", "mission_2", "mission_3", "mission_4", "mission_5"]
+        },
+        "airportIcao": {
+          "type": "string",
+          "enum": ["EGLL", "OIII", "KJFK", "OIIE", "OISS", "OMDB", "LFPG", "EHAM", "EDDF", "LSZH", "EGJJ", "KORD", "KSFO", "RJTT", "TRN1", "TRN2"],
+          "minLength": 4,
+          "maxLength": 4
+        },
+        "landingRunwayId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "departureRunwayId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "landings": {
+          "type": "integer"
+        },
+        "departures": {
+          "type": "integer"
+        },
+        "goArounds": {
+          "type": "integer"
+        },
+        "violations": {
+          "type": "integer"
+        },
+        "score": {
+          "type": "number"
+        },
+        "durationSeconds": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "uid",
+        "kind",
+        "title",
+        "airportIcao",
+        "landingRunwayId",
+        "departureRunwayId",
+        "landings",
+        "departures",
+        "goArounds",
+        "violations",
+        "score",
+        "durationSeconds",
+        "createdAt"
       ]
     },
     "CustomScenario": {
@@ -111,7 +308,7 @@
         },
         "airportIcao": {
           "type": "string",
-          "enum": ["EGLL", "OIII", "KJFK", "TRN1", "TRN2"],
+          "enum": ["EGLL", "OIII", "KJFK", "OIIE", "OISS", "OMDB", "LFPG", "EHAM", "EDDF", "LSZH", "EGJJ", "KORD", "KSFO", "RJTT", "TRN1", "TRN2"],
           "minLength": 4,
           "maxLength": 4
         },
@@ -206,13 +403,25 @@
       "schema": {
         "$ref": "#/entities/UserProfile"
       },
-      "description": "Controller profile, Academy mission completion array, and ATC certificate record owned strictly by userId."
+      "description": "Controller profile, Academy mission completion array, career metrics, and ATC certificate record owned strictly by userId."
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": {
+        "$ref": "#/entities/UserPreferences"
+      },
+      "description": "Personal radar layer toggles, airport/runway defaults, nav visibility, and VHF audio settings (only settingId == 'preferences')."
+    },
+    "/users/{userId}/activities/{activityId}": {
+      "schema": {
+        "$ref": "#/entities/ActivityEntry"
+      },
+      "description": "Immutable personal flight operations and Academy activity logbook entries owned strictly by userId."
     },
     "/scenarios/{scenarioId}": {
       "schema": {
         "$ref": "#/entities/CustomScenario"
       },
-      "description": "User-created custom ATC radar scenarios owned strictly by ownerId."
+      "description": "User-created custom ATC radar scenarios owned strictly by ownerId across all 16 supported airports."
     }
   }
 }

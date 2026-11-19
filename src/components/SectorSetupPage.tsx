@@ -17,6 +17,7 @@ import {
   EyeOff,
   Flame,
   Navigation,
+  Palette,
   Play,
   Plus,
   Radio,
@@ -26,6 +27,7 @@ import {
   Trash2,
   Wind,
 } from 'lucide-react';
+import { RADAR_THEME_LIST } from '../utils/radarThemes';
 import {
   AirportNavVisibility,
   CustomScenarioConfig,
@@ -53,6 +55,7 @@ interface SectorSetupPageProps {
   userProfile: UserProfileData | null;
   scenarios: CustomScenarioConfig[];
   onScenariosChanged: (next: CustomScenarioConfig[]) => void;
+  onBeforeStartNewSession?: () => Promise<void> | void;
   onLaunchRadar: () => void;
   onOpenCertificate: () => void;
   onRequireAuth: () => void;
@@ -108,6 +111,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
   userProfile,
   scenarios,
   onScenariosChanged,
+  onBeforeStartNewSession,
   onLaunchRadar,
   onOpenCertificate,
   onRequireAuth,
@@ -124,13 +128,16 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
   const storeAudioMuted = useSimulationStore(state => state.audioMuted);
   const storeAudioVolume = useSimulationStore(state => state.audioVolume);
   const storeTowerVoiceId = useSimulationStore(state => state.towerVoiceId);
+  const storeRadioPreset = useSimulationStore(state => state.radioPreset);
   const storeSimSpeed = useSimulationStore(state => state.simSpeed);
   const radarLayers = useSimulationStore(state => state.radarLayers);
+  const radarTheme = useSimulationStore(state => state.radarTheme);
   const storePerAirportVisibility = useSimulationStore(state => state.perAirportVisibility);
 
   const toggleLayer = useSimulationStore(state => state.toggleLayer);
   const setAllRadarLayers = useSimulationStore(state => state.setAllRadarLayers);
   const applyRadarDeclutter = useSimulationStore(state => state.applyRadarDeclutter);
+  const setRadarTheme = useSimulationStore(state => state.setRadarTheme);
   const applyPreFlightSession = useSimulationStore(state => state.applyPreFlightSession);
   const startMission = useSimulationStore(state => state.startMission);
   const startCustomScenario = useSimulationStore(state => state.startCustomScenario);
@@ -165,10 +172,9 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
   const [audioMuted, setAudioMuted] = useState<boolean>(storeAudioMuted);
   const [audioVolume, setAudioVolume] = useState<number>(storeAudioVolume ?? 0.85);
   const [towerVoiceId, setTowerVoiceId] = useState<string>(storeTowerVoiceId || 'charon');
-  const [radioPreset, setRadioPreset] = useState<Exclude<VhfQualityPresetId, 'custom'>>(() => {
-    const cur = radioAudio.getVhfSettings().preset;
-    return cur === 'custom' ? 'normal_aviation' : cur;
-  });
+  const [radioPreset, setRadioPreset] = useState<Exclude<VhfQualityPresetId, 'custom'>>(
+    () => storeRadioPreset || 'normal_aviation'
+  );
   const [simSpeed, setSimSpeed] = useState<number>(storeSimSpeed || 1);
 
   // Per-airport route & waypoint visibility draft copy
@@ -178,7 +184,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
 
   // Scenario Studio State
   const [draft, setDraft] = useState<CustomScenarioConfig>(() =>
-    buildDefaultScenarioDraft(userProfile?.uid || 'guest_local')
+    buildDefaultScenarioDraft(userProfile?.uid || '')
   );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [studioBusy, setStudioBusy] = useState(false);
@@ -201,8 +207,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
     setAudioMuted(storeAudioMuted);
     setAudioVolume(storeAudioVolume);
     setTowerVoiceId(storeTowerVoiceId);
-    const curPreset = radioAudio.getVhfSettings().preset;
-    setRadioPreset(curPreset === 'custom' ? 'normal_aviation' : curPreset);
+    setRadioPreset(storeRadioPreset || 'normal_aviation');
     setSimSpeed(storeSimSpeed || 1);
     setDraftVisMap({ ...storePerAirportVisibility });
   }, [
@@ -218,6 +223,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
     storeAudioMuted,
     storeAudioVolume,
     storeTowerVoiceId,
+    storeRadioPreset,
     storeSimSpeed,
     storePerAirportVisibility,
   ]);
@@ -437,11 +443,13 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
       perAirportVisibility: draftVisMap,
     };
 
+    void onBeforeStartNewSession?.();
     applyPreFlightSession(config, customScn);
     onLaunchRadar();
   };
 
   const handleLaunchMissionDirect = (missionId: MissionId) => {
+    void onBeforeStartNewSession?.();
     startMission(missionId);
     onLaunchRadar();
   };
@@ -486,6 +494,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
       setDraft(saved);
 
       if (andRun) {
+        void onBeforeStartNewSession?.();
         startCustomScenario(saved);
         onLaunchRadar();
       }
@@ -577,7 +586,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
         </div>
 
         <div className="hidden lg:flex items-center gap-2.5 text-[11px] font-mono text-[#7ec29a] tabular-nums py-2">
-          <span>{userProfile?.callsign || 'CTR-GUEST'}</span>
+          <span>{userProfile?.callsign || 'CONTROLLER'}</span>
           <span className="text-[#2c5e41]">·</span>
           <span className="text-[#00e5ff]">{airportIcao}</span>
           <span className="text-[#2c5e41]">·</span>
@@ -1122,6 +1131,81 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
               </div>
             </div>
 
+            {/* Radar Scope Visual Theme Selection */}
+            <div className="pt-4 border-t border-[#163826] space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-bold text-white text-sm flex items-center gap-2">
+                    <Palette className="w-4 h-4 text-[#00e5ff]" />
+                    <span>Radar Scope Color & Visual Theme</span>
+                  </h4>
+                  <p className="text-[11px] text-[#7ec29a]">
+                    Select a pre-designed scope palette for radar tracks, rings, sweep, and contrast. Saved per controller account.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {RADAR_THEME_LIST.map(preset => {
+                  const selected = radarTheme === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => setRadarTheme(preset.id)}
+                      className={`p-3 rounded-md border text-left transition-colors flex items-center justify-between gap-3 ${
+                        selected
+                          ? 'bg-[#0b271c] border-[#00e5ff] text-white'
+                          : 'bg-[#07100b] border-[#163826] text-[#9de3ba] hover:border-[#246340]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span
+                          className="relative w-9 h-9 rounded-full border shrink-0 flex items-center justify-center overflow-hidden"
+                          style={{
+                            backgroundColor: preset.swatch.bg,
+                            borderColor: preset.swatch.ring,
+                          }}
+                        >
+                          <span
+                            className="w-5 h-5 rounded-full border flex items-center justify-center"
+                            style={{ borderColor: preset.swatch.ring }}
+                          >
+                            <span
+                              className="w-2 h-2 rounded-full"
+                              style={{ backgroundColor: preset.swatch.primary }}
+                            />
+                          </span>
+                          <span
+                            className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full"
+                            style={{ backgroundColor: preset.swatch.secondary }}
+                          />
+                        </span>
+                        <div className="min-w-0">
+                          <div className="font-bold text-xs text-white truncate">
+                            {preset.name}
+                          </div>
+                          <div className="text-[10px] text-[#7ec29a] truncate">
+                            {preset.subtitle}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div
+                        className={`w-4 h-4 rounded flex items-center justify-center border shrink-0 ${
+                          selected
+                            ? 'bg-[#00e5ff] border-[#00e5ff] text-black'
+                            : 'border-[#2d5c3f] bg-[#060f0a]'
+                        }`}
+                      >
+                        {selected && <Check className="w-3 h-3 stroke-[3]" />}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Global Radar Scope Layers & Declutter Presets */}
             <div className="pt-4 border-t border-[#163826] space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1575,7 +1659,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
                   type="button"
                   onClick={() => {
                     setEditingId(null);
-                    setDraft(buildDefaultScenarioDraft(userProfile?.uid || 'guest_local'));
+                    setDraft(buildDefaultScenarioDraft(userProfile?.uid || ''));
                     setStudioError(null);
                   }}
                   className="px-2.5 py-1.5 bg-[#123321] hover:bg-[#19472f] text-[#00ff66] border border-[#246340] rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
@@ -1617,6 +1701,7 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            void onBeforeStartNewSession?.();
                             startCustomScenario(sc);
                             onLaunchRadar();
                           }}
@@ -1661,7 +1746,9 @@ export const SectorSetupPage: React.FC<SectorSetupPageProps> = ({
                   {editingId ? 'Edit Scenario' : 'Create Custom Scenario'}
                 </h3>
                 <span className="text-[11px] text-[#5da87d]">
-                  {userProfile?.mode === 'google' ? 'Cloud Firestore Storage' : 'Local Storage'}
+                  {userProfile?.authProvider === 'offline'
+                    ? 'Offline Local Storage'
+                    : 'Cloud Firestore Storage'}
                 </span>
               </div>
 

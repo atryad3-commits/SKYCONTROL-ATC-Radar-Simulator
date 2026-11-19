@@ -28,16 +28,33 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
+    function isOwnedByUserDoc(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+    }
+
+    function isValidAirportIcao(icao) {
+      return icao in [
+        'EGLL', 'OIII', 'KJFK', 'OIIE', 'OISS', 'OMDB', 'LFPG', 'EHAM',
+        'EDDF', 'LSZH', 'EGJJ', 'KORD', 'KSFO', 'RJTT', 'TRN1', 'TRN2'
+      ];
+    }
+
     // Entity Blueprint: UserProfile (/users/{userId})
     function isValidUserProfile(data) {
       let allMissions = ['mission_1', 'mission_2', 'mission_3', 'mission_4', 'mission_5'];
       return data.keys().hasAll([
           'uid',
           'callsign',
+          'authProvider',
           'certified',
           'completedMissions',
           'totalLandings',
           'totalDepartures',
+          'totalGoArounds',
+          'totalViolations',
+          'totalFlightSeconds',
+          'sessionsCompleted',
           'bestScore',
           'createdAt',
           'updatedAt'
@@ -45,12 +62,17 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid',
           'callsign',
+          'authProvider',
           'certified',
           'certificateId',
           'issuedAt',
           'completedMissions',
           'totalLandings',
           'totalDepartures',
+          'totalGoArounds',
+          'totalViolations',
+          'totalFlightSeconds',
+          'sessionsCompleted',
           'bestScore',
           'createdAt',
           'updatedAt'
@@ -61,6 +83,7 @@ service cloud.firestore {
         && data.callsign is string
         && data.callsign.size() >= 2
         && data.callsign.size() <= 32
+        && data.authProvider in ['password', 'google']
         && data.certified is bool
         && data.completedMissions is list
         && data.completedMissions.size() <= 5
@@ -98,6 +121,18 @@ service cloud.firestore {
         && data.totalDepartures is int
         && data.totalDepartures >= 0
         && data.totalDepartures <= 100000
+        && data.totalGoArounds is int
+        && data.totalGoArounds >= 0
+        && data.totalGoArounds <= 100000
+        && data.totalViolations is int
+        && data.totalViolations >= 0
+        && data.totalViolations <= 100000
+        && data.totalFlightSeconds is int
+        && data.totalFlightSeconds >= 0
+        && data.totalFlightSeconds <= 10000000
+        && data.sessionsCompleted is int
+        && data.sessionsCompleted >= 0
+        && data.sessionsCompleted <= 100000
         && data.bestScore is number
         && data.bestScore >= 0
         && data.bestScore <= 100
@@ -118,10 +153,22 @@ service cloud.firestore {
         && isOwner(userId)
         && isValidUserProfile(incoming())
         && incoming().uid == existing().uid
+        && (!('authProvider' in existing()) || incoming().authProvider == existing().authProvider)
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
           incoming().diff(existing()).affectedKeys().hasOnly(['callsign', 'updatedAt'])
+          || (
+            !('authProvider' in existing())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'authProvider',
+              'totalGoArounds',
+              'totalViolations',
+              'totalFlightSeconds',
+              'sessionsCompleted',
+              'updatedAt'
+            ])
+          )
           || incoming().diff(existing()).affectedKeys().hasOnly([
             'completedMissions',
             'certified',
@@ -129,11 +176,283 @@ service cloud.firestore {
             'issuedAt',
             'totalLandings',
             'totalDepartures',
+            'totalGoArounds',
+            'totalViolations',
+            'totalFlightSeconds',
+            'sessionsCompleted',
+            'bestScore',
+            'updatedAt'
+          ])
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'totalLandings',
+            'totalDepartures',
+            'totalGoArounds',
+            'totalViolations',
+            'totalFlightSeconds',
+            'sessionsCompleted',
             'bestScore',
             'updatedAt'
           ])
         );
       allow delete: if false;
+    }
+
+    // Entity Blueprint: UserPreferences (/users/{userId}/settings/preferences)
+    function isValidRadarLayers(layers) {
+      return layers is map
+        && layers.keys().hasAll([
+          'terrain',
+          'rangeRings',
+          'runways',
+          'holdingStacks',
+          'waypointLabels',
+          'extendedCenterlines',
+          'trails',
+          'speedVectors',
+          'radarSweep',
+          'starCorridors',
+          'sidCorridors',
+          'procedureRestrictions',
+          'tmaBoundary',
+          'extendedTargetTags'
+        ])
+        && layers.keys().hasOnly([
+          'terrain',
+          'rangeRings',
+          'runways',
+          'holdingStacks',
+          'waypointLabels',
+          'extendedCenterlines',
+          'trails',
+          'speedVectors',
+          'radarSweep',
+          'starCorridors',
+          'sidCorridors',
+          'procedureRestrictions',
+          'tmaBoundary',
+          'extendedTargetTags'
+        ])
+        && layers.terrain is bool
+        && layers.rangeRings is bool
+        && layers.runways is bool
+        && layers.holdingStacks is bool
+        && layers.waypointLabels is bool
+        && layers.extendedCenterlines is bool
+        && layers.trails is bool
+        && layers.speedVectors is bool
+        && layers.radarSweep is bool
+        && layers.starCorridors is bool
+        && layers.sidCorridors is bool
+        && layers.procedureRestrictions is bool
+        && layers.tmaBoundary is bool
+        && layers.extendedTargetTags is bool;
+    }
+
+    function isValidRadarTheme(themeId) {
+      return themeId in [
+        'phosphor_crt',
+        'amber_atc',
+        'obsidian_blue',
+        'tactical_stealth',
+        'crimson_tactical',
+        'daylight_paper'
+      ];
+    }
+
+    function isValidUserPreferences(data) {
+      return data.keys().hasAll([
+          'uid',
+          'preferredAirportIcao',
+          'preferredLandingRunwayId',
+          'preferredDepartureRunwayId',
+          'simSpeed',
+          'audioMuted',
+          'audioVolume',
+          'towerVoiceId',
+          'radioPreset',
+          'radarLayers',
+          'perAirportVisibility',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'preferredAirportIcao',
+          'preferredLandingRunwayId',
+          'preferredDepartureRunwayId',
+          'simSpeed',
+          'audioMuted',
+          'audioVolume',
+          'towerVoiceId',
+          'radioPreset',
+          'radarTheme',
+          'radarLayers',
+          'perAirportVisibility',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && isValidAirportIcao(data.preferredAirportIcao)
+        && data.preferredLandingRunwayId is string
+        && data.preferredLandingRunwayId.size() >= 2
+        && data.preferredLandingRunwayId.size() <= 4
+        && data.preferredDepartureRunwayId is string
+        && data.preferredDepartureRunwayId.size() >= 2
+        && data.preferredDepartureRunwayId.size() <= 4
+        && data.simSpeed is int
+        && data.simSpeed >= 1
+        && data.simSpeed <= 5
+        && data.audioMuted is bool
+        && data.audioVolume is number
+        && data.audioVolume >= 0
+        && data.audioVolume <= 1
+        && data.towerVoiceId is string
+        && data.towerVoiceId.size() >= 2
+        && data.towerVoiceId.size() <= 64
+        && data.radioPreset in [
+          'clear_communication',
+          'normal_aviation',
+          'weak_signal',
+          'heavy_interference',
+          'emergency_transmission'
+        ]
+        && (!('radarTheme' in data) || isValidRadarTheme(data.radarTheme))
+        && isValidRadarLayers(data.radarLayers)
+        && data.perAirportVisibility is map
+        && data.perAirportVisibility.size() <= 16
+        && data.perAirportVisibility.keys().hasOnly([
+          'EGLL', 'OIII', 'KJFK', 'OIIE', 'OISS', 'OMDB', 'LFPG', 'EHAM',
+          'EDDF', 'LSZH', 'EGJJ', 'KORD', 'KSFO', 'RJTT', 'TRN1', 'TRN2'
+        ])
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId}/settings/{settingId} {
+      allow get: if isValidId(userId) && settingId == 'preferences' && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && settingId == 'preferences'
+        && isOwner(userId)
+        && isOwnedByUserDoc(userId)
+        && isValidUserPreferences(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && settingId == 'preferences'
+        && isOwner(userId)
+        && isOwnedByUserDoc(userId)
+        && isValidUserPreferences(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'preferredAirportIcao',
+          'preferredLandingRunwayId',
+          'preferredDepartureRunwayId',
+          'simSpeed',
+          'audioMuted',
+          'audioVolume',
+          'towerVoiceId',
+          'radioPreset',
+          'radarTheme',
+          'radarLayers',
+          'perAirportVisibility',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // Entity Blueprint: ActivityEntry (/users/{userId}/activities/{activityId})
+    function isValidActivityEntry(data) {
+      let allMissions = ['mission_1', 'mission_2', 'mission_3', 'mission_4', 'mission_5'];
+      return data.keys().hasAll([
+          'id',
+          'uid',
+          'kind',
+          'title',
+          'airportIcao',
+          'landingRunwayId',
+          'departureRunwayId',
+          'landings',
+          'departures',
+          'goArounds',
+          'violations',
+          'score',
+          'durationSeconds',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'uid',
+          'kind',
+          'title',
+          'missionId',
+          'airportIcao',
+          'landingRunwayId',
+          'departureRunwayId',
+          'landings',
+          'departures',
+          'goArounds',
+          'violations',
+          'score',
+          'durationSeconds',
+          'createdAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.kind in ['mission_pass', 'mission_fail', 'free_ops', 'custom_ops']
+        && data.title is string
+        && data.title.size() >= 2
+        && data.title.size() <= 100
+        && (!('missionId' in data) || data.missionId in allMissions)
+        && isValidAirportIcao(data.airportIcao)
+        && data.landingRunwayId is string
+        && data.landingRunwayId.size() >= 2
+        && data.landingRunwayId.size() <= 4
+        && data.departureRunwayId is string
+        && data.departureRunwayId.size() >= 2
+        && data.departureRunwayId.size() <= 4
+        && data.landings is int
+        && data.landings >= 0
+        && data.landings <= 1000
+        && data.departures is int
+        && data.departures >= 0
+        && data.departures <= 1000
+        && data.goArounds is int
+        && data.goArounds >= 0
+        && data.goArounds <= 1000
+        && data.violations is int
+        && data.violations >= 0
+        && data.violations <= 1000
+        && data.score is number
+        && data.score >= 0
+        && data.score <= 100
+        && data.durationSeconds is int
+        && data.durationSeconds >= 0
+        && data.durationSeconds <= 86400
+        && data.createdAt is timestamp;
+    }
+
+    match /users/{userId}/activities/{activityId} {
+      allow get: if isValidId(userId) && isValidId(activityId) && isOwner(userId);
+      allow list: if isValidId(userId) && isOwner(userId) && resource.data.uid == request.auth.uid;
+      allow create: if isValidId(userId)
+        && isValidId(activityId)
+        && isOwner(userId)
+        && isOwnedByUserDoc(userId)
+        && isValidActivityEntry(incoming())
+        && incoming().id == activityId
+        && incoming().uid == userId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(userId)
+        && isValidId(activityId)
+        && isOwner(userId)
+        && existing().uid == request.auth.uid;
     }
 
     // Entity Blueprint: CustomScenario (/scenarios/{scenarioId})
@@ -198,7 +517,7 @@ service cloud.firestore {
         && data.description is string
         && data.description.size() <= 300
         && data.difficulty in ['Beginner', 'Intermediate', 'Advanced', 'Master']
-        && data.airportIcao in ['EGLL', 'OIII', 'KJFK', 'TRN1', 'TRN2']
+        && isValidAirportIcao(data.airportIcao)
         && data.landingRunwayId is string
         && data.landingRunwayId.size() >= 2
         && data.landingRunwayId.size() <= 4

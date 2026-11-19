@@ -421,18 +421,92 @@ export interface CustomScenarioConfig {
   updatedAt?: string;
 }
 
+export type RadioQualityPresetKey =
+  | 'clear_communication'
+  | 'normal_aviation'
+  | 'weak_signal'
+  | 'heavy_interference'
+  | 'emergency_transmission';
+
+export interface RadarLayersConfig {
+  terrain: boolean;
+  rangeRings: boolean;
+  runways: boolean;
+  holdingStacks: boolean;
+  waypointLabels: boolean;
+  extendedCenterlines: boolean;
+  trails: boolean;
+  speedVectors: boolean;
+  radarSweep: boolean;
+  starCorridors: boolean;
+  sidCorridors: boolean;
+  procedureRestrictions: boolean;
+  tmaBoundary: boolean;
+  extendedTargetTags: boolean;
+}
+
+export type RadarThemeId =
+  | 'phosphor_crt'
+  | 'amber_atc'
+  | 'obsidian_blue'
+  | 'tactical_stealth'
+  | 'crimson_tactical'
+  | 'daylight_paper';
+
+export type UserAuthProvider = 'password' | 'google' | 'offline';
+
 export interface UserProfileData {
   uid: string;
   callsign: string;
-  mode: 'guest' | 'google';
+  authProvider: UserAuthProvider;
   email?: string | null;
+  emailVerified: boolean;
   certified: boolean;
   certificateId?: string;
   issuedAt?: string;
   completedMissions: MissionId[];
   totalLandings: number;
   totalDepartures: number;
+  totalGoArounds: number;
+  totalViolations: number;
+  totalFlightSeconds: number;
+  sessionsCompleted: number;
   bestScore: number;
+}
+
+export interface UserPreferencesData {
+  uid: string;
+  preferredAirportIcao: string;
+  preferredLandingRunwayId: string;
+  preferredDepartureRunwayId: string;
+  simSpeed: number;
+  audioMuted: boolean;
+  audioVolume: number;
+  towerVoiceId: string;
+  radioPreset: RadioQualityPresetKey;
+  radarTheme?: RadarThemeId;
+  radarLayers: RadarLayersConfig;
+  perAirportVisibility: Record<string, AirportNavVisibility>;
+}
+
+export type ActivityKind = 'mission_pass' | 'mission_fail' | 'free_ops' | 'custom_ops';
+
+export interface ActivityEntry {
+  id: string;
+  uid: string;
+  kind: ActivityKind;
+  title: string;
+  missionId?: MissionId;
+  airportIcao: string;
+  landingRunwayId: string;
+  departureRunwayId: string;
+  landings: number;
+  departures: number;
+  goArounds: number;
+  violations: number;
+  score: number;
+  durationSeconds: number;
+  createdAt: string;
 }
 
 export type { TrackStatus, RadarObservation, RadarTrack } from '../engine/radarTracker';

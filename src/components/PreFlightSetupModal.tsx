@@ -369,7 +369,7 @@ export const PreFlightSetupModal: React.FC<PreFlightSetupModalProps> = ({
                 Pre-Flight Operations &amp; Radar Setup Briefing
               </h2>
               <div className="text-[11px] text-[#7ec29a] flex items-center gap-2 mt-0.5 font-mono">
-                <span>OP: {userProfile?.callsign || 'CTR-GUEST'}</span>
+                <span>OP: {userProfile?.callsign || 'CONTROLLER'}</span>
                 <span>·</span>
                 <span className="text-[#00e5ff]">{selectedProfile.airport.icao}</span>
                 <span>·</span>

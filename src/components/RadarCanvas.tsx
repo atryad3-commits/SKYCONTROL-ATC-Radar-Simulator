@@ -18,6 +18,7 @@ import { calculateBearing, calculateDistance, normalizeHeading } from '../engine
 import { TrackStatus, RadarTrack } from '../engine/radarTracker';
 import { getAltitudeColor, getAltitudeRgba } from '../utils/altitudeColor';
 import { drawRadarAircraftSilhouette } from '../utils/aircraftSilhouettes';
+import { getRadarTheme, RADAR_THEME_LIST } from '../utils/radarThemes';
 import {
   MousePointer,
   Compass,
@@ -30,6 +31,8 @@ import {
   EyeOff,
   Layers,
   ArrowUpRight,
+  Palette,
+  Check,
 } from 'lucide-react';
 import type { RadarLayers } from '../store/simulationStore';
 
@@ -60,11 +63,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
   const activeLandingRunwayId = useSimulationStore(state => state.activeLandingRunwayId);
   const activeDepartureRunwayId = useSimulationStore(state => state.activeDepartureRunwayId);
   const radarLayers = useSimulationStore(state => state.radarLayers);
+  const radarTheme = useSimulationStore(state => state.radarTheme);
   const perAirportVisibility = useSimulationStore(state => state.perAirportVisibility);
   const conflicts = useSimulationStore(state => state.conflicts);
   const radarTracks = useSimulationStore(state => state.radarTracks);
   const antennaAzimuth = useSimulationStore(state => state.antennaAzimuth);
   const activeTransmission = useSimulationStore(state => state.activeTransmission);
+
+  const theme = useMemo(() => getRadarTheme(radarTheme), [radarTheme]);
 
   const airportVisibility = useMemo(
     () => perAirportVisibility[airport.icao] || computeDefaultAirportVisibility(airport),
@@ -112,6 +118,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
   const toggleLayer = useSimulationStore(state => state.toggleLayer);
   const setAllRadarLayers = useSimulationStore(state => state.setAllRadarLayers);
   const applyRadarDeclutter = useSimulationStore(state => state.applyRadarDeclutter);
+  const setRadarTheme = useSimulationStore(state => state.setRadarTheme);
 
   // Radar Viewport Transformation State (wide zoom: 2.5 NM approach close-up to 140 NM enroute)
   const MIN_RANGE_NM = 2.5;
@@ -119,6 +126,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
   const [rangeNM, setRangeNM] = useState<number>(35);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [showScopeControls, setShowScopeControls] = useState<boolean>(false);
+  const [showThemeMenu, setShowThemeMenu] = useState<boolean>(false);
   const [showRangeMenu, setShowRangeMenu] = useState<boolean>(false);
 
   useEffect(() => {
@@ -284,8 +292,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       pxPerNM: (Math.min(width, height) * 0.44) / rangeNM,
     };
 
-    // 1. Dark CRT Phosphor Scope Background
-    ctx.fillStyle = '#030805';
+    // 1. Theme-Driven Radar Scope Background
+    ctx.fillStyle = theme.canvas.background;
     ctx.fillRect(0, 0, width, height);
 
     // 1b. Topographical Terrain, Elevation Contours, Rivers/Water & Peaks Backdrop
@@ -309,14 +317,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             if (p.sx > maxX) maxX = p.sx;
           }
           ctx.closePath();
-          ctx.fillStyle = 'rgba(8, 44, 66, 0.52)';
+          ctx.fillStyle = theme.canvas.waterFill;
           ctx.fill();
-          ctx.strokeStyle = 'rgba(42, 146, 185, 0.44)';
+          ctx.strokeStyle = theme.canvas.waterStroke;
           ctx.lineWidth = 1.2;
           ctx.stroke();
 
           if (feat.label && maxX - minX > 36) {
-            ctx.fillStyle = 'rgba(84, 186, 224, 0.58)';
+            ctx.fillStyle = theme.canvas.waterLabel;
             ctx.font = 'italic 9px "IBM Plex Mono", monospace';
             ctx.textAlign = 'center';
             ctx.fillText(feat.label, sumX / feat.points.length, sumY / feat.points.length);
@@ -334,11 +342,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           }
           if (feat.kind === 'coastline') {
             ctx.setLineDash([7, 3]);
-            ctx.strokeStyle = 'rgba(56, 174, 206, 0.50)';
+            ctx.strokeStyle = theme.canvas.coastlineStroke;
             ctx.lineWidth = 2.0;
           } else {
             ctx.setLineDash([]);
-            ctx.strokeStyle = 'rgba(38, 138, 178, 0.48)';
+            ctx.strokeStyle = theme.canvas.riverStroke;
             ctx.lineWidth = 1.8;
           }
           ctx.stroke();
@@ -346,27 +354,27 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
           if (feat.label && screenPts.length >= 2) {
             const midPt = screenPts[Math.floor(screenPts.length / 2)];
-            ctx.fillStyle = 'rgba(86, 188, 224, 0.55)';
+            ctx.fillStyle = theme.canvas.waterLabel;
             ctx.font = 'italic 8px "IBM Plex Mono", monospace';
             ctx.fillText(feat.label, midPt.sx + 6, midPt.sy - 4);
           }
         } else if (feat.kind === 'contour' && feat.points.length >= 3) {
           const elev = feat.elevationFt ?? 1500;
-          let fillCol = 'rgba(20, 68, 42, 0.17)';
-          let strokeCol = 'rgba(56, 142, 88, 0.28)';
-          let textCol = 'rgba(92, 176, 122, 0.58)';
+          let fillCol = theme.canvas.contourLowFill;
+          let strokeCol = theme.canvas.contourLowStroke;
+          let textCol = theme.canvas.contourLowText;
           if (elev >= 10000) {
-            fillCol = 'rgba(138, 86, 26, 0.17)';
-            strokeCol = 'rgba(222, 152, 58, 0.36)';
-            textCol = 'rgba(232, 178, 88, 0.68)';
+            fillCol = theme.canvas.contourHighFill;
+            strokeCol = theme.canvas.contourHighStroke;
+            textCol = theme.canvas.contourHighText;
           } else if (elev >= 6000) {
-            fillCol = 'rgba(108, 96, 30, 0.14)';
-            strokeCol = 'rgba(182, 162, 58, 0.32)';
-            textCol = 'rgba(198, 182, 90, 0.65)';
+            fillCol = theme.canvas.contourMidFill;
+            strokeCol = theme.canvas.contourMidStroke;
+            textCol = theme.canvas.contourMidText;
           } else if (elev >= 2000) {
-            fillCol = 'rgba(42, 92, 48, 0.16)';
-            strokeCol = 'rgba(88, 168, 98, 0.30)';
-            textCol = 'rgba(116, 194, 128, 0.62)';
+            fillCol = theme.canvas.contourLowFill;
+            strokeCol = theme.canvas.contourLowStroke;
+            textCol = theme.canvas.contourLowText;
           }
 
           ctx.beginPath();
@@ -403,8 +411,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           }
         } else if (feat.kind === 'peak' && feat.points.length >= 1) {
           const p = worldToScreen(feat.points[0].x, feat.points[0].y);
-          ctx.strokeStyle = 'rgba(232, 180, 74, 0.72)';
-          ctx.fillStyle = 'rgba(232, 180, 74, 0.28)';
+          ctx.strokeStyle = theme.canvas.peakStroke;
+          ctx.fillStyle = theme.canvas.peakFill;
           ctx.lineWidth = 1.2;
           ctx.beginPath();
           ctx.moveTo(p.sx, p.sy - 5);
@@ -417,12 +425,12 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           const tag = feat.label
             ? `${feat.label}${feat.elevationFt ? ` ${feat.elevationFt.toLocaleString()}'` : ''}`
             : `${feat.elevationFt?.toLocaleString() || ''}'`;
-          ctx.fillStyle = 'rgba(238, 190, 92, 0.76)';
+          ctx.fillStyle = theme.canvas.peakLabel;
           ctx.font = 'bold 8px "IBM Plex Mono", monospace';
           ctx.fillText(tag, p.sx + 7, p.sy + 3);
         } else if (feat.kind === 'obstacle' && feat.points.length >= 1) {
           const p = worldToScreen(feat.points[0].x, feat.points[0].y);
-          ctx.strokeStyle = 'rgba(240, 138, 72, 0.78)';
+          ctx.strokeStyle = theme.canvas.obstacleStroke;
           ctx.lineWidth = 1.3;
           ctx.beginPath();
           ctx.moveTo(p.sx, p.sy - 6);
@@ -433,7 +441,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           ctx.lineTo(p.sx + 4, p.sy + 3);
           ctx.stroke();
 
-          ctx.fillStyle = 'rgba(245, 162, 96, 0.85)';
+          ctx.fillStyle = theme.canvas.obstacleFill;
           ctx.beginPath();
           ctx.arc(p.sx, p.sy - 7, 1.8, 0, Math.PI * 2);
           ctx.fill();
@@ -465,9 +473,9 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       ctx.closePath();
 
       const sweepGradient = ctx.createRadialGradient(centerX, centerY, 10, centerX, centerY, sweepLength);
-      sweepGradient.addColorStop(0, 'rgba(0, 255, 102, 0.22)');
-      sweepGradient.addColorStop(0.5, 'rgba(0, 255, 102, 0.08)');
-      sweepGradient.addColorStop(1, 'rgba(0, 255, 102, 0.00)');
+      sweepGradient.addColorStop(0, `rgba(${theme.canvas.sweepGlowRgb}, ${theme.isLight ? 0.14 : 0.22})`);
+      sweepGradient.addColorStop(0.5, `rgba(${theme.canvas.sweepGlowRgb}, ${theme.isLight ? 0.05 : 0.08})`);
+      sweepGradient.addColorStop(1, `rgba(${theme.canvas.sweepGlowRgb}, 0.00)`);
       ctx.fillStyle = sweepGradient;
       ctx.fill();
 
@@ -478,7 +486,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         centerX + sweepLength * Math.sin(azimuthRad),
         centerY - sweepLength * Math.cos(azimuthRad)
       );
-      ctx.strokeStyle = 'rgba(57, 255, 20, 0.85)';
+      ctx.strokeStyle = theme.canvas.sweepLineColor;
       ctx.lineWidth = 2.0;
       ctx.stroke();
       ctx.restore();
@@ -515,7 +523,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         const rad = (deg * Math.PI) / 180;
         const isCardinal = deg % 90 === 0;
         const spokeLenPx = maxVisibleNM * pxPerNM;
-        ctx.strokeStyle = isCardinal ? '#0e2d1d' : '#081e12';
+        ctx.strokeStyle = isCardinal ? theme.canvas.radialCardinal : theme.canvas.radialMinor;
         ctx.lineWidth = isCardinal ? 1.0 : 0.7;
         ctx.beginPath();
         ctx.moveTo(centerX, centerY);
@@ -531,7 +539,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         if (radiusPx < 14 || radiusPx > Math.max(width, height) * 1.5) continue;
 
         const isMajor = Math.abs(r / majorStep - Math.round(r / majorStep)) < 0.001;
-        ctx.strokeStyle = isMajor ? '#123a24' : '#092214';
+        ctx.strokeStyle = isMajor ? theme.canvas.ringMajor : theme.canvas.ringMinor;
         ctx.lineWidth = isMajor ? 1.05 : 0.7;
         ctx.setLineDash(isMajor ? [5, 5] : [2, 6]);
         ctx.beginPath();
@@ -540,7 +548,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
         if (isMajor) {
           const rLabel = Number.isInteger(r) ? `${r} NM` : `${r.toFixed(1)} NM`;
-          ctx.fillStyle = '#257347';
+          ctx.fillStyle = theme.canvas.ringLabel;
           ctx.font = '10px "IBM Plex Mono", monospace';
           ctx.fillText(rLabel, centerX + 7, centerY - radiusPx + 11);
           if (radiusPx > 140) {
@@ -558,7 +566,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       );
       const compassRadius = compassNM * pxPerNM;
       if (compassRadius > 90 && compassRadius < Math.max(width, height) * 1.15) {
-        ctx.strokeStyle = '#16452b';
+        ctx.strokeStyle = theme.canvas.compassCircle;
         ctx.lineWidth = 1.1;
         ctx.beginPath();
         ctx.arc(centerX, centerY, compassRadius, 0, Math.PI * 2);
@@ -575,14 +583,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           const innerX = centerX + (compassRadius - tickLen) * Math.sin(rad);
           const innerY = centerY - (compassRadius - tickLen) * Math.cos(rad);
 
-          ctx.strokeStyle = isMajor ? '#2b8252' : '#143d26';
+          ctx.strokeStyle = isMajor ? theme.canvas.compassTickMajor : theme.canvas.compassTickMinor;
           ctx.beginPath();
           ctx.moveTo(innerX, innerY);
           ctx.lineTo(outerX, outerY);
           ctx.stroke();
 
           if (isMajor) {
-            ctx.fillStyle = '#339860';
+            ctx.fillStyle = theme.canvas.compassLabel;
             ctx.font = 'bold 9px "IBM Plex Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -617,7 +625,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           .join('|');
         if (!drawnPhysicalRunways.has(pairKey) || isArr || isDep) {
           drawnPhysicalRunways.add(pairKey);
-          ctx.strokeStyle = isArr ? '#00ff66' : isDep ? '#00e5ff' : '#1b5e38';
+          ctx.strokeStyle = isArr
+            ? theme.canvas.runwayArrival
+            : isDep
+            ? theme.canvas.runwayDeparture
+            : theme.canvas.runwayInactive;
           ctx.lineWidth = isArr || isDep ? 4 : 2.5;
           ctx.beginPath();
           ctx.moveTo(thPos.sx, thPos.sy);
@@ -634,7 +646,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         const approachY = rwy.threshold.y - featherDistNM * Math.cos(rad);
         const appPos = worldToScreen(approachX, approachY);
 
-        ctx.strokeStyle = isArr ? '#009955' : 'rgba(0, 119, 68, 0.45)';
+        ctx.strokeStyle = isArr ? theme.canvas.centerlineArrival : theme.canvas.centerlineInactive;
         ctx.lineWidth = isArr ? 1.3 : 0.8;
         ctx.setLineDash([5, 5]);
         ctx.beginPath();
@@ -651,7 +663,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             const ticPos = worldToScreen(ticX, ticY);
             const perpRad = rad + Math.PI / 2;
 
-            ctx.strokeStyle = '#00bb66';
+            ctx.strokeStyle = theme.canvas.centerlineTick;
             ctx.beginPath();
             ctx.moveTo(
               ticPos.sx - 6 * Math.sin(perpRad),
@@ -668,7 +680,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
       if (radarLayers.runways || radarLayers.extendedCenterlines) {
         // Runway Designator Label
-        ctx.fillStyle = isArr ? '#00ff88' : isDep ? '#00e5ff' : '#3a8458';
+        ctx.fillStyle = isArr
+          ? theme.canvas.runwayLabelArrival
+          : isDep
+          ? theme.canvas.runwayLabelDeparture
+          : theme.canvas.runwayLabelInactive;
         ctx.font = isArr || isDep ? 'bold 10px "IBM Plex Mono", monospace' : '9px "IBM Plex Mono", monospace';
         ctx.fillText(rwy.id, thPos.sx + 6, thPos.sy - 6);
       }
@@ -678,7 +694,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
     if (radarLayers.tmaBoundary && airport.tmaBoundary && airport.tmaBoundary.polygon.length >= 3) {
       const poly = airport.tmaBoundary.polygon;
       ctx.save();
-      ctx.strokeStyle = 'rgba(0, 229, 255, 0.28)';
+      ctx.strokeStyle = theme.canvas.tmaStroke;
       ctx.lineWidth = 1.4;
       ctx.setLineDash([10, 6]);
       ctx.beginPath();
@@ -698,9 +714,9 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const tmaTag = `${airport.tmaBoundary.sectorLabel} · ${airport.tmaBoundary.floorLabel}–${airport.tmaBoundary.ceilingLabel} · TA ${airport.tmaBoundary.transitionAltitudeFt}ft`;
       ctx.font = 'bold 9px "IBM Plex Mono", monospace';
       const tw = ctx.measureText(tmaTag).width + 10;
-      ctx.fillStyle = 'rgba(3, 16, 20, 0.84)';
+      ctx.fillStyle = theme.canvas.tmaTagBg;
       ctx.fillRect(topScr.sx - tw / 2, topScr.sy - 18, tw, 14);
-      ctx.fillStyle = 'rgba(0, 229, 255, 0.85)';
+      ctx.fillStyle = theme.canvas.tmaTagText;
       ctx.textAlign = 'center';
       ctx.fillText(tmaTag, topScr.sx, topScr.sy - 8);
       ctx.textAlign = 'start';
@@ -734,11 +750,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         if (!visibleStarSet.has(star.id)) continue;
         const servesActiveArr = star.runwayIds.includes(activeLandingRunwayId);
         const lineColor = servesActiveArr
-          ? 'rgba(0, 229, 255, 0.50)'
-          : 'rgba(0, 229, 255, 0.20)';
+          ? theme.canvas.starActive
+          : theme.canvas.starInactive;
         const labelColor = servesActiveArr
-          ? 'rgba(0, 229, 255, 0.92)'
-          : 'rgba(0, 229, 255, 0.52)';
+          ? theme.canvas.starLabelActive
+          : theme.canvas.starLabelInactive;
 
         ctx.save();
         ctx.strokeStyle = lineColor;
@@ -773,7 +789,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             const tag = parts.join(' · ');
             ctx.font = '9px "IBM Plex Mono", monospace';
             const tw = ctx.measureText(tag).width + 8;
-            ctx.fillStyle = 'rgba(3, 16, 20, 0.82)';
+            ctx.fillStyle = theme.canvas.starTagBg;
             ctx.fillRect(mx - tw / 2, my - 16, tw, 13);
             ctx.fillStyle = labelColor;
             ctx.textAlign = 'center';
@@ -791,11 +807,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         if (!visibleSidSet.has(sid.id)) continue;
         const servesActiveDep = sid.runwayIds.includes(activeDepartureRunwayId);
         const lineColor = servesActiveDep
-          ? 'rgba(255, 209, 102, 0.52)'
-          : 'rgba(255, 209, 102, 0.20)';
+          ? theme.canvas.sidActive
+          : theme.canvas.sidInactive;
         const labelColor = servesActiveDep
-          ? 'rgba(255, 209, 102, 0.92)'
-          : 'rgba(255, 209, 102, 0.50)';
+          ? theme.canvas.sidLabelActive
+          : theme.canvas.sidLabelInactive;
 
         ctx.save();
         ctx.strokeStyle = lineColor;
@@ -831,7 +847,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             const tag = parts.join(' · ');
             ctx.font = '9px "IBM Plex Mono", monospace';
             const tw = ctx.measureText(tag).width + 8;
-            ctx.fillStyle = 'rgba(20, 17, 5, 0.82)';
+            ctx.fillStyle = theme.canvas.sidTagBg;
             ctx.fillRect(mx - tw / 2, my + 4, tw, 13);
             ctx.fillStyle = labelColor;
             ctx.textAlign = 'center';
@@ -866,7 +882,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         const abPos = worldToScreen(abX, abY);
         const outAbPos = worldToScreen(outAbX, outAbY);
 
-        ctx.strokeStyle = 'rgba(0, 160, 200, 0.35)';
+        ctx.strokeStyle = theme.canvas.holdStroke;
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 4]);
         ctx.beginPath();
@@ -898,8 +914,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             : 'FIX');
 
         if (role === 'EXIT') {
-          // Radar Exit Gate: Amber Square/Diamond
-          ctx.strokeStyle = '#ffd166';
+          // Radar Exit Gate: Square/Diamond
+          ctx.strokeStyle = theme.canvas.wpExit;
           ctx.lineWidth = 1.5;
           ctx.beginPath();
           ctx.moveTo(pos.sx, pos.sy - 6);
@@ -909,8 +925,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           ctx.closePath();
           ctx.stroke();
         } else if (role === 'FAF') {
-          // Final Approach Fix: Green Maltese Cross Marker
-          ctx.strokeStyle = '#00ff66';
+          // Final Approach Fix: Cross Marker
+          ctx.strokeStyle = theme.canvas.wpFaf;
           ctx.lineWidth = 1.6;
           ctx.beginPath();
           ctx.moveTo(pos.sx - 5, pos.sy - 5);
@@ -920,7 +936,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           ctx.stroke();
         } else {
           // IAF / HOLD / VOR Triangle
-          ctx.strokeStyle = wp.isHoldingFix ? '#00e5ff' : role === 'IAF' ? '#38bdf8' : '#338855';
+          ctx.strokeStyle = wp.isHoldingFix
+            ? theme.canvas.wpHold
+            : role === 'IAF'
+            ? theme.canvas.wpIaf
+            : theme.canvas.wpFix;
           ctx.lineWidth = 1.5;
           ctx.beginPath();
           const triSize = wp.isHoldingFix || role === 'IAF' ? 6 : 4.5;
@@ -933,12 +953,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
         const nameColor =
           role === 'EXIT'
-            ? '#ffd166'
+            ? theme.canvas.wpExit
             : role === 'FAF'
-            ? '#00ff66'
-            : wp.isHoldingFix || role === 'IAF'
-            ? '#00e5ff'
-            : '#55aa77';
+            ? theme.canvas.wpFaf
+            : wp.isHoldingFix
+            ? theme.canvas.wpHold
+            : role === 'IAF'
+            ? theme.canvas.wpIaf
+            : theme.canvas.wpFix;
         ctx.fillStyle = nameColor;
         ctx.font =
           wp.isHoldingFix || role === 'IAF' || role === 'FAF' || role === 'EXIT'
@@ -952,7 +974,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             .filter(Boolean)
             .join(' · ');
           ctx.font = '8px "IBM Plex Mono", monospace';
-          ctx.fillStyle = 'rgba(162, 245, 191, 0.72)';
+          ctx.fillStyle = theme.canvas.wpConstraintText;
           ctx.fillText(cText, pos.sx + 8, pos.sy + 13);
         }
       }
@@ -989,21 +1011,21 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const isFreshHit = angleBehindSweep <= bloomAngleWindow && radarLayers.radarSweep;
       const flashRatio = isFreshHit ? Math.max(0, 1 - angleBehindSweep / bloomAngleWindow) : 0;
 
-      // Color coding per specification (Part 6)
+      // Color coding driven by active Radar Theme
       const isEmergency = Boolean(ac.isEmergency) || ac.transponder === '7700';
-      let primaryColor = '#00ff66';
+      let primaryColor = theme.canvas.targetPrimary;
       if (isEmergency || isCritical) {
-        primaryColor = '#ff3344';
+        primaryColor = theme.canvas.targetCritical;
       } else if (isWarning) {
-        primaryColor = '#ffb703';
+        primaryColor = theme.canvas.targetWarning;
       } else if (isLost) {
-        primaryColor = '#ff3344';
+        primaryColor = theme.canvas.targetCritical;
       } else if (isStale) {
-        primaryColor = '#8a9a90';
+        primaryColor = theme.canvas.targetStale;
       } else if (isSelected) {
-        primaryColor = '#ffffff';
+        primaryColor = theme.canvas.targetSelected;
       } else if (isFreshHit) {
-        primaryColor = '#caffea';
+        primaryColor = theme.canvas.targetFresh;
       }
 
       // 7a. Phosphor Excitation Bloom on antenna pass
@@ -1011,9 +1033,9 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.save();
         const bloomRadius = 18;
         const bloomGrad = ctx.createRadialGradient(pos.sx, pos.sy, 1, pos.sx, pos.sy, bloomRadius);
-        bloomGrad.addColorStop(0, `rgba(215, 255, 235, ${0.80 * flashRatio})`);
-        bloomGrad.addColorStop(0.4, `rgba(0, 255, 102, ${0.45 * flashRatio})`);
-        bloomGrad.addColorStop(1, 'rgba(0, 255, 102, 0)');
+        bloomGrad.addColorStop(0, `rgba(${theme.canvas.bloomInnerRgb}, ${0.80 * flashRatio})`);
+        bloomGrad.addColorStop(0.4, `rgba(${theme.canvas.bloomOuterRgb}, ${0.45 * flashRatio})`);
+        bloomGrad.addColorStop(1, `rgba(${theme.canvas.bloomOuterRgb}, 0)`);
         ctx.fillStyle = bloomGrad;
         ctx.beginPath();
         ctx.arc(pos.sx, pos.sy, bloomRadius, 0, Math.PI * 2);
@@ -1037,8 +1059,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
           // Outer glowing shadow gradient
           const glowGrad = ctx.createLinearGradient(pPrev.sx, pPrev.sy, pCurr.sx, pCurr.sy);
-          glowGrad.addColorStop(0, getAltitudeRgba(altPrev, 0.30));
-          glowGrad.addColorStop(1, getAltitudeRgba(altCurr, 0.30));
+          glowGrad.addColorStop(0, getAltitudeRgba(altPrev, 0.30, theme.isLight));
+          glowGrad.addColorStop(1, getAltitudeRgba(altCurr, 0.30, theme.isLight));
 
           ctx.strokeStyle = glowGrad;
           ctx.lineWidth = 5;
@@ -1049,8 +1071,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
           // Core crisp trajectory line gradient
           const coreGrad = ctx.createLinearGradient(pPrev.sx, pPrev.sy, pCurr.sx, pCurr.sy);
-          coreGrad.addColorStop(0, getAltitudeColor(altPrev));
-          coreGrad.addColorStop(1, getAltitudeColor(altCurr));
+          coreGrad.addColorStop(0, getAltitudeColor(altPrev, theme.isLight));
+          coreGrad.addColorStop(1, getAltitudeColor(altCurr, theme.isLight));
 
           ctx.strokeStyle = coreGrad;
           ctx.lineWidth = 2.5;
@@ -1065,8 +1087,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         const lastHPos = worldToScreen(lastH.x, lastH.y);
 
         const lastGlowGrad = ctx.createLinearGradient(lastHPos.sx, lastHPos.sy, pos.sx, pos.sy);
-        lastGlowGrad.addColorStop(0, getAltitudeRgba(lastH.altitude, 0.30));
-        lastGlowGrad.addColorStop(1, getAltitudeRgba(ac.altitude, 0.30));
+        lastGlowGrad.addColorStop(0, getAltitudeRgba(lastH.altitude, 0.30, theme.isLight));
+        lastGlowGrad.addColorStop(1, getAltitudeRgba(ac.altitude, 0.30, theme.isLight));
 
         ctx.strokeStyle = lastGlowGrad;
         ctx.lineWidth = 5;
@@ -1076,8 +1098,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.stroke();
 
         const lastCoreGrad = ctx.createLinearGradient(lastHPos.sx, lastHPos.sy, pos.sx, pos.sy);
-        lastCoreGrad.addColorStop(0, getAltitudeColor(lastH.altitude));
-        lastCoreGrad.addColorStop(1, getAltitudeColor(ac.altitude));
+        lastCoreGrad.addColorStop(0, getAltitudeColor(lastH.altitude, theme.isLight));
+        lastCoreGrad.addColorStop(1, getAltitudeColor(ac.altitude, theme.isLight));
 
         ctx.strokeStyle = lastCoreGrad;
         ctx.lineWidth = 2.5;
@@ -1090,7 +1112,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         for (let i = 0; i < ac.history.length; i++) {
           const hp = ac.history[i];
           const hPos = worldToScreen(hp.x, hp.y);
-          const dotColor = getAltitudeColor(hp.altitude);
+          const dotColor = getAltitudeColor(hp.altitude, theme.isLight);
 
           ctx.fillStyle = dotColor;
           ctx.beginPath();
@@ -1105,13 +1127,13 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.font = 'bold 9px "IBM Plex Mono", monospace';
         const labelWidth = ctx.measureText(originLabel).width + 12;
 
-        ctx.fillStyle = 'rgba(2, 20, 14, 0.95)';
-        ctx.strokeStyle = getAltitudeColor(entryPoint.altitude);
+        ctx.fillStyle = theme.canvas.originBadgeBg;
+        ctx.strokeStyle = getAltitudeColor(entryPoint.altitude, theme.isLight);
         ctx.lineWidth = 1.2;
         ctx.fillRect(entryPos.sx - labelWidth / 2, entryPos.sy - 22, labelWidth, 16);
         ctx.strokeRect(entryPos.sx - labelWidth / 2, entryPos.sy - 22, labelWidth, 16);
 
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = theme.canvas.originBadgeText;
         ctx.textAlign = 'center';
         ctx.fillText(originLabel, entryPos.sx, entryPos.sy - 11);
         ctx.textAlign = 'start';
@@ -1120,8 +1142,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
         // 7b-4. Projected / Assigned Multi-Leg Route & Curved Vector Trajectory
         ctx.save();
-        const currentAltColor = getAltitudeColor(ac.altitude);
-        const targetAltColor = getAltitudeColor(ac.targetAltitude);
+        const currentAltColor = getAltitudeColor(ac.altitude, theme.isLight);
+        const targetAltColor = getAltitudeColor(ac.targetAltitude, theme.isLight);
 
         // Highlight active holding racetrack if aircraft is holding
         if (ac.status === 'Holding' && ac.holdingWaypoint) {
@@ -1137,7 +1159,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
               stack.x - 3.5 * Math.sin(hRad) + 1.6 * Math.sin(perpRad),
               stack.y - 3.5 * Math.cos(hRad) + 1.6 * Math.cos(perpRad)
             );
-            ctx.strokeStyle = '#00e5ff';
+            ctx.strokeStyle = theme.canvas.selectionRing;
             ctx.lineWidth = 2.0;
             ctx.setLineDash([5, 4]);
             ctx.beginPath();
@@ -1248,20 +1270,20 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             if (legDistNM >= 3.0) {
               const midX = (currPos.sx + nextPos.sx) / 2;
               const midY = (currPos.sy + nextPos.sy) / 2;
-              ctx.fillStyle = 'rgba(3, 18, 12, 0.85)';
+              ctx.fillStyle = theme.canvas.legDistBg;
               ctx.font = '9px "IBM Plex Mono", monospace';
               const distTxt = `${legDistNM.toFixed(1)}NM`;
               const dw = ctx.measureText(distTxt).width + 6;
               ctx.fillRect(midX - dw / 2, midY - 7, dw, 13);
-              ctx.fillStyle = '#9ce8be';
+              ctx.fillStyle = theme.canvas.legDistText;
               ctx.textAlign = 'center';
               ctx.fillText(distTxt, midX, midY + 3);
               ctx.textAlign = 'start';
             }
 
             // Waypoint / Destination fix marker
-            ctx.fillStyle = step.isDestination ? '#00e5ff' : targetAltColor;
-            ctx.strokeStyle = '#05140b';
+            ctx.fillStyle = step.isDestination ? theme.canvas.selectionRing : targetAltColor;
+            ctx.strokeStyle = theme.canvas.routeMarkerStroke;
             ctx.lineWidth = 1.2;
             ctx.beginPath();
             ctx.arc(nextPos.sx, nextPos.sy, step.isDestination ? 4.5 : 4, 0, Math.PI * 2);
@@ -1271,13 +1293,13 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             const stepLabel = step.label;
             ctx.font = 'bold 9px "IBM Plex Mono", monospace';
             const sw = ctx.measureText(stepLabel).width + 10;
-            ctx.fillStyle = 'rgba(3, 20, 14, 0.92)';
-            ctx.strokeStyle = step.isDestination ? '#00e5ff' : targetAltColor;
+            ctx.fillStyle = theme.canvas.routeBadgeBg;
+            ctx.strokeStyle = step.isDestination ? theme.canvas.selectionRing : targetAltColor;
             ctx.lineWidth = 1.2;
             ctx.fillRect(nextPos.sx + 7, nextPos.sy - 8, sw, 16);
             ctx.strokeRect(nextPos.sx + 7, nextPos.sy - 8, sw, 16);
 
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = theme.canvas.routeBadgeText;
             ctx.fillText(stepLabel, nextPos.sx + 12, nextPos.sy + 4);
 
             currPos = nextPos;
@@ -1371,7 +1393,10 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
               .padStart(3, '0');
             const eteMin = (distNM / Math.max(120, ac.groundSpeed || 200)) * 60;
 
-            ctx.strokeStyle = chainRouteMode ? '#ffd166' : '#00ff66';
+            const directHighlight = chainRouteMode
+              ? theme.canvas.directChainHighlight
+              : theme.canvas.directHoverHighlight;
+            ctx.strokeStyle = directHighlight;
             ctx.lineWidth = 2.0;
             ctx.setLineDash([4, 4]);
             ctx.beginPath();
@@ -1380,7 +1405,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             ctx.stroke();
             ctx.setLineDash([]);
 
-            ctx.strokeStyle = chainRouteMode ? '#ffd166' : '#00ff66';
+            ctx.strokeStyle = directHighlight;
             ctx.lineWidth = 1.6;
             ctx.beginPath();
             ctx.arc(pTo.sx, pTo.sy, 11, 0, Math.PI * 2);
@@ -1389,11 +1414,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             const previewLabel = `${chainRouteMode ? '+LEG ' : 'DIR '}${targetPoint.name} · ${brg}° · ${distNM.toFixed(1)}NM (${eteMin.toFixed(1)}m)`;
             ctx.font = 'bold 9px "IBM Plex Mono", monospace';
             const pw = ctx.measureText(previewLabel).width + 10;
-            ctx.fillStyle = 'rgba(4, 24, 15, 0.95)';
-            ctx.strokeStyle = chainRouteMode ? '#ffd166' : '#00ff66';
+            ctx.fillStyle = theme.canvas.routeBadgeBg;
+            ctx.strokeStyle = directHighlight;
             ctx.fillRect(pTo.sx - pw / 2, pTo.sy - 26, pw, 16);
             ctx.strokeRect(pTo.sx - pw / 2, pTo.sy - 26, pw, 16);
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = theme.canvas.routeBadgeText;
             ctx.textAlign = 'center';
             ctx.fillText(previewLabel, pTo.sx, pTo.sy - 15);
             ctx.textAlign = 'start';
@@ -1407,12 +1432,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           const gy = rwy.threshold.y - 11.0 * Math.cos(radRwy);
           const gp = worldToScreen(gx, gy);
 
-          ctx.strokeStyle = hoveredIlsGate ? '#00ff66' : '#00e5ff';
+          ctx.strokeStyle = hoveredIlsGate
+            ? theme.canvas.directHoverHighlight
+            : theme.canvas.selectionRing;
           ctx.lineWidth = 1.5;
           ctx.beginPath();
           ctx.arc(gp.sx, gp.sy, 6, 0, Math.PI * 2);
           ctx.stroke();
-          ctx.fillStyle = '#00e5ff';
+          ctx.fillStyle = theme.canvas.selectionRing;
           ctx.font = 'bold 9px "IBM Plex Mono", monospace';
           ctx.fillText(`ILS GATE ${rwy.id}`, gp.sx + 9, gp.sy + 3);
         }
@@ -1424,7 +1451,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           const hp = trk.history[i];
           const hPos = worldToScreen(hp.x, hp.y);
           const alpha = 0.12 + (i / trk.history.length) * 0.45;
-          ctx.fillStyle = isCritical ? `rgba(255, 51, 68, ${alpha})` : isStale ? `rgba(138, 154, 144, ${alpha})` : `rgba(0, 255, 102, ${alpha})`;
+          ctx.fillStyle = isCritical
+            ? `rgba(${theme.canvas.trailCriticalRgb}, ${alpha})`
+            : isStale
+            ? `rgba(${theme.canvas.trailStaleRgb}, ${alpha})`
+            : `rgba(${theme.canvas.trailNormalRgb}, ${alpha})`;
           ctx.beginPath();
           ctx.arc(hPos.sx, hPos.sy, Math.max(1.5, 2.5 - (trk.history.length - i) * 0.3), 0, Math.PI * 2);
           ctx.fill();
@@ -1473,6 +1504,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           isSelected,
           isFreshHit,
           rangeNM,
+          selectionReticleColor: theme.canvas.selectionReticle,
         });
       }
 
@@ -1484,7 +1516,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.save();
         const animProgress = (now % 900) / 900;
         const isPilot = speakerRole === 'PILOT';
-        const waveColor = isPilot ? '0, 255, 102' : '0, 229, 255';
+        const waveColor = isPilot ? theme.canvas.pilotWaveRgb : theme.canvas.atcWaveRgb;
 
         // 3 concentric expanding radio waves radiating outward from blip
         for (let w = 0; w < 3; w++) {
@@ -1515,7 +1547,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       // Emergency 7700 diamond ring marker
       if (isEmergency) {
         ctx.save();
-        ctx.strokeStyle = '#ff3344';
+        ctx.strokeStyle = theme.canvas.targetCritical;
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         ctx.moveTo(pos.sx, pos.sy - 13);
@@ -1529,7 +1561,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
       // Selected aircraft highlighting ring
       if (isSelected) {
-        ctx.strokeStyle = '#00e5ff';
+        ctx.strokeStyle = theme.canvas.selectionRing;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
@@ -1586,10 +1618,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         }
 
         const hasVectorConflict = minSepNM < 3.5;
-        const vectorColor = hasVectorConflict ? '#ff4d4d' : '#00e5ff';
+        const vectorColor = hasVectorConflict
+          ? theme.canvas.vectorConflict
+          : theme.canvas.vectorNormal;
 
         // Outer control circle
-        ctx.strokeStyle = hasVectorConflict ? 'rgba(255, 77, 77, 0.5)' : 'rgba(0, 229, 255, 0.45)';
+        ctx.strokeStyle = hasVectorConflict
+          ? theme.canvas.vectorRingConflict
+          : theme.canvas.vectorRingNormal;
         ctx.lineWidth = 1.2;
         ctx.setLineDash([2, 4]);
         ctx.beginPath();
@@ -1602,7 +1638,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         const handleY = pos.sy - handleRadiusPx * Math.cos(currentHdgRad);
 
         ctx.fillStyle = vectorColor;
-        ctx.strokeStyle = '#ffffff';
+        ctx.strokeStyle = theme.canvas.routeMarkerStroke;
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(handleX, handleY, 6, 0, Math.PI * 2);
@@ -1635,7 +1671,9 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.font = 'bold 10px "IBM Plex Mono", monospace';
         const bw = ctx.measureText(hdgBadgeText).width + 12;
 
-        ctx.fillStyle = hasVectorConflict ? 'rgba(42, 10, 12, 0.94)' : 'rgba(0, 26, 18, 0.92)';
+        ctx.fillStyle = hasVectorConflict
+          ? theme.canvas.vectorBadgeConflictBg
+          : theme.canvas.vectorBadgeBg;
         ctx.strokeStyle = vectorColor;
         ctx.lineWidth = 1.2;
         ctx.fillRect(handleX + 8, handleY - 12, bw, 20);
@@ -1650,7 +1688,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const tagY = pos.sy + tagOff.y;
 
       // Leader line connecting aircraft target to data tag
-      ctx.strokeStyle = isTransmitting ? (speakerRole === 'PILOT' ? '#00ff66' : '#00e5ff') : primaryColor;
+      ctx.strokeStyle = isTransmitting
+        ? speakerRole === 'PILOT'
+          ? theme.canvas.txPilotColor
+          : theme.canvas.txAtcColor
+        : primaryColor;
       ctx.lineWidth = isTransmitting ? 1.8 : 1;
       ctx.beginPath();
       ctx.moveTo(pos.sx, pos.sy);
@@ -1661,10 +1703,14 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const extTag = radarLayers.extendedTargetTags;
       const boxWidth = isSelected ? (extTag ? 152 : 122) : (extTag ? 124 : 98);
       const boxHeight = isSelected ? (extTag ? 58 : 49) : (extTag ? 47 : 38);
-      ctx.fillStyle = isSelected ? 'rgba(5, 28, 18, 0.95)' : 'rgba(7, 16, 12, 0.90)';
-      ctx.strokeStyle = isTransmitting 
-        ? (speakerRole === 'PILOT' ? '#00ff66' : '#00e5ff') 
-        : isFreshHit ? '#00ffaa' : primaryColor;
+      ctx.fillStyle = isSelected ? theme.canvas.tagBgSelected : theme.canvas.tagBg;
+      ctx.strokeStyle = isTransmitting
+        ? speakerRole === 'PILOT'
+          ? theme.canvas.txPilotColor
+          : theme.canvas.txAtcColor
+        : isFreshHit
+        ? theme.canvas.tagBorderFresh
+        : primaryColor;
       ctx.lineWidth = isTransmitting ? 2 : isSelected ? 1.5 : 0.8;
       ctx.fillRect(tagX, tagY - 10, boxWidth, boxHeight);
       ctx.strokeRect(tagX, tagY - 10, boxWidth, boxHeight);
@@ -1673,15 +1719,15 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       if (isTransmitting) {
         ctx.save();
         const isPilot = speakerRole === 'PILOT';
-        const badgeColor = isPilot ? '#00ff66' : '#00e5ff';
-        const badgeBg = isPilot ? 'rgba(0, 32, 14, 0.96)' : 'rgba(0, 24, 34, 0.96)';
-        const badgeText = isPilot ? '🎙️ PILOT TX' : '🎙️ ATC TX';
+        const badgeColor = isPilot ? theme.canvas.txPilotColor : theme.canvas.txAtcColor;
+        const badgeBg = isPilot ? theme.canvas.txPilotBg : theme.canvas.txAtcBg;
+        const badgeText = isPilot ? 'PILOT TX' : 'ATC TX';
 
         ctx.fillStyle = badgeBg;
         ctx.strokeStyle = badgeColor;
         ctx.lineWidth = 1.4;
         ctx.shadowColor = badgeColor;
-        ctx.shadowBlur = 8;
+        ctx.shadowBlur = theme.isLight ? 4 : 8;
         ctx.fillRect(tagX, tagY - 25, boxWidth, 14);
         ctx.strokeRect(tagX, tagY - 25, boxWidth, 14);
         ctx.shadowBlur = 0;
@@ -1689,14 +1735,18 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.fillStyle = badgeColor;
         ctx.font = 'bold 9px "IBM Plex Mono", monospace';
         const barsAnim = Math.floor((now / 150) % 4);
-        const bars = barsAnim === 0 ? ' ▂' : barsAnim === 1 ? ' ▂▃' : barsAnim === 2 ? ' ▂▃▅' : ' ▂▃';
-        ctx.fillText(`${badgeText} ${bars}`, tagX + 4, tagY - 15);
+        const bars = barsAnim === 0 ? ' _' : barsAnim === 1 ? ' _=' : barsAnim === 2 ? ' _=#' : ' _=';
+        ctx.fillText(`${badgeText}${bars}`, tagX + 4, tagY - 15);
         ctx.restore();
       }
 
       // Line 1: CALLSIGN / AIRCRAFT TYPE (+Wake Category & 7700 Emergency tag)
       const wakeCode = ac.category === 'Heavy' ? 'H' : ac.category === 'Large' ? 'M' : 'L';
-      ctx.fillStyle = isEmergency ? '#ff4d4d' : isSelected ? '#ffffff' : primaryColor;
+      ctx.fillStyle = isEmergency
+        ? theme.canvas.targetCritical
+        : isSelected
+        ? theme.canvas.tagTextSelected
+        : primaryColor;
       ctx.font = 'bold 11px "IBM Plex Mono", monospace';
       ctx.fillText(
         isEmergency
@@ -1714,7 +1764,13 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const vsHundreds = Math.round(Math.abs(ac.verticalSpeed) / 100);
       const vertSymbol = ac.verticalSpeed > 200 ? `↑${vsHundreds}` : ac.verticalSpeed < -200 ? `↓${vsHundreds}` : '=';
       ctx.font = '10px "IBM Plex Mono", monospace';
-      ctx.fillStyle = isSelected ? getAltitudeColor(ac.altitude) : isEmergency || isCritical ? '#ff3344' : isWarning ? '#ffb703' : '#a2f5bf';
+      ctx.fillStyle = isSelected
+        ? getAltitudeColor(ac.altitude, theme.isLight)
+        : isEmergency || isCritical
+        ? theme.canvas.targetCritical
+        : isWarning
+        ? theme.canvas.targetWarning
+        : theme.canvas.tagAltText;
       ctx.fillText(`${curAlt100} c${tgtAlt100} ${vertSymbol}`, tagX + 4, tagY + 14);
 
       // Line 3: GROUND SPEED / HEADING (+TRACK WHEN EXTENDED) / FLIGHT PHASE
@@ -1759,18 +1815,18 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const hdgStr = extTag && trkDeg !== hdg ? `${hdg}/${trkDeg}°` : `${hdg}°`;
       ctx.font = '9px "IBM Plex Mono", monospace';
       ctx.fillStyle = isEmergency
-        ? '#ff6b6b'
+        ? theme.canvas.targetCritical
         : ac.flightPhase === 'HANDOFF_READY' || (!isDepTag && ac.landingCleared)
-        ? '#00ff66'
+        ? theme.canvas.tagPhaseReady
         : !isDepTag && (ac.landingClearanceRequested || ac.flightPhase === 'BASE_VECTOR')
-        ? '#ffd166'
+        ? theme.canvas.tagPhaseRequest
         : ac.ilsGlideslopeCaptured ||
           ac.ilsLocalizerCaptured ||
           ac.flightPhase === 'EXIT_ROUTING' ||
           ac.flightPhase === 'STAR_ENROUTE' ||
           ac.flightPhase === 'FINAL_INTERCEPT'
-        ? '#00e5ff'
-        : '#73b890';
+        ? theme.canvas.tagPhaseActive
+        : theme.canvas.tagPhaseMuted;
       ctx.fillText(`${gs}kt ${hdgStr} ${phaseTag}`, tagX + 4, tagY + 25);
 
       // Line 4: Tactical Route / Exit Gate / Landing Clearance / Runway / Distance Readout
@@ -1797,10 +1853,10 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.font = 'bold 9px "IBM Plex Mono", monospace';
         ctx.fillStyle =
           ac.flightPhase === 'HANDOFF_READY' || (!isDepTag && ac.landingCleared)
-            ? '#00ff66'
+            ? theme.canvas.tagPhaseReady
             : !isDepTag && ac.landingClearanceRequested
-            ? '#ffd166'
-            : '#00e5ff';
+            ? theme.canvas.tagPhaseRequest
+            : theme.canvas.tagPhaseActive;
         const routeChip = isDepTag ? depRouteChip : arrRouteChip;
         ctx.fillText(
           extTag
@@ -1813,10 +1869,10 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         ctx.font = '9px "IBM Plex Mono", monospace';
         ctx.fillStyle =
           ac.flightPhase === 'HANDOFF_READY' || (!isDepTag && ac.landingCleared)
-            ? '#00ff66'
+            ? theme.canvas.tagPhaseReady
             : ac.status === 'Departing' || (!isDepTag && ac.landingClearanceRequested)
-            ? '#ffd166'
-            : '#58b384';
+            ? theme.canvas.tagPhaseRequest
+            : theme.canvas.tagRouteMuted;
         const navHint = isDepTag
           ? depRouteChip
           : ac.landingCleared || ac.landingClearanceRequested
@@ -1833,7 +1889,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       const p1 = worldToScreen(measuringRuler.start.x, measuringRuler.start.y);
       const p2 = worldToScreen(measuringRuler.current.x, measuringRuler.current.y);
 
-      ctx.strokeStyle = '#ffd166';
+      ctx.strokeStyle = theme.canvas.rulerColor;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -1857,13 +1913,13 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
       const midX = (p1.sx + p2.sx) / 2;
       const midY = (p1.sy + p2.sy) / 2;
-      ctx.fillStyle = 'rgba(20, 20, 10, 0.9)';
-      ctx.strokeStyle = '#ffd166';
+      ctx.fillStyle = theme.canvas.rulerBg;
+      ctx.strokeStyle = theme.canvas.rulerColor;
       ctx.lineWidth = 1;
       ctx.fillRect(midX + 8, midY - 14, 106, 26);
       ctx.strokeRect(midX + 8, midY - 14, 106, 26);
 
-      ctx.fillStyle = '#ffd166';
+      ctx.fillStyle = theme.canvas.rulerColor;
       ctx.font = 'bold 10px "IBM Plex Mono", monospace';
       ctx.fillText(`${distNM.toFixed(1)} NM  ${Math.round(bearing).toString().padStart(3, '0')}°`, midX + 12, midY + 2);
     }
@@ -1896,6 +1952,7 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
     hoveredIlsGate,
     chainRouteMode,
     canvasSize,
+    theme,
   ]);
 
   // Mouse Interaction Handlers
@@ -2120,7 +2177,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
   };
 
   return (
-    <div ref={containerRef} className="relative w-full h-full flex flex-col bg-[#030805] overflow-hidden">
+    <div
+      ref={containerRef}
+      className="relative w-full h-full flex flex-col overflow-hidden"
+      style={{ backgroundColor: theme.ui.containerBg }}
+    >
       {/* 2D High-Precision Canvas */}
       <canvas
         ref={canvasRef}
@@ -2133,20 +2194,29 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
         onContextMenu={e => e.preventDefault()}
       />
 
-      {/* CRT Scanline & Phosphor Vignette Overlay */}
-      <div className="absolute inset-0 radar-crt-overlay pointer-events-none" />
+      {/* CRT Scanline & Phosphor Vignette Overlay (hidden in Daylight Chart mode) */}
+      <div
+        className="absolute inset-0 radar-crt-overlay pointer-events-none"
+        style={{ opacity: theme.crtScanlineOpacity }}
+      />
 
-      {/* Minimal Top-Left Pointer & Display Popover Control */}
+      {/* Minimal Top-Left Pointer, Display & Theme Popover Control */}
       <div className="absolute top-3 left-3 z-20 flex flex-col items-start gap-1.5 font-mono pointer-events-auto select-none">
-        <div className="flex items-center gap-1 bg-[#07130d]/92 backdrop-blur-md px-1.5 py-1 border border-[#163826] rounded-md shadow-lg whitespace-nowrap">
+        <div
+          className="flex items-center gap-1 backdrop-blur-md px-1.5 py-1 border rounded-md shadow-lg whitespace-nowrap"
+          style={{
+            backgroundColor: theme.ui.panelBg,
+            borderColor: theme.ui.border,
+          }}
+        >
           <button
             type="button"
             onClick={() => setActiveTool('SELECT')}
-            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
-              activeTool === 'SELECT'
-                ? 'bg-[#173d28] text-[#00ff66]'
-                : 'hover:bg-[#10261a] text-[#7cc29a]'
-            }`}
+            className="px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors"
+            style={{
+              backgroundColor: activeTool === 'SELECT' ? theme.ui.accentPrimaryBg : 'transparent',
+              color: activeTool === 'SELECT' ? theme.ui.accentPrimary : theme.ui.textSecondary,
+            }}
             title="Select Target & Drag Tag"
           >
             <MousePointer className="w-3.5 h-3.5" />
@@ -2156,11 +2226,13 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           <button
             type="button"
             onClick={() => setActiveTool('HEADING_VECTOR')}
-            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
-              activeTool === 'HEADING_VECTOR'
-                ? 'bg-[#113542] text-[#00e5ff]'
-                : 'hover:bg-[#10261a] text-[#7cc29a]'
-            }`}
+            className="px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors"
+            style={{
+              backgroundColor:
+                activeTool === 'HEADING_VECTOR' ? theme.ui.accentSecondaryBg : 'transparent',
+              color:
+                activeTool === 'HEADING_VECTOR' ? theme.ui.accentSecondary : theme.ui.textSecondary,
+            }}
             title="Drag Heading Vector [H]"
           >
             <Compass className="w-3.5 h-3.5" />
@@ -2170,11 +2242,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           <button
             type="button"
             onClick={() => setActiveTool('DIRECT_TO')}
-            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
-              activeTool === 'DIRECT_TO'
-                ? 'bg-[#173d28] text-[#00ff66]'
-                : 'hover:bg-[#10261a] text-[#7cc29a]'
-            }`}
+            className="px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors"
+            style={{
+              backgroundColor: activeTool === 'DIRECT_TO' ? theme.ui.accentPrimaryBg : 'transparent',
+              color: activeTool === 'DIRECT_TO' ? theme.ui.accentPrimary : theme.ui.textSecondary,
+            }}
             title="Direct-To Fix [D] (Shift+Click to chain)"
           >
             <Navigation className="w-3.5 h-3.5" />
@@ -2185,11 +2257,11 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             <button
               type="button"
               onClick={() => setChainRouteMode(prev => !prev)}
-              className={`px-1.5 py-1 rounded text-[10px] font-bold transition-colors ${
-                chainRouteMode
-                  ? 'bg-[#362c0b] text-[#ffd166]'
-                  : 'bg-[#0b1f14] text-[#7ccfb0] hover:bg-[#123020]'
-              }`}
+              className="px-1.5 py-1 rounded text-[10px] font-bold transition-colors"
+              style={{
+                backgroundColor: chainRouteMode ? theme.ui.accentWarnBg : theme.ui.subPanelBg,
+                color: chainRouteMode ? theme.ui.accentWarn : theme.ui.textSecondary,
+              }}
               title="Append waypoints into multi-leg route"
             >
               +Leg
@@ -2199,59 +2271,207 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           <button
             type="button"
             onClick={() => setActiveTool('MEASURE')}
-            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
-              activeTool === 'MEASURE'
-                ? 'bg-[#362c0b] text-[#ffd166]'
-                : 'hover:bg-[#10261a] text-[#7cc29a]'
-            }`}
+            className="px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors"
+            style={{
+              backgroundColor: activeTool === 'MEASURE' ? theme.ui.accentWarnBg : 'transparent',
+              color: activeTool === 'MEASURE' ? theme.ui.accentWarn : theme.ui.textSecondary,
+            }}
             title="Measure Distance & Bearing [M]"
           >
             <Ruler className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Measure</span>
           </button>
 
-          <span className="h-4 w-px bg-[#19402b] mx-0.5" aria-hidden="true" />
+          <span
+            className="h-4 w-px mx-0.5"
+            style={{ backgroundColor: theme.ui.divider }}
+            aria-hidden="true"
+          />
 
           <button
             type="button"
-            onClick={() => setShowScopeControls(prev => !prev)}
-            className={`px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors ${
-              showScopeControls
-                ? 'bg-[#173d28] text-[#00ff66]'
-                : 'hover:bg-[#10261a] text-[#9de3ba]'
-            }`}
+            onClick={() => {
+              setShowScopeControls(prev => !prev);
+              setShowThemeMenu(false);
+            }}
+            className="px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors"
+            style={{
+              backgroundColor: showScopeControls ? theme.ui.accentPrimaryBg : 'transparent',
+              color: showScopeControls ? theme.ui.accentPrimary : theme.ui.textPrimary,
+            }}
             title="Radar Display Layers & Declutter"
           >
             <Layers className="w-3.5 h-3.5" />
             <span>Display</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setShowThemeMenu(prev => !prev);
+              setShowScopeControls(false);
+            }}
+            className="px-2 py-1 rounded text-[11px] flex items-center gap-1.5 transition-colors"
+            style={{
+              backgroundColor: showThemeMenu ? theme.ui.accentSecondaryBg : 'transparent',
+              color: showThemeMenu ? theme.ui.accentSecondary : theme.ui.textPrimary,
+            }}
+            title="Switch Radar Screen Color Theme"
+            data-testid="radar-theme-toggle"
+          >
+            <Palette className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">{theme.shortName}</span>
+          </button>
         </div>
+
+        {/* Radar Scope Visual Theme Selector Popover */}
+        {showThemeMenu && (
+          <div
+            className="w-80 backdrop-blur-md border rounded-md p-3 shadow-2xl flex flex-col gap-2"
+            style={{
+              backgroundColor: theme.ui.panelBg,
+              borderColor: theme.ui.border,
+            }}
+          >
+            <div
+              className="flex items-center justify-between pb-2 border-b"
+              style={{ borderColor: theme.ui.subBorder }}
+            >
+              <div>
+                <div className="text-[11px] font-semibold" style={{ color: theme.ui.textPrimary }}>
+                  Radar Scope Theme
+                </div>
+                <div className="text-[10px]" style={{ color: theme.ui.textMuted }}>
+                  Pre-designed color palettes · saved per user
+                </div>
+              </div>
+              <span
+                className="text-[10px] font-semibold"
+                style={{ color: theme.ui.accentSecondary }}
+              >
+                {theme.shortName}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1.5">
+              {RADAR_THEME_LIST.map(preset => {
+                const isSelectedTheme = preset.id === theme.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => {
+                      setRadarTheme(preset.id);
+                      setShowThemeMenu(false);
+                    }}
+                    className="flex items-center justify-between gap-2.5 px-2.5 py-2 rounded border text-left transition-colors"
+                    style={{
+                      backgroundColor: isSelectedTheme
+                        ? theme.ui.accentSecondaryBg
+                        : theme.ui.subPanelBg,
+                      borderColor: isSelectedTheme
+                        ? theme.ui.accentSecondary
+                        : theme.ui.subBorder,
+                    }}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {/* Mini Circular Scope Preview Swatch */}
+                      <span
+                        className="relative w-7 h-7 rounded-full border shrink-0 flex items-center justify-center overflow-hidden"
+                        style={{
+                          backgroundColor: preset.swatch.bg,
+                          borderColor: preset.swatch.ring,
+                        }}
+                      >
+                        <span
+                          className="w-4 h-4 rounded-full border flex items-center justify-center"
+                          style={{ borderColor: preset.swatch.ring }}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{ backgroundColor: preset.swatch.primary }}
+                          />
+                        </span>
+                        <span
+                          className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full"
+                          style={{ backgroundColor: preset.swatch.secondary }}
+                        />
+                      </span>
+
+                      <div className="min-w-0">
+                        <div
+                          className="text-[11px] font-semibold truncate"
+                          style={{ color: theme.ui.textPrimary }}
+                        >
+                          {preset.name}
+                        </div>
+                        <div
+                          className="text-[9px] truncate"
+                          style={{ color: theme.ui.textMuted }}
+                        >
+                          {preset.subtitle}
+                        </div>
+                      </div>
+                    </div>
+
+                    {isSelectedTheme && (
+                      <Check
+                        className="w-3.5 h-3.5 shrink-0"
+                        style={{ color: theme.ui.accentSecondary }}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Clean Collapsible Display Popover */}
         {showScopeControls && (
-          <div className="w-72 bg-[#07130d]/96 backdrop-blur-md border border-[#1b462e] rounded-md p-3 shadow-2xl flex flex-col gap-3">
+          <div
+            className="w-72 backdrop-blur-md border rounded-md p-3 shadow-2xl flex flex-col gap-3"
+            style={{
+              backgroundColor: theme.ui.panelBg,
+              borderColor: theme.ui.border,
+            }}
+          >
             {/* Declutter Modes */}
-            <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#143724]">
-              <span className="text-[11px] font-semibold text-white">Scope Density</span>
-              <div className="flex items-center gap-1 bg-[#050c08] p-0.5 rounded border border-[#143724] text-[10px]">
+            <div
+              className="flex items-center justify-between gap-2 pb-2 border-b"
+              style={{ borderColor: theme.ui.subBorder }}
+            >
+              <span className="text-[11px] font-semibold" style={{ color: theme.ui.textPrimary }}>
+                Scope Density
+              </span>
+              <div
+                className="flex items-center gap-1 p-0.5 rounded border text-[10px]"
+                style={{
+                  backgroundColor: theme.ui.subPanelBg,
+                  borderColor: theme.ui.subBorder,
+                }}
+              >
                 <button
                   type="button"
                   onClick={() => applyRadarDeclutter('full')}
-                  className="px-2 py-0.5 rounded hover:bg-[#153624] text-[#00ff66] transition-colors"
+                  className="px-2 py-0.5 rounded transition-colors"
+                  style={{ color: theme.ui.accentPrimary }}
                 >
                   Full
                 </button>
                 <button
                   type="button"
                   onClick={() => applyRadarDeclutter('tactical')}
-                  className="px-2 py-0.5 rounded hover:bg-[#123340] text-[#00e5ff] transition-colors"
+                  className="px-2 py-0.5 rounded transition-colors"
+                  style={{ color: theme.ui.accentSecondary }}
                 >
                   Tactical
                 </button>
                 <button
                   type="button"
                   onClick={() => applyRadarDeclutter('minimal')}
-                  className="px-2 py-0.5 rounded hover:bg-[#2b220d] text-[#ffd166] transition-colors"
+                  className="px-2 py-0.5 rounded transition-colors"
+                  style={{ color: theme.ui.accentWarn }}
                 >
                   Min
                 </button>
@@ -2284,17 +2504,18 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
                     type="button"
                     key={item.key}
                     onClick={() => toggleLayer(item.key)}
-                    className={`flex items-center justify-between px-2 py-1 rounded text-[10px] border transition-colors ${
-                      active
-                        ? 'bg-[#0e2a1b] text-[#b4f2cc] border-[#1f5c3a]'
-                        : 'bg-[#050e09] text-[#4e735d] border-[#11281b] hover:text-[#86b89b]'
-                    }`}
+                    className="flex items-center justify-between px-2 py-1 rounded text-[10px] border transition-colors"
+                    style={{
+                      backgroundColor: active ? theme.ui.accentPrimaryBg : theme.ui.subPanelBg,
+                      color: active ? theme.ui.textPrimary : theme.ui.textMuted,
+                      borderColor: active ? theme.ui.border : theme.ui.subBorder,
+                    }}
                   >
                     <span className="truncate">{item.label}</span>
                     {active ? (
-                      <Eye className="w-3 h-3 text-[#00ff66] shrink-0" />
+                      <Eye className="w-3 h-3 shrink-0" style={{ color: theme.ui.accentPrimary }} />
                     ) : (
-                      <EyeOff className="w-3 h-3 text-[#4d6e5a] shrink-0" />
+                      <EyeOff className="w-3 h-3 shrink-0" style={{ color: theme.ui.textMuted }} />
                     )}
                   </button>
                 );
@@ -2302,23 +2523,28 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
             </div>
 
             {/* Compact Altitude Color Reference */}
-            <div className="pt-2 border-t border-[#143724]">
-              <div className="text-[10px] text-[#6cb68d] mb-1">Altitude Color Key</div>
-              <div className="grid grid-cols-5 gap-1 text-center text-[9px] tabular-nums">
-                <div className="text-[#00e5ff]">≥FL100</div>
-                <div className="text-[#00ff66]">7–10k</div>
-                <div className="text-[#ffd166]">4.5–7k</div>
-                <div className="text-[#ff9233]">2.5–4.5</div>
-                <div className="text-[#ff4d6d]">&lt;2.5k</div>
+            <div className="pt-2 border-t" style={{ borderColor: theme.ui.subBorder }}>
+              <div className="text-[10px] mb-1" style={{ color: theme.ui.textSecondary }}>
+                Altitude Color Key
+              </div>
+              <div className="grid grid-cols-5 gap-1 text-center text-[9px] tabular-nums font-semibold">
+                <div style={{ color: getAltitudeColor(11000, theme.isLight) }}>≥FL100</div>
+                <div style={{ color: getAltitudeColor(8000, theme.isLight) }}>7–10k</div>
+                <div style={{ color: getAltitudeColor(5500, theme.isLight) }}>4.5–7k</div>
+                <div style={{ color: getAltitudeColor(3500, theme.isLight) }}>2.5–4.5</div>
+                <div style={{ color: getAltitudeColor(1500, theme.isLight) }}>&lt;2.5k</div>
               </div>
             </div>
 
             {/* Footer Link to Full Routes & Layers Setup Page */}
-            <div className="pt-2 border-t border-[#143724] flex items-center justify-between">
+            <div
+              className="pt-2 border-t flex items-center justify-between"
+              style={{ borderColor: theme.ui.subBorder }}
+            >
               <button
                 type="button"
                 onClick={() => setAllRadarLayers(false)}
-                className="text-[10px] text-[#ff858d] hover:underline"
+                className="text-[10px] text-[#ff5c6c] hover:underline"
               >
                 Hide All
               </button>
@@ -2329,7 +2555,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
                     setShowScopeControls(false);
                     onOpenSetupRoutes();
                   }}
-                  className="text-[10px] text-[#00e5ff] hover:text-white flex items-center gap-1 font-semibold"
+                  className="text-[10px] flex items-center gap-1 font-semibold hover:underline"
+                  style={{ color: theme.ui.accentSecondary }}
                 >
                   <span>Per-Airport Routes</span>
                   <ArrowUpRight className="w-3 h-3" />
@@ -2342,7 +2569,10 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
 
       {/* Subtle Cursor World Coordinate Readout (Bottom-Left) */}
       {cursorWorldPos && (
-        <div className="absolute bottom-3 left-3 text-[10px] font-mono text-[#528f6c] pointer-events-none tabular-nums">
+        <div
+          className="absolute bottom-3 left-3 text-[10px] font-mono pointer-events-none tabular-nums"
+          style={{ color: theme.ui.textMuted }}
+        >
           {cursorWorldPos.x >= 0 ? '+' : ''}
           {cursorWorldPos.x.toFixed(1)}, {cursorWorldPos.y >= 0 ? '+' : ''}
           {cursorWorldPos.y.toFixed(1)} NM
@@ -2352,32 +2582,48 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
       {/* Compact Bottom-Right Range & Center Control */}
       <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-1.5 font-mono pointer-events-auto select-none">
         {showRangeMenu && (
-          <div className="bg-[#07130d]/96 backdrop-blur-md border border-[#1b462e] rounded-md p-1 flex items-center gap-1 shadow-xl">
-            {[5, 15, 35, 60, 100, 140].map(r => (
-              <button
-                type="button"
-                key={r}
-                onClick={() => {
-                  setRangeNM(r);
-                  setShowRangeMenu(false);
-                }}
-                className={`px-2 py-1 rounded text-[10px] font-semibold tabular-nums transition-colors ${
-                  Math.abs(rangeNM - r) < 0.6
-                    ? 'bg-[#173d28] text-[#00ff66]'
-                    : 'hover:bg-[#10261a] text-[#7cc29a]'
-                }`}
-              >
-                {r} NM
-              </button>
-            ))}
+          <div
+            className="backdrop-blur-md border rounded-md p-1 flex items-center gap-1 shadow-xl"
+            style={{
+              backgroundColor: theme.ui.panelBg,
+              borderColor: theme.ui.border,
+            }}
+          >
+            {[5, 15, 35, 60, 100, 140].map(r => {
+              const active = Math.abs(rangeNM - r) < 0.6;
+              return (
+                <button
+                  type="button"
+                  key={r}
+                  onClick={() => {
+                    setRangeNM(r);
+                    setShowRangeMenu(false);
+                  }}
+                  className="px-2 py-1 rounded text-[10px] font-semibold tabular-nums transition-colors"
+                  style={{
+                    backgroundColor: active ? theme.ui.accentPrimaryBg : 'transparent',
+                    color: active ? theme.ui.accentPrimary : theme.ui.textSecondary,
+                  }}
+                >
+                  {r} NM
+                </button>
+              );
+            })}
           </div>
         )}
 
-        <div className="flex items-center gap-1 bg-[#07130d]/92 backdrop-blur-md px-1.5 py-1 border border-[#163826] rounded-md shadow-lg">
+        <div
+          className="flex items-center gap-1 backdrop-blur-md px-1.5 py-1 border rounded-md shadow-lg"
+          style={{
+            backgroundColor: theme.ui.panelBg,
+            borderColor: theme.ui.border,
+          }}
+        >
           <button
             type="button"
             onClick={() => setRangeNM(zoomOutStep)}
-            className="p-1 hover:bg-[#10261a] text-[#8ad8a8] rounded transition-colors"
+            className="p-1 rounded transition-colors"
+            style={{ color: theme.ui.textSecondary }}
             title="Zoom Out [-]"
           >
             <ZoomOut className="w-3.5 h-3.5" />
@@ -2386,7 +2632,8 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           <button
             type="button"
             onClick={() => setShowRangeMenu(prev => !prev)}
-            className="px-2 py-0.5 text-[11px] font-semibold text-[#00e5ff] hover:text-white rounded hover:bg-[#10261a] tabular-nums transition-colors"
+            className="px-2 py-0.5 text-[11px] font-semibold rounded tabular-nums transition-colors"
+            style={{ color: theme.ui.accentSecondary }}
             title="Select Radar Range Preset"
           >
             {rangeNM < 10 ? rangeNM.toFixed(1) : Math.round(rangeNM)} NM
@@ -2395,18 +2642,24 @@ export const RadarCanvas: React.FC<RadarCanvasProps> = ({ onOpenSetupRoutes }) =
           <button
             type="button"
             onClick={() => setRangeNM(zoomInStep)}
-            className="p-1 hover:bg-[#10261a] text-[#8ad8a8] rounded transition-colors"
+            className="p-1 rounded transition-colors"
+            style={{ color: theme.ui.textSecondary }}
             title="Zoom In [+]"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
 
-          <span className="h-3.5 w-px bg-[#19402b] mx-0.5" aria-hidden="true" />
+          <span
+            className="h-3.5 w-px mx-0.5"
+            style={{ backgroundColor: theme.ui.divider }}
+            aria-hidden="true"
+          />
 
           <button
             type="button"
             onClick={handleResetView}
-            className="p-1 hover:bg-[#10261a] text-[#8ad8a8] rounded transition-colors"
+            className="p-1 rounded transition-colors"
+            style={{ color: theme.ui.textSecondary }}
             title="Center Scope [C]"
           >
             <Crosshair className="w-3.5 h-3.5" />

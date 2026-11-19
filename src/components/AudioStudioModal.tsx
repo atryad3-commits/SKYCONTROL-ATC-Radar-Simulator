@@ -2202,11 +2202,10 @@ export const AudioStudioModal: React.FC<AudioStudioModalProps> = ({
                       return (
                         <button
                           key={preset.id}
-                          onClick={() =>
-                            radioAudio.setVhfPreset(
-                              preset.id as Exclude<VhfQualityPresetId, 'custom'>
-                            )
-                          }
+                          onClick={() => {
+                            const nextPreset = preset.id as Exclude<VhfQualityPresetId, 'custom'>;
+                            useSimulationStore.getState().setRadioPreset(nextPreset);
+                          }}
                           className={`text-left p-2.5 rounded border transition-colors ${
                             active
                               ? 'bg-[#0e3820] border-[#00ff66] text-[#e8fff0]'

@@ -87,7 +87,7 @@ export async function testConnection(): Promise<void> {
       error instanceof Error &&
       (error.message.includes('the client is offline') || error.message.includes('timeout'))
     ) {
-      console.warn('Firestore backend unreachable; operating in offline guest mode.');
+      console.warn('Firestore backend currently unreachable; verify network connectivity.');
     }
   }
 }

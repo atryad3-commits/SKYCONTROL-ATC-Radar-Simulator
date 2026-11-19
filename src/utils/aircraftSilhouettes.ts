@@ -17,6 +17,7 @@ export interface SilhouetteDrawOptions {
   aircraftType: string;
   headingDeg: number;
   primaryColor: string;
+  selectionReticleColor?: string;
   isSelected: boolean;
   isFreshHit: boolean;
   rangeNM: number;
@@ -211,7 +212,7 @@ export function drawRadarAircraftSilhouette(
   // Subtle selection reticle ring underneath rotated silhouette so heading & shape remain crisp
   if (options.isSelected) {
     const ringRadius = Math.max(11, 11.5 * perf.wingSpanScale * zoomComp);
-    ctx.strokeStyle = 'rgba(0, 255, 102, 0.55)';
+    ctx.strokeStyle = options.selectionReticleColor || 'rgba(0, 255, 102, 0.55)';
     ctx.lineWidth = 1.0;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();

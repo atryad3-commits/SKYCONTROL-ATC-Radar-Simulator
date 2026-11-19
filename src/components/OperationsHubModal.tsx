@@ -103,7 +103,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
 
   // Tab 3: Custom Scenario Studio state
   const [draft, setDraft] = useState<CustomScenarioConfig>(() =>
-    buildDefaultScenarioDraft(userProfile?.uid || 'guest_local')
+    buildDefaultScenarioDraft(userProfile?.uid || '')
   );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [studioBusy, setStudioBusy] = useState(false);
@@ -546,7 +546,7 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                     type="button"
                     onClick={() => {
                       setEditingId(null);
-                      setDraft(buildDefaultScenarioDraft(userProfile?.uid || 'guest_local'));
+                      setDraft(buildDefaultScenarioDraft(userProfile?.uid || ''));
                       setStudioError(null);
                     }}
                     className="px-2.5 py-1.5 bg-[#123321] hover:bg-[#19472f] text-[#00ff66] border border-[#246340] rounded font-semibold flex items-center gap-1 transition-colors whitespace-nowrap"
@@ -634,7 +634,9 @@ export const OperationsHubModal: React.FC<OperationsHubModalProps> = ({
                     {editingId ? 'Edit Selected Scenario' : 'Design New Scenario'}
                   </h3>
                   <span className="text-[11px] text-[#5da87d]">
-                    {userProfile?.mode === 'google' ? 'Cloud Firestore Storage' : 'Local Browser Storage'}
+                    {userProfile?.authProvider === 'offline'
+                      ? 'Offline Local Storage'
+                      : 'Cloud Firestore Storage'}
                   </span>
                 </div>
 

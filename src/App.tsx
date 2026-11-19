@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { User } from 'firebase/auth';
 import confetti from 'canvas-confetti';
 import { useSimulationStore } from './store/simulationStore';
 import { TopBar, WorkspacePage } from './components/TopBar';
@@ -20,14 +21,24 @@ import { testConnection } from './firebase/config';
 import { localTtsClient } from './services/localTtsClient';
 import { radioAudio } from './audio/radioAudio';
 import {
-  loadGuestProfile,
+  isNetworkAuthError,
   loadOrCreateCloudProfile,
+  loadOrCreateUserPreferences,
+  loadUserActivities,
   loadUserScenarios,
-  migrateGuestScenariosToCloud,
-  persistMissionCompletion,
+  recordControllerActivityAndStats,
+  restoreOfflineAccountBundle,
+  saveUserPreferences,
+  signOutAccount,
   subscribeAuth,
 } from './services/persistenceService';
-import { CustomScenarioConfig, UserProfileData } from './types';
+import {
+  ActivityEntry,
+  ActivityKind,
+  CustomScenarioConfig,
+  UserPreferencesData,
+  UserProfileData,
+} from './types';
 
 export default function App() {
   const tickSimulation = useSimulationStore(state => state.tickSimulation);
@@ -40,8 +51,11 @@ export default function App() {
   const stats = useSimulationStore(state => state.stats);
   const hasCompletedStartupSetup = useSimulationStore(state => state.hasCompletedStartupSetup);
 
-  // Auth & User Persistence State
+  // Strict Auth & Per-User Persistence State
+  const [authInitialized, setAuthInitialized] = useState(false);
+  const [pendingVerificationUser, setPendingVerificationUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfileData | null>(null);
+  const [activities, setActivities] = useState<ActivityEntry[]>([]);
   const [scenarios, setScenarios] = useState<CustomScenarioConfig[]>([]);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
@@ -51,83 +65,308 @@ export default function App() {
   const [audioStudioTab, setAudioStudioTab] = useState<AudioStudioTab>('voices');
   const [isCertOpen, setIsCertOpen] = useState(false);
 
-  const persistedPassRef = useRef<boolean>(false);
+  const registerCallsignHintRef = useRef<string | undefined>(undefined);
+  const prefsHydratedUidRef = useRef<string | null>(null);
+  const userProfileRef = useRef<UserProfileData | null>(null);
+  const recordedMissionRunRef = useRef<string | null>(null);
+  const lastLoggedSessionKeyRef = useRef<string | null>(null);
+  const prefsSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Hydrate persisted offline Audio Studio settings on boot
+  const cancelPendingPrefsSync = useCallback(() => {
+    if (prefsSyncTimerRef.current) {
+      clearTimeout(prefsSyncTimerRef.current);
+      prefsSyncTimerRef.current = null;
+    }
+  }, []);
+
+  const hydrateUserBundle = useCallback(
+    (
+      profile: UserProfileData,
+      prefs: UserPreferencesData,
+      userScenarios: CustomScenarioConfig[],
+      userActivities: ActivityEntry[]
+    ) => {
+      cancelPendingPrefsSync();
+      useSimulationStore.getState().applyUserPreferences(prefs);
+      prefsHydratedUidRef.current = profile.uid;
+      userProfileRef.current = profile;
+      lastLoggedSessionKeyRef.current = null;
+      recordedMissionRunRef.current = null;
+
+      setUserProfile(profile);
+      setScenarios(userScenarios);
+      setActivities(userActivities);
+      setPendingVerificationUser(null);
+      setIsAuthModalOpen(false);
+      setSetupTab('airport');
+      setActivePage('setup');
+      setAuthInitialized(true);
+    },
+    [cancelPendingPrefsSync]
+  );
+
+  const resetToAuthGate = useCallback(
+    (pendingUser: User | null = null) => {
+      cancelPendingPrefsSync();
+      prefsHydratedUidRef.current = null;
+      userProfileRef.current = null;
+      lastLoggedSessionKeyRef.current = null;
+      recordedMissionRunRef.current = null;
+      useSimulationStore.getState().resetForSignOut();
+      setUserProfile(null);
+      setScenarios([]);
+      setActivities([]);
+      setPendingVerificationUser(pendingUser);
+      setIsAuthModalOpen(true);
+      setAuthInitialized(true);
+    },
+    [cancelPendingPrefsSync]
+  );
+
+  const hydrateVerifiedUser = useCallback(
+    async (firebaseUser: User) => {
+      cancelPendingPrefsSync();
+      prefsHydratedUidRef.current = null;
+
+      const cloudProfile = await loadOrCreateCloudProfile(
+        firebaseUser,
+        registerCallsignHintRef.current
+      );
+      registerCallsignHintRef.current = undefined;
+
+      const [prefs, cloudScenarios, cloudActivities] = await Promise.all([
+        loadOrCreateUserPreferences(firebaseUser),
+        loadUserScenarios(cloudProfile),
+        loadUserActivities(cloudProfile.uid, 50),
+      ]);
+
+      hydrateUserBundle(cloudProfile, prefs, cloudScenarios, cloudActivities);
+    },
+    [cancelPendingPrefsSync, hydrateUserBundle]
+  );
+
+  const handleOfflineAuthenticated = useCallback(
+    async (offlineProfile: UserProfileData) => {
+      cancelPendingPrefsSync();
+      prefsHydratedUidRef.current = null;
+
+      const [prefs, offlineScenarios, offlineActivities] = await Promise.all([
+        loadOrCreateUserPreferences(offlineProfile.uid),
+        loadUserScenarios(offlineProfile),
+        loadUserActivities(offlineProfile.uid, 50),
+      ]);
+
+      hydrateUserBundle(offlineProfile, prefs, offlineScenarios, offlineActivities);
+    },
+    [cancelPendingPrefsSync, hydrateUserBundle]
+  );
+
+  // Hydrate offline Audio Studio voice/engine catalog only when no verified user prefs exist yet
   useEffect(() => {
     void localTtsClient.fetchGlobalSettings().then(settings => {
-      useSimulationStore.getState().syncGlobalAudioSettings(settings, false);
-    });
-  }, []);
-
-  // 1. Verify Firestore connection & subscribe to Auth state on boot
-  useEffect(() => {
-    testConnection();
-
-    const unsubscribe = subscribeAuth(async firebaseUser => {
-      if (firebaseUser) {
-        try {
-          const guestBefore = loadGuestProfile();
-          const cloudProfile = await loadOrCreateCloudProfile(firebaseUser, guestBefore);
-          await migrateGuestScenariosToCloud(cloudProfile);
-          const cloudScenarios = await loadUserScenarios(cloudProfile);
-          setUserProfile(cloudProfile);
-          setScenarios(cloudScenarios);
-          setIsAuthModalOpen(false);
-          if (!useSimulationStore.getState().hasCompletedStartupSetup) {
-            setSetupTab('airport');
-            setActivePage('setup');
-          }
-        } catch (err) {
-          console.error('Auth profile sync failed:', err);
-        }
-      } else {
-        const guest = loadGuestProfile();
-        if (guest) {
-          setUserProfile(guest);
-          const guestScenarios = await loadUserScenarios(guest);
-          setScenarios(guestScenarios);
-          setIsAuthModalOpen(false);
-          if (!useSimulationStore.getState().hasCompletedStartupSetup) {
-            setSetupTab('airport');
-            setActivePage('setup');
-          }
-        } else {
-          setUserProfile(null);
-          setScenarios([]);
-          setIsAuthModalOpen(true);
-        }
+      if (!prefsHydratedUidRef.current) {
+        useSimulationStore.getState().syncGlobalAudioSettings(settings, false);
       }
     });
-
-    return () => unsubscribe();
   }, []);
 
-  // 2. Persist mission completion once when activeMission transitions to 'passed'
+  // 1. Verify Firestore connection & subscribe to Firebase Auth state (+ offline local session fallback)
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      testConnection();
+    }
+    let mounted = true;
+
+    const unsubscribe = subscribeAuth(async firebaseUser => {
+      if (!mounted) return;
+
+      if (firebaseUser && !firebaseUser.emailVerified) {
+        resetToAuthGate(firebaseUser);
+        return;
+      }
+
+      if (firebaseUser && firebaseUser.emailVerified) {
+        try {
+          await hydrateVerifiedUser(firebaseUser);
+          return;
+        } catch (err) {
+          console.error('Verified user hydration failed:', err);
+          if (!mounted) return;
+          if (isNetworkAuthError(err) || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+            const offlineBundle = await restoreOfflineAccountBundle().catch(() => null);
+            if (!mounted) return;
+            if (offlineBundle) {
+              hydrateUserBundle(
+                offlineBundle.profile,
+                offlineBundle.preferences,
+                offlineBundle.scenarios,
+                offlineBundle.activities
+              );
+              return;
+            }
+          }
+          resetToAuthGate(null);
+          return;
+        }
+      }
+
+      // No Firebase user signed in: check for an active persisted offline local controller session
+      const offlineBundle = await restoreOfflineAccountBundle().catch(() => null);
+      if (!mounted) return;
+      if (offlineBundle) {
+        hydrateUserBundle(
+          offlineBundle.profile,
+          offlineBundle.preferences,
+          offlineBundle.scenarios,
+          offlineBundle.activities
+        );
+        return;
+      }
+
+      resetToAuthGate(null);
+    });
+
+    return () => {
+      mounted = false;
+      unsubscribe();
+      cancelPendingPrefsSync();
+    };
+  }, [cancelPendingPrefsSync, hydrateUserBundle, hydrateVerifiedUser, resetToAuthGate]);
+
+  // 2. Debounced per-user Firestore preferences sync for radar, airport, route & audio settings
+  useEffect(() => {
+    const uid = userProfile?.uid;
+    if (!uid) {
+      cancelPendingPrefsSync();
+      return;
+    }
+
+    const unsubscribeStore = useSimulationStore.subscribe((state, prevState) => {
+      if (prefsHydratedUidRef.current !== uid) return;
+
+      const changed =
+        state.airport.icao !== prevState.airport.icao ||
+        state.activeLandingRunwayId !== prevState.activeLandingRunwayId ||
+        state.activeDepartureRunwayId !== prevState.activeDepartureRunwayId ||
+        state.simSpeed !== prevState.simSpeed ||
+        state.audioMuted !== prevState.audioMuted ||
+        state.audioVolume !== prevState.audioVolume ||
+        state.towerVoiceId !== prevState.towerVoiceId ||
+        state.radioPreset !== prevState.radioPreset ||
+        state.radarTheme !== prevState.radarTheme ||
+        state.radarLayers !== prevState.radarLayers ||
+        state.perAirportVisibility !== prevState.perAirportVisibility;
+
+      if (!changed) return;
+
+      cancelPendingPrefsSync();
+      prefsSyncTimerRef.current = setTimeout(() => {
+        if (prefsHydratedUidRef.current !== uid) return;
+        const snapshot = useSimulationStore.getState();
+        void saveUserPreferences(uid, {
+          preferredAirportIcao: snapshot.airport.icao,
+          preferredLandingRunwayId: snapshot.activeLandingRunwayId,
+          preferredDepartureRunwayId: snapshot.activeDepartureRunwayId,
+          simSpeed: snapshot.simSpeed,
+          audioMuted: snapshot.audioMuted,
+          audioVolume: snapshot.audioVolume,
+          towerVoiceId: snapshot.towerVoiceId,
+          radioPreset: snapshot.radioPreset,
+          radarTheme: snapshot.radarTheme,
+          radarLayers: snapshot.radarLayers,
+          perAirportVisibility: snapshot.perAirportVisibility,
+        }).catch(err => {
+          console.error('Failed to sync user preferences:', err);
+        });
+      }, 900);
+    });
+
+    return () => {
+      unsubscribeStore();
+      cancelPendingPrefsSync();
+    };
+  }, [userProfile?.uid, cancelPendingPrefsSync]);
+
+  // 3. Flush active Free Ops / Custom Ops shift into personal Activity Logbook
+  const flushCurrentFreeOrCustomSession = useCallback(async () => {
+    const profile = userProfileRef.current;
+    if (!profile) return;
+
+    const s = useSimulationStore.getState();
+    if (!s.hasCompletedStartupSetup || s.activeMission.status !== 'idle') return;
+    if (s.stats.elapsedSeconds < 15 && s.stats.landings === 0 && s.stats.departures === 0) {
+      return;
+    }
+
+    const sessionSig = `${s.activeScenarioName}|${s.airport.icao}|${Math.floor(
+      s.stats.elapsedSeconds
+    )}|${s.stats.landings}|${s.stats.departures}`;
+    if (lastLoggedSessionKeyRef.current === sessionSig) return;
+    lastLoggedSessionKeyRef.current = sessionSig;
+
+    const kind: ActivityKind =
+      s.activeScenarioName.startsWith('Free') || s.activeScenarioName.startsWith('Briefed')
+        ? 'free_ops'
+        : 'custom_ops';
+
+    try {
+      const { updatedProfile, entry } = await recordControllerActivityAndStats(profile, {
+        kind,
+        title: s.activeScenarioName || `Free Operations · ${s.airport.icao}`,
+        airportIcao: s.airport.icao,
+        landingRunwayId: s.activeLandingRunwayId,
+        departureRunwayId: s.activeDepartureRunwayId,
+        landings: s.stats.landings,
+        departures: s.stats.departures,
+        goArounds: s.stats.goArounds,
+        violations: s.stats.separationViolations,
+        score: s.stats.score,
+        durationSeconds: s.stats.elapsedSeconds,
+      });
+
+      userProfileRef.current = updatedProfile;
+      setUserProfile(updatedProfile);
+      setActivities(prev => [entry, ...prev.filter(a => a.id !== entry.id)].slice(0, 50));
+    } catch (err) {
+      console.error('Failed to log shift activity:', err);
+    }
+  }, []);
+
+  // 4. Persist Mission Pass / Fail once per mission attempt into Activity Logbook & Profile
   useEffect(() => {
     if (activeMission.status === 'active') {
-      persistedPassRef.current = false;
+      recordedMissionRunRef.current = null;
       return;
     }
 
     if (
-      activeMission.status === 'passed' &&
+      (activeMission.status === 'passed' || activeMission.status === 'failed') &&
       activeMission.mission &&
-      !persistedPassRef.current &&
+      !recordedMissionRunRef.current &&
       userProfile
     ) {
-      persistedPassRef.current = true;
-      const missionId = activeMission.mission.id;
+      const msn = activeMission.mission;
+      recordedMissionRunRef.current = `${msn.id}:${activeMission.status}`;
+      const state = useSimulationStore.getState();
 
-      persistMissionCompletion(
-        userProfile,
-        missionId,
-        stats.landings,
-        stats.departures,
-        stats.score
-      )
-        .then(({ updatedProfile, newlyCertified }) => {
+      recordControllerActivityAndStats(userProfile, {
+        kind: activeMission.status === 'passed' ? 'mission_pass' : 'mission_fail',
+        title: `Mission ${msn.number}: ${msn.title}`,
+        missionId: msn.id,
+        airportIcao: state.airport.icao,
+        landingRunwayId: state.activeLandingRunwayId,
+        departureRunwayId: state.activeDepartureRunwayId,
+        landings: stats.landings,
+        departures: stats.departures,
+        goArounds: stats.goArounds,
+        violations: stats.separationViolations,
+        score: stats.score,
+        durationSeconds: stats.elapsedSeconds,
+      })
+        .then(({ updatedProfile, entry, newlyCertified }) => {
+          userProfileRef.current = updatedProfile;
           setUserProfile(updatedProfile);
+          setActivities(prev => [entry, ...prev.filter(a => a.id !== entry.id)].slice(0, 50));
           if (newlyCertified) {
             setIsCertOpen(true);
             confetti({
@@ -138,7 +377,7 @@ export default function App() {
           }
         })
         .catch(err => {
-          console.error('Failed to persist mission pass:', err);
+          console.error('Failed to record mission result:', err);
         });
     }
   }, [
@@ -147,11 +386,15 @@ export default function App() {
     userProfile,
     stats.landings,
     stats.departures,
+    stats.goArounds,
+    stats.separationViolations,
     stats.score,
+    stats.elapsedSeconds,
   ]);
 
-  // 3. Deterministic Fixed-Timestep Simulation Loop (20 Hz, 50ms per step)
+  // 5. Deterministic Fixed-Timestep Simulation Loop (20 Hz, 50ms per step)
   useEffect(() => {
+    if (!userProfile) return;
     const TICK_INTERVAL_MS = 50;
     const dt = TICK_INTERVAL_MS / 1000;
 
@@ -160,11 +403,11 @@ export default function App() {
     }, TICK_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [tickSimulation]);
+  }, [tickSimulation, userProfile]);
 
-  // 4. Dynamic Periodic Traffic Inbound Spawner
+  // 6. Dynamic Periodic Traffic Inbound Spawner
   useEffect(() => {
-    if (isPaused) return;
+    if (isPaused || !userProfile) return;
 
     const intervalMs = Math.max(6000, (spawnIntervalSec * 1000) / simSpeed);
     const spawnTimer = setInterval(() => {
@@ -175,7 +418,7 @@ export default function App() {
     }, intervalMs);
 
     return () => clearInterval(spawnTimer);
-  }, [isPaused, simSpeed, spawnIntervalSec, maxTraffic, spawnInbound]);
+  }, [isPaused, userProfile, simSpeed, spawnIntervalSec, maxTraffic, spawnInbound]);
 
   const handleOpenSetup = (tab: SectorSetupTab = 'airport') => {
     setSetupTab(tab);
@@ -188,22 +431,57 @@ export default function App() {
     setActivePage('audio');
   };
 
-  const handleGuestProfileReady = async (profile: UserProfileData) => {
+  const handleProfileUpdated = (profile: UserProfileData) => {
+    userProfileRef.current = profile;
     setUserProfile(profile);
-    const list = await loadUserScenarios(profile);
-    setScenarios(list);
-    setIsAuthModalOpen(false);
-    if (!useSimulationStore.getState().hasCompletedStartupSetup) {
-      setSetupTab('airport');
-      setActivePage('setup');
-    }
   };
 
-  const handleSignedOut = () => {
-    setUserProfile(null);
-    setScenarios([]);
-    setIsAuthModalOpen(true);
-  };
+  const handleSignedOut = useCallback(async () => {
+    await flushCurrentFreeOrCustomSession();
+    cancelPendingPrefsSync();
+    prefsHydratedUidRef.current = null;
+    await signOutAccount();
+    resetToAuthGate(null);
+  }, [cancelPendingPrefsSync, flushCurrentFreeOrCustomSession, resetToAuthGate]);
+
+  // Strict Pre-Entry Screen 1: Loading while checking Firebase session
+  if (!authInitialized) {
+    return (
+      <div className="w-screen h-screen bg-[#050a07] text-[#d1e7dd] flex items-center justify-center p-6 select-none">
+        <div className="bg-[#08130e] border border-[#1b422d] rounded-lg px-8 py-6 text-center space-y-2 max-w-sm w-full">
+          <div className="font-mono font-bold text-base tracking-wider text-[#00ff66]">
+            SKYCONTROL
+          </div>
+          <div className="text-xs font-mono text-[#70b88d]">
+            Verifying controller credentials &amp; personal sector profile...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Strict Pre-Entry Screen 2: No simulator access until signed in & verified
+  if (!userProfile) {
+    return (
+      <div className="w-screen h-screen bg-[#050a07] text-[#d1e7dd] overflow-hidden select-none">
+        <AuthGateModal
+          isOpen={true}
+          canDismiss={false}
+          userProfile={null}
+          pendingVerificationUser={pendingVerificationUser}
+          onClose={() => undefined}
+          onProfileReady={handleProfileUpdated}
+          onOfflineAuthenticated={handleOfflineAuthenticated}
+          onVerificationComplete={hydrateVerifiedUser}
+          onRegisterCallsignHint={cs => {
+            registerCallsignHintRef.current = cs;
+          }}
+          onSignedOut={handleSignedOut}
+          onOpenCertificate={() => undefined}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="w-screen h-screen flex flex-col bg-[#050a07] text-[#d1e7dd] overflow-hidden select-none">
@@ -244,6 +522,7 @@ export default function App() {
           userProfile={userProfile}
           scenarios={scenarios}
           onScenariosChanged={setScenarios}
+          onBeforeStartNewSession={flushCurrentFreeOrCustomSession}
           onLaunchRadar={() => setActivePage('radar')}
           onOpenCertificate={() => setIsCertOpen(true)}
           onRequireAuth={() => setIsAuthModalOpen(true)}
@@ -259,21 +538,30 @@ export default function App() {
       {activePage === 'profile' && (
         <ManualProfilePage
           userProfile={userProfile}
-          onProfileReady={handleGuestProfileReady}
+          activities={activities}
+          onProfileReady={handleProfileUpdated}
+          onActivitiesChanged={setActivities}
           onSignedOut={handleSignedOut}
+          onLogCurrentSession={flushCurrentFreeOrCustomSession}
           onOpenCertificate={() => setIsCertOpen(true)}
           onRequireAuth={() => setIsAuthModalOpen(true)}
           onReturnToRadar={() => setActivePage('radar')}
         />
       )}
 
-      {/* Authentication Gate Modal (Initial Sign-In & Guest Upgrade) */}
+      {/* Authenticated Account Console Modal */}
       <AuthGateModal
         isOpen={isAuthModalOpen}
-        canDismiss={Boolean(userProfile)}
+        canDismiss={true}
         userProfile={userProfile}
+        pendingVerificationUser={pendingVerificationUser}
         onClose={() => setIsAuthModalOpen(false)}
-        onProfileReady={handleGuestProfileReady}
+        onProfileReady={handleProfileUpdated}
+        onOfflineAuthenticated={handleOfflineAuthenticated}
+        onVerificationComplete={hydrateVerifiedUser}
+        onRegisterCallsignHint={cs => {
+          registerCallsignHintRef.current = cs;
+        }}
         onSignedOut={handleSignedOut}
         onOpenCertificate={() => setIsCertOpen(true)}
       />

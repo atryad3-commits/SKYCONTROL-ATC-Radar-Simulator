@@ -32,7 +32,7 @@ interface ColorStop {
   b: number;
 }
 
-const COLOR_STOPS: ColorStop[] = [
+const COLOR_STOPS_DARK: ColorStop[] = [
   { alt: 12000, r: 0, g: 229, b: 255 },  // Electric Cyan
   { alt: 8500,  r: 0, g: 255, b: 102 },  // Emerald Green
   { alt: 5500,  r: 255, g: 209, b: 102 }, // Amber Gold
@@ -40,17 +40,29 @@ const COLOR_STOPS: ColorStop[] = [
   { alt: 500,   r: 255, g: 77, b: 109 },  // Coral Red
 ];
 
-export function getContinuousAltitudeRgbComponents(altitudeFt: number): { r: number; g: number; b: number } {
-  if (altitudeFt >= COLOR_STOPS[0].alt) {
-    return COLOR_STOPS[0];
+const COLOR_STOPS_LIGHT: ColorStop[] = [
+  { alt: 12000, r: 3, g: 105, b: 161 },   // Deep Sky Blue
+  { alt: 8500,  r: 4, g: 120, b: 87 },    // Deep Emerald Ink
+  { alt: 5500,  r: 161, g: 98, b: 7 },    // Burnished Amber Ink
+  { alt: 3000,  r: 194, g: 65, b: 12 },   // Deep Orange Ink
+  { alt: 500,   r: 190, g: 18, b: 60 },   // Crimson Ink
+];
+
+export function getContinuousAltitudeRgbComponents(
+  altitudeFt: number,
+  isLight: boolean = false
+): { r: number; g: number; b: number } {
+  const stops = isLight ? COLOR_STOPS_LIGHT : COLOR_STOPS_DARK;
+  if (altitudeFt >= stops[0].alt) {
+    return stops[0];
   }
-  if (altitudeFt <= COLOR_STOPS[COLOR_STOPS.length - 1].alt) {
-    return COLOR_STOPS[COLOR_STOPS.length - 1];
+  if (altitudeFt <= stops[stops.length - 1].alt) {
+    return stops[stops.length - 1];
   }
 
-  for (let i = 0; i < COLOR_STOPS.length - 1; i++) {
-    const s1 = COLOR_STOPS[i];
-    const s2 = COLOR_STOPS[i + 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const s1 = stops[i];
+    const s2 = stops[i + 1];
     if (altitudeFt <= s1.alt && altitudeFt >= s2.alt) {
       const factor = (altitudeFt - s2.alt) / (s1.alt - s2.alt);
       return {
@@ -61,15 +73,19 @@ export function getContinuousAltitudeRgbComponents(altitudeFt: number): { r: num
     }
   }
 
-  return COLOR_STOPS[0];
+  return stops[0];
 }
 
-export function getAltitudeColor(altitudeFt: number): string {
-  const { r, g, b } = getContinuousAltitudeRgbComponents(altitudeFt);
+export function getAltitudeColor(altitudeFt: number, isLight: boolean = false): string {
+  const { r, g, b } = getContinuousAltitudeRgbComponents(altitudeFt, isLight);
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-export function getAltitudeRgba(altitudeFt: number, alpha: number): string {
-  const { r, g, b } = getContinuousAltitudeRgbComponents(altitudeFt);
+export function getAltitudeRgba(
+  altitudeFt: number,
+  alpha: number,
+  isLight: boolean = false
+): string {
+  const { r, g, b } = getContinuousAltitudeRgbComponents(altitudeFt, isLight);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }

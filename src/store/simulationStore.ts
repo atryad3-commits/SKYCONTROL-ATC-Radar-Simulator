@@ -15,10 +15,15 @@ import {
   CustomScenarioConfig,
   MissionId,
   PreFlightSessionConfig,
+  RadarLayersConfig,
+  RadarThemeId,
   RadioMessage,
+  RadioQualityPresetKey,
   SimulationStats,
+  UserPreferencesData,
   WeatherCondition,
 } from '../types';
+import { DEFAULT_RADAR_THEME_ID, normalizeRadarThemeId } from '../utils/radarThemes';
 import {
   ALL_AIRPORT_PROFILES,
   getAirportProfile,
@@ -114,75 +119,32 @@ function resetCommsTimers() {
   lastWeatherBroadcastSimTime = 0;
 }
 
-const PER_AIRPORT_NAV_STORAGE_KEY = 'skycontrol_per_airport_nav_v1';
-
-function buildInitialPerAirportVisibility(): Record<string, AirportNavVisibility> {
+export function buildDefaultPerAirportVisibility(): Record<string, AirportNavVisibility> {
   const defaults: Record<string, AirportNavVisibility> = {};
   for (const prof of ALL_AIRPORT_PROFILES) {
     defaults[prof.airport.icao] = computeDefaultAirportVisibility(prof.airport);
   }
-
-  if (typeof window === 'undefined' || !window.localStorage) {
-    return defaults;
-  }
-
-  try {
-    const raw = window.localStorage.getItem(PER_AIRPORT_NAV_STORAGE_KEY);
-    if (!raw) return defaults;
-    const parsed = JSON.parse(raw) as Record<string, Partial<AirportNavVisibility>>;
-    const merged: Record<string, AirportNavVisibility> = { ...defaults };
-
-    for (const prof of ALL_AIRPORT_PROFILES) {
-      const icao = prof.airport.icao;
-      const saved = parsed[icao];
-      if (!saved) continue;
-      const validStars = new Set((prof.airport.approachRoutes || []).map(r => r.id));
-      const validSids = new Set((prof.airport.departureRoutes || []).map(r => r.id));
-      const validWps = new Set(prof.airport.waypoints.map(w => w.name));
-
-      merged[icao] = {
-        visibleStarIds: Array.isArray(saved.visibleStarIds)
-          ? saved.visibleStarIds.filter(id => validStars.has(id))
-          : defaults[icao].visibleStarIds,
-        visibleSidIds: Array.isArray(saved.visibleSidIds)
-          ? saved.visibleSidIds.filter(id => validSids.has(id))
-          : defaults[icao].visibleSidIds,
-        visibleWaypoints: Array.isArray(saved.visibleWaypoints)
-          ? saved.visibleWaypoints.filter(name => validWps.has(name))
-          : defaults[icao].visibleWaypoints,
-      };
-    }
-    return merged;
-  } catch {
-    return defaults;
-  }
+  return defaults;
 }
 
-function persistPerAirportVisibility(map: Record<string, AirportNavVisibility>): void {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-  try {
-    window.localStorage.setItem(PER_AIRPORT_NAV_STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    // Ignore storage quota errors
-  }
-}
+export type RadarLayers = RadarLayersConfig;
 
-export interface RadarLayers {
-  terrain: boolean;
-  rangeRings: boolean;
-  runways: boolean;
-  holdingStacks: boolean;
-  waypointLabels: boolean;
-  extendedCenterlines: boolean;
-  trails: boolean;
-  speedVectors: boolean;
-  radarSweep: boolean;
-  starCorridors: boolean;
-  sidCorridors: boolean;
-  procedureRestrictions: boolean;
-  tmaBoundary: boolean;
-  extendedTargetTags: boolean;
-}
+export const DEFAULT_RADAR_LAYERS: RadarLayersConfig = {
+  terrain: true,
+  rangeRings: true,
+  runways: true,
+  holdingStacks: true,
+  waypointLabels: true,
+  extendedCenterlines: true,
+  trails: true,
+  speedVectors: true,
+  radarSweep: true,
+  starCorridors: true,
+  sidCorridors: true,
+  procedureRestrictions: true,
+  tmaBoundary: true,
+  extendedTargetTags: true,
+};
 
 export interface SimulationStore {
   // Airport & Scenario Context
@@ -216,6 +178,8 @@ export interface SimulationStore {
   audioMuted: boolean;
   audioVolume: number;
   towerVoiceId: TowerVoiceId;
+  radioPreset: RadioQualityPresetKey;
+  radarTheme: RadarThemeId;
   radarLayers: RadarLayers;
   perAirportVisibility: Record<string, AirportNavVisibility>;
   hasCompletedStartupSetup: boolean;
@@ -269,7 +233,11 @@ export interface SimulationStore {
   setAudioMuted: (muted: boolean) => void;
   setAudioVolume: (vol: number) => void;
   setTowerVoice: (voiceId: TowerVoiceId) => void;
+  setRadioPreset: (preset: RadioQualityPresetKey) => void;
+  setRadarTheme: (theme: RadarThemeId) => void;
   syncGlobalAudioSettings: (settings: GlobalAudioSettings, applyPreset?: boolean) => void;
+  applyUserPreferences: (prefs: UserPreferencesData) => void;
+  resetForSignOut: () => void;
   toggleLayer: (layer: keyof RadarLayers) => void;
   setAllRadarLayers: (visible: boolean) => void;
   applyRadarDeclutter: (preset: 'full' | 'tactical' | 'minimal') => void;
@@ -562,23 +530,10 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   audioMuted: false,
   audioVolume: 0.8,
   towerVoiceId: radioAudio.getTowerVoiceId(),
-  radarLayers: {
-    terrain: true,
-    rangeRings: true,
-    runways: true,
-    holdingStacks: true,
-    waypointLabels: true,
-    extendedCenterlines: true,
-    trails: true,
-    speedVectors: true,
-    radarSweep: true,
-    starCorridors: true,
-    sidCorridors: true,
-    procedureRestrictions: true,
-    tmaBoundary: true,
-    extendedTargetTags: true,
-  },
-  perAirportVisibility: buildInitialPerAirportVisibility(),
+  radioPreset: 'normal_aviation',
+  radarTheme: DEFAULT_RADAR_THEME_ID,
+  radarLayers: { ...DEFAULT_RADAR_LAYERS },
+  perAirportVisibility: buildDefaultPerAirportVisibility(),
   hasCompletedStartupSetup: false,
   simulationEvents: [],
   activeTransmission: null,
@@ -1924,12 +1879,204 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     set({ towerVoiceId: voiceId });
   },
 
+  setRadioPreset: preset => {
+    radioAudio.setVhfPreset(preset);
+    set({ radioPreset: preset });
+  },
+
+  setRadarTheme: theme => {
+    set({ radarTheme: normalizeRadarThemeId(theme) });
+  },
+
   syncGlobalAudioSettings: (settings, applyPreset = false) => {
     radioAudio.applyGlobalAudioSettings(settings, { applyPreset });
     set({
       audioMuted: !settings.audioEnabled,
       audioVolume: settings.masterVolume,
       towerVoiceId: radioAudio.getTowerVoiceId(),
+      radioPreset: settings.defaultRadioPreset || 'normal_aviation',
+    });
+  },
+
+  applyUserPreferences: prefs => {
+    const resolved = resolveConfiguredAirport(
+      prefs.preferredAirportIcao,
+      prefs.preferredLandingRunwayId,
+      prefs.preferredDepartureRunwayId
+    );
+    radioAudio.clearQueue();
+    radioAudio.setAirportContext(resolved.airport.icao);
+    radioAudio.setMuted(Boolean(prefs.audioMuted));
+    radioAudio.setVolume(Math.max(0, Math.min(1, Number(prefs.audioVolume ?? 0.8))));
+    radioAudio.setTowerVoiceId((prefs.towerVoiceId || 'charon') as TowerVoiceId);
+    radioAudio.setVhfPreset(prefs.radioPreset || 'normal_aviation');
+
+    globalConflictTracker.clear();
+    resetCommsTimers();
+    globalOccupancyManager.configureAirport(
+      resolved.runwayGeometries,
+      resolved.profile.reciprocalPairs
+    );
+    globalRadarTracker.reset();
+
+    const freshFleet = createFleetForAirport(
+      resolved.airport,
+      resolved.runwayGeometries,
+      resolved.landingRunwayId,
+      resolved.departureRunwayId,
+      3,
+      1
+    );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
+    globalRadarTracker.seedInitialTracks(freshFleet, 0);
+
+    const defaultsMap = buildDefaultPerAirportVisibility();
+    const mergedVis: Record<string, AirportNavVisibility> = { ...defaultsMap };
+    if (prefs.perAirportVisibility) {
+      for (const prof of ALL_AIRPORT_PROFILES) {
+        const icao = prof.airport.icao;
+        if (prefs.perAirportVisibility[icao]) {
+          mergedVis[icao] = {
+            visibleStarIds: [...(prefs.perAirportVisibility[icao].visibleStarIds || [])],
+            visibleSidIds: [...(prefs.perAirportVisibility[icao].visibleSidIds || [])],
+            visibleWaypoints: [...(prefs.perAirportVisibility[icao].visibleWaypoints || [])],
+          };
+        }
+      }
+    }
+
+    set({
+      airportProfile: resolved.profile,
+      airport: resolved.airport,
+      activeRunwayGeometries: resolved.runwayGeometries,
+      activeLandingRunwayId: resolved.landingRunwayId,
+      activeDepartureRunwayId: resolved.departureRunwayId,
+      activeScenarioName: `Free Operations · ${resolved.airport.icao}`,
+      activeMission: IDLE_MISSION_STATE,
+      spawnIntervalSec: 45,
+      maxTraffic: 10,
+      heavyRatio: 0.35,
+      allowEmergencies: false,
+      emergencyTriggered: false,
+      aircraft: freshFleet,
+      selectedAircraftId: freshFleet[0]?.id || null,
+      weather: resolved.profile.defaultWeather,
+      isPaused: true,
+      hasCompletedStartupSetup: false,
+      simSpeed: Math.max(1, Math.min(5, Math.round(prefs.simSpeed || 1))),
+      audioMuted: Boolean(prefs.audioMuted),
+      audioVolume: Math.max(0, Math.min(1, Number(prefs.audioVolume ?? 0.8))),
+      towerVoiceId: radioAudio.getTowerVoiceId(),
+      radioPreset: prefs.radioPreset || 'normal_aviation',
+      radarTheme: normalizeRadarThemeId(prefs.radarTheme),
+      radarLayers: {
+        ...DEFAULT_RADAR_LAYERS,
+        ...(prefs.radarLayers || {}),
+      },
+      perAirportVisibility: mergedVis,
+      stats: {
+        landings: 0,
+        departures: 0,
+        goArounds: 0,
+        separationViolations: 0,
+        score: 100,
+        elapsedSeconds: 0,
+      },
+      conflicts: [],
+      simulationEvents: [],
+      radarTracks: globalRadarTracker.getTracks(),
+      antennaAzimuth: 0,
+      radarScanCount: 0,
+      radioMessages: [
+        {
+          id: `init_${Date.now()}`,
+          timestamp: getFormattedUTCTime(),
+          sender: 'PILOT',
+          callsign: freshFleet[0]?.callsign || 'BAW452',
+          text: `${resolved.airport.name} Director, ${freshFleet[0]?.callsign || 'BAW452'}${freshFleet[0]?.category === 'Heavy' ? ' Heavy' : ''}, passing ${formatReadableAlt(freshFleet[0]?.altitude || 8000)}, heading ${Math.round(freshFleet[0]?.heading || 270).toString().padStart(3, '0')}, inbound for vectors.`,
+          frequency: resolved.profile.vhfFrequency,
+        },
+      ],
+    });
+  },
+
+  resetForSignOut: () => {
+    const resolved = resolveConfiguredAirport('EGLL');
+    radioAudio.clearQueue();
+    radioAudio.setAirportContext(resolved.airport.icao);
+    radioAudio.setMuted(false);
+    radioAudio.setVolume(0.8);
+    radioAudio.setTowerVoiceId('charon');
+    radioAudio.setVhfPreset('normal_aviation');
+
+    globalConflictTracker.clear();
+    resetCommsTimers();
+    globalOccupancyManager.configureAirport(
+      resolved.runwayGeometries,
+      resolved.profile.reciprocalPairs
+    );
+    globalRadarTracker.reset();
+
+    const freshFleet = createFleetForAirport(
+      resolved.airport,
+      resolved.runwayGeometries,
+      resolved.landingRunwayId,
+      resolved.departureRunwayId,
+      3,
+      1
+    );
+    radioAudio.pruneActiveAircraft(freshFleet.map(a => a.id));
+    globalRadarTracker.seedInitialTracks(freshFleet, 0);
+
+    set({
+      airportProfile: resolved.profile,
+      airport: resolved.airport,
+      activeRunwayGeometries: resolved.runwayGeometries,
+      activeLandingRunwayId: resolved.landingRunwayId,
+      activeDepartureRunwayId: resolved.departureRunwayId,
+      activeScenarioName: 'Free Operations · EGLL',
+      activeMission: IDLE_MISSION_STATE,
+      spawnIntervalSec: 45,
+      maxTraffic: 10,
+      heavyRatio: 0.35,
+      allowEmergencies: false,
+      emergencyTriggered: false,
+      aircraft: freshFleet,
+      selectedAircraftId: freshFleet[0]?.id || null,
+      weather: resolved.profile.defaultWeather,
+      isPaused: true,
+      hasCompletedStartupSetup: false,
+      simSpeed: 1,
+      audioMuted: false,
+      audioVolume: 0.8,
+      towerVoiceId: 'charon',
+      radioPreset: 'normal_aviation',
+      radarTheme: DEFAULT_RADAR_THEME_ID,
+      radarLayers: { ...DEFAULT_RADAR_LAYERS },
+      perAirportVisibility: buildDefaultPerAirportVisibility(),
+      stats: {
+        landings: 0,
+        departures: 0,
+        goArounds: 0,
+        separationViolations: 0,
+        score: 100,
+        elapsedSeconds: 0,
+      },
+      conflicts: [],
+      simulationEvents: [],
+      radarTracks: globalRadarTracker.getTracks(),
+      antennaAzimuth: 0,
+      radarScanCount: 0,
+      radioMessages: [
+        {
+          id: `init_${Date.now()}`,
+          timestamp: getFormattedUTCTime(),
+          sender: 'PILOT',
+          callsign: freshFleet[0]?.callsign || 'BAW452',
+          text: `${resolved.airport.name} Director, ${freshFleet[0]?.callsign || 'BAW452'}, ready for session setup.`,
+          frequency: resolved.profile.vhfFrequency,
+        },
+      ],
     });
   },
 
@@ -2039,7 +2186,6 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           visibleStarIds: nextStarIds,
         },
       };
-      persistPerAirportVisibility(nextMap);
       return { perAirportVisibility: nextMap };
     });
   },
@@ -2059,7 +2205,6 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           visibleSidIds: nextSidIds,
         },
       };
-      persistPerAirportVisibility(nextMap);
       return { perAirportVisibility: nextMap };
     });
   },
@@ -2079,7 +2224,6 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
           visibleWaypoints: nextWaypoints,
         },
       };
-      persistPerAirportVisibility(nextMap);
       return { perAirportVisibility: nextMap };
     });
   },
@@ -2094,7 +2238,6 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         ...state.perAirportVisibility,
         [icao]: nextVis,
       };
-      persistPerAirportVisibility(nextMap);
       return { perAirportVisibility: nextMap };
     });
   },
@@ -2109,19 +2252,16 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         ...state.perAirportVisibility,
         [icao]: matched,
       };
-      persistPerAirportVisibility(nextMap);
       return { perAirportVisibility: nextMap };
     });
   },
 
   setPerAirportVisibilityMap: nextMap => {
-    persistPerAirportVisibility(nextMap);
     set({ perAirportVisibility: nextMap });
   },
 
   applyPreFlightSession: (config, customScenario) => {
     if (config.perAirportVisibility) {
-      persistPerAirportVisibility(config.perAirportVisibility);
       set({ perAirportVisibility: config.perAirportVisibility });
     }
 
@@ -2138,6 +2278,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
         audioMuted: config.audioMuted,
         audioVolume: config.audioVolume,
         towerVoiceId: radioAudio.getTowerVoiceId(),
+        radioPreset: config.radioPreset,
         simSpeed: config.simSpeed,
         hasCompletedStartupSetup: true,
         isPaused: false,
@@ -2213,6 +2354,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       audioMuted: config.audioMuted,
       audioVolume: config.audioVolume,
       towerVoiceId: radioAudio.getTowerVoiceId(),
+      radioPreset: config.radioPreset,
       isPaused: false,
       hasCompletedStartupSetup: true,
       simSpeed: config.simSpeed || 1,
